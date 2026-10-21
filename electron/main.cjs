@@ -69,6 +69,7 @@ const DEFAULT_CONFIG = {
   watchlist: DEFAULT_WATCHLIST,
   period: 'minute',
   interval: 3000,
+  probeIntervalMs: 4000,
   alert: { enabled: true, time: '14:30' },
   // 收盘后自动退出：默认 15:05（留几分钟让收盘数据落定）
   autoExit: { enabled: true, time: '15:05' },
@@ -76,6 +77,7 @@ const DEFAULT_CONFIG = {
   autoStart: { enabled: false, time: '09:25' },
   textMode: 'auto',
   backdrop: false,
+  backdropOpacity: 40,
   showName: true,
   baseline: true,
   alwaysOnTop: true,
@@ -950,8 +952,7 @@ function openSettings() {
 
 const LUMA_TO_DARK = 0.62;   // 背景亮到这个程度 → 换暗色文字
 const LUMA_TO_LIGHT = 0.42;  // 背景暗到这个程度 → 换亮色文字
-const PROBE_INTERVAL = 2000;  // 轮询间隔：背后内容变了（切应用/壁纸/视频）最多 2 秒跟上
-const DRAG_PROBE_INTERVAL = 400; // 拖动窗口时加密采样，颜色跟着走
+const PROBE_INTERVAL_DEFAULT = 4000;  // 默认轮询间隔（4 秒），可在设置里调
 const SCREEN_RETRY_EVERY = 8;  // 截屏失败后隔这么多个周期重试一次（约 30 秒）
 
 let autoTextMode = 'light';
@@ -1110,6 +1111,8 @@ function applyLuma(luma, useWallpaper) {
 
 async function probeBackground(force) {
   if (probeBusy || !win || win.isDestroyed()) return;
+  // 拖动期间跳过采样：desktopCapturer 会抢渲染线程导致 setPosition 卡顿
+  if (dragBase) return;
   // 手动指定了配色就不用白费力气截屏
   if (!force && config.textMode !== 'auto') return;
 
@@ -1123,24 +1126,7 @@ async function probeBackground(force) {
     // 之后窗口挪到任何界面上文字都不再跟背景变——用户看到的就是"不自动切换了"。
     const tryScreen = probeFails < 3 || probeTick % SCREEN_RETRY_EVERY === 0;
     if (tryScreen) {
-      // 开了衬底时，窗口自己的半透明底色会被截屏算进去，和当前文字模式形成自反馈，
-      // 导致亮暗切不过去。截屏前临时去掉衬底，截完立刻恢复，采样到的就是窗口背后的真实内容。
-      let restoreBackdrop = false;
-      if (config.backdrop && win && !win.isDestroyed()) {
-        try {
-          await win.webContents.executeJavaScript("document.body.classList.remove('backdrop'); true");
-          restoreBackdrop = true;
-          await new Promise(function (r) { setTimeout(r, 60); });
-        } catch (e) {}
-      }
       try { small = await grabWindowRegion(); } catch (e) { small = null; }
-      if (restoreBackdrop && win && !win.isDestroyed()) {
-        try {
-          await win.webContents.executeJavaScript(
-            "document.body.classList.toggle('backdrop', " + (config.backdrop ? 'true' : 'false') + "); true"
-          );
-        } catch (e) {}
-      }
       if (small) {
         if (probeFails >= 3) {
           logLine('[bg]', '实时截屏已恢复（之前是壁纸兜底，共失败 ' + probeFails + ' 次）');
@@ -1154,7 +1140,19 @@ async function probeBackground(force) {
       small = grabWallpaperRegion();
       useWallpaper = true;
     }
-    const luma = medianLuma(small);
+    let luma = medianLuma(small);
+    // 开了衬底时，截图像素混了半透明底色，反推底下真实亮度，避免自反馈切不过去。
+    // 深色衬底 ≈ luma 0.04；浅色衬底 = luma 1.0；不透明度由用户设置控制（默认 0.4）
+    if (luma != null && config.backdrop && !useWallpaper) {
+      const alpha = Math.max(0, Math.min(0.95, (config.backdropOpacity || 40) / 100));
+      if (alpha > 0.02) {
+        if (autoTextMode === 'light') {
+          luma = (luma - alpha * 0.04) / (1 - alpha);
+        } else {
+          luma = (luma - alpha * 1.0) / (1 - alpha);
+        }
+      }
+    }
     if (luma != null) applyLuma(luma, useWallpaper);
     if (process.env.TICKER_DEBUG_BG) {
       console.log('[bg] luma=' + (luma == null ? 'null' : luma.toFixed(3)) + ' mode=' + autoTextMode + ' fails=' + probeFails);
@@ -1168,7 +1166,8 @@ async function probeBackground(force) {
 
 function startBackgroundProbe() {
   if (probeTimer) clearInterval(probeTimer);
-  probeTimer = setInterval(function () { probeBackground(false); }, PROBE_INTERVAL);
+  const ms = Math.max(1000, Math.min(15000, config.probeIntervalMs || PROBE_INTERVAL_DEFAULT));
+  probeTimer = setInterval(function () { probeBackground(false); }, ms);
   setTimeout(function () { probeBackground(false); }, 1500);
 }
 
@@ -1271,9 +1270,7 @@ ipcMain.on('drag-start', function () {
     const p = screen.getCursorScreenPoint();
     win.setPosition(p.x - dragBase.dx, p.y - dragBase.dy);
   }, 16);
-  // 拖动时加密采样：窗口从亮背景滑到暗背景，颜色跟着即时切
-  if (dragProbeTimer) clearInterval(dragProbeTimer);
-  dragProbeTimer = setInterval(function () { probeBackground(true); }, DRAG_PROBE_INTERVAL);
+  // 拖动期间不暂停轮询，但 probeBackground 会跳过采样，松手后下一周期自然恢复
 });
 
 ipcMain.on('drag-end', function () {
@@ -1626,6 +1623,14 @@ ipcMain.handle('settings-save', async function (e, patch) {
   if (!isFinite(width)) width = config.width;
   width = Math.max(220, Math.min(640, width));
 
+  let backdropOpacity = parseInt(patch.backdropOpacity, 10);
+  if (!isFinite(backdropOpacity)) backdropOpacity = config.backdropOpacity;
+  backdropOpacity = Math.max(0, Math.min(95, backdropOpacity));
+
+  let probeIntervalMs = parseInt(patch.probeIntervalMs, 10);
+  if (!isFinite(probeIntervalMs)) probeIntervalMs = config.probeIntervalMs;
+  probeIntervalMs = Math.max(1000, Math.min(15000, probeIntervalMs));
+
   const alertCfg = {
     enabled: !(patch.alert && patch.alert.enabled === false),
     time: (patch.alert && /^\d{2}:\d{2}$/.test(patch.alert.time)) ? patch.alert.time : config.alert.time
@@ -1648,6 +1653,8 @@ ipcMain.handle('settings-save', async function (e, patch) {
     interval: interval,
     textMode: 'auto',
     backdrop: !!patch.backdrop,
+    backdropOpacity: backdropOpacity,
+    probeIntervalMs: probeIntervalMs,
     showName: patch.showName !== false,
     baseline: patch.baseline !== false,
     alwaysOnTop: !!patch.alwaysOnTop,
@@ -1657,6 +1664,9 @@ ipcMain.handle('settings-save', async function (e, patch) {
     autoExit: autoExitCfg,
     autoStart: autoStartCfg
   }, true);
+
+  // 轮询间隔改了，重启定时器让新值立即生效
+  startBackgroundProbe();
 
   // 计划任务跟着保存动作同步：开了就装/更新，关了就把任务删掉
   let taskMsg = '';

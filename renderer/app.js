@@ -188,6 +188,7 @@
     var mode = s.effectiveTextMode || s.textMode;
     document.body.setAttribute('data-text', mode === 'dark' ? 'dark' : 'light');
     document.body.classList.toggle('backdrop', !!s.backdrop);
+    document.body.style.setProperty('--bd-op', ((s.backdropOpacity != null ? s.backdropOpacity : 40) / 100).toFixed(3));
     document.body.classList.toggle('noname', s.showName === false);
     showBaseline = s.baseline !== false;
     if (s.period) currentPeriod = s.period;

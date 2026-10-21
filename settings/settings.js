@@ -262,6 +262,8 @@
       interval: parseInt($('interval').value, 10),
       textMode: 'auto',
       backdrop: $('backdrop').checked,
+      backdropOpacity: parseInt($('backdropOpacity').value, 10),
+      probeIntervalMs: parseInt($('probeIntervalSec').value, 10) * 1000,
       showName: $('showName').checked,
       baseline: $('baseline').checked,
       alwaysOnTop: $('alwaysOnTop').checked,
@@ -324,6 +326,12 @@
     sel.value = v;
 
     $('backdrop').checked = !!d.backdrop;
+    $('backdropOpacity').value = d.backdropOpacity != null ? d.backdropOpacity : 40;
+    $('backdropOpacity-val').textContent = $('backdropOpacity').value;
+    $('backdropOpacity').disabled = !$('backdrop').checked;
+    const pis = Math.round((d.probeIntervalMs != null ? d.probeIntervalMs : 4000) / 1000);
+    $('probeIntervalSec').value = pis;
+    $('probeIntervalSec-val').textContent = pis;
     $('showName').checked = d.showName !== false;
     $('baseline').checked = d.baseline !== false;
     $('alwaysOnTop').checked = !!d.alwaysOnTop;
@@ -402,6 +410,19 @@
     $('width-val').textContent = this.value;
     // 实时预览浮窗宽度；设置窗口关闭时主进程会按 config.width 统一还原
     window.ticker.previewWidth(parseInt(this.value, 10));
+  });
+  $('backdropOpacity').addEventListener('input', function () {
+    $('backdropOpacity-val').textContent = this.value;
+    // 衬底浓度实时生效：通过 save-config 即时应用到浮窗，同时落盘
+    window.ticker.save({ backdrop: $('backdrop').checked, backdropOpacity: parseInt(this.value, 10) });
+  });
+  $('probeIntervalSec').addEventListener('input', function () {
+    $('probeIntervalSec-val').textContent = this.value;
+    window.ticker.save({ probeIntervalMs: parseInt(this.value, 10) * 1000 });
+  });
+  $('backdrop').addEventListener('change', function () {
+    $('backdropOpacity').disabled = !this.checked;
+    window.ticker.save({ backdrop: this.checked });
   });
   $('test-alert').addEventListener('click', function () {
     window.ticker.testAlert();

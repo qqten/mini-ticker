@@ -44,11 +44,11 @@ body[data-text="dark"] {
 }
 
 body.backdrop {
-  background: rgba(8, 12, 18, .34);
+  background: rgba(8, 12, 18, var(--bd-op, 0.34));
 }
 
 body[data-text="dark"].backdrop {
-  background: rgba(255, 255, 255, .48);
+  background: rgba(255, 255, 255, var(--bd-op, 0.48));
 }
 
 /* 当前周期标识：右上角一行小字，不占按钮、不抢视线 */

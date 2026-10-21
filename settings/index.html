@@ -74,6 +74,17 @@
         <label class="check"><input type="checkbox" id="showName" /><span>显示名称</span></label>
         <label class="check"><input type="checkbox" id="baseline" /><span>显示基准线</span></label>
       </div>
+      <div class="field">
+        <span class="fl">衬底浓度</span>
+        <input type="range" id="backdropOpacity" min="10" max="90" step="5" />
+        <b id="backdropOpacity-val">40</b>
+      </div>
+      <div class="field">
+        <span class="fl">亮暗采样间隔</span>
+        <input type="range" id="probeIntervalSec" min="1" max="10" step="1" />
+        <b id="probeIntervalSec-val">4</b>
+      </div>
+      <p class="hint">单位：秒。值越小切换越灵敏，但更耗资源；拖动浮窗时自动暂停采样。</p>
     </section>
 
     <section>
