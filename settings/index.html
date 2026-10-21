@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:;" />
+  <title>盯盘设置</title>
+  <link rel="stylesheet" href="settings.css" />
+</head>
+<body>
+  <div class="wrap">
+
+    <section>
+      <h2>标的 <span class="count" id="count"></span></h2>
+      <div class="add-row">
+        <input id="code-input" type="text" spellcheck="false" autocomplete="off"
+               placeholder="输入名称 / 拼音 / 代码，如 茅台、gzmt、贵州茅台" />
+        <button id="add-btn" class="primary">添加</button>
+        <ul id="suggest" class="suggest"></ul>
+      </div>
+      <div id="msg" class="msg"></div>
+      <ul id="symbol-list" class="list"></ul>
+      <p class="hint">输入中文名、拼音首字母或代码都能搜到，回车选第一条，↑↓ 挑，点一下直接加<br />勾选 = 在浮窗里显示，列表顺序就是显示顺序</p>
+    </section>
+
+    <section>
+      <h2>默认周期 / 刷新间隔</h2>
+      <div class="inline-row">
+        <div class="seg">
+          <label><input type="radio" name="period" value="minute" /><span>分时</span></label>
+          <label><input type="radio" name="period" value="day" /><span>日线</span></label>
+          <label><input type="radio" name="period" value="month" /><span>月线</span></label>
+          <label><input type="radio" name="period" value="year" /><span>年线</span></label>
+        </div>
+        <select id="interval">
+          <option value="1000">1 秒</option>
+          <option value="2000">2 秒</option>
+          <option value="3000">3 秒</option>
+          <option value="5000">5 秒</option>
+          <option value="10000">10 秒</option>
+          <option value="15000">15 秒</option>
+          <option value="30000">30 秒</option>
+          <option value="60000">60 秒</option>
+        </select>
+      </div>
+    </section>
+
+    <section>
+      <h2>交易时段</h2>
+      <div class="field">
+        <label class="check"><input type="checkbox" id="alertOn" /><span>尾盘提醒</span></label>
+        <input type="time" id="alertTime" value="14:30" />
+        <span class="note">15:00 申赎截止</span>
+        <button id="test-alert" class="ghost tiny">测试</button>
+      </div>
+      <div class="field">
+        <label class="check"><input type="checkbox" id="autoExitOn" /><span>收盘自动退出</span></label>
+        <input type="time" id="autoExitTime" value="15:05" />
+        <span class="note">留几分钟落定收盘数据</span>
+      </div>
+      <p class="hint" id="exit-hint"></p>
+      <div class="field">
+        <label class="check"><input type="checkbox" id="autoStartOn" /><span>开盘自动启动</span></label>
+        <input type="time" id="autoStartTime" value="09:25" />
+        <span class="note">工作日，写入计划任务</span>
+      </div>
+      <p class="hint" id="task-hint"></p>
+    </section>
+
+    <section>
+      <h2>外观</h2>
+      <p class="hint">文字颜色实时跟随窗口背后的画面：背景亮自动转暗色字，背景暗自动转亮色字。</p>
+      <div class="checks">
+        <label class="check"><input type="checkbox" id="backdrop" /><span>加一层淡衬底</span></label>
+        <label class="check"><input type="checkbox" id="showName" /><span>显示名称</span></label>
+        <label class="check"><input type="checkbox" id="baseline" /><span>显示基准线</span></label>
+      </div>
+    </section>
+
+    <section>
+      <h2>窗口</h2>
+      <div class="checks">
+        <label class="check"><input type="checkbox" id="alwaysOnTop" /><span>始终置顶</span></label>
+        <label class="check"><input type="checkbox" id="locked" /><span>锁定位置（禁止拖动）</span></label>
+      </div>
+      <div class="field">
+        <span class="fl">宽度</span>
+        <input type="range" id="width" min="220" max="640" step="10" />
+        <b id="width-val">320</b>
+      </div>
+      <p class="hint">也可以直接把鼠标移到浮窗左右边缘拖拽，松手即记住宽度。</p>
+    </section>
+
+  </div>
+
+  <footer>
+    <span class="foot-msg" id="foot-msg"></span>
+    <button id="cancel" class="ghost">关闭</button>
+    <button id="save" class="primary">保存并应用</button>
+  </footer>
+
+  <script src="settings.js"></script>
+</body>
+</html>

@@ -1,0 +1,138 @@
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body {
+  /* alpha 给到 1/255：肉眼依然是全透明的，但 Windows 对 alpha=0 的像素不做命中测试，
+     会让右键/拖动直接漏到桌面上。只要 alpha>0，整块窗口矩形就能接收鼠标事件。 */
+  background: rgba(0, 0, 0, 0.004);
+  overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: default;
+  font-family: "HarmonyOS Sans SC", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+}
+
+body {
+  border-radius: 10px;
+}
+
+/* ---- 配色：中国市场习惯，涨红跌绿 ---- */
+:root {
+  --up: #ff3b46;
+  --down: #0fb87a;
+  --flat: #98a2b3;
+  --text: #f4f7fb;
+  --sub: #b6c0ce;
+  --shadow: 0 1px 3px rgba(0, 0, 0, .9), 0 0 1px rgba(0, 0, 0, .7);
+}
+
+body[data-text="dark"] {
+  --text: #10151c;
+  --sub: #4a5563;
+  --up: #e01f2b;
+  --down: #07996a;
+  --flat: #6b7683;
+  --shadow: 0 1px 3px rgba(255, 255, 255, .95), 0 0 1px rgba(255, 255, 255, .8);
+}
+
+/* 自动配色切换时淡入，避免背景变化瞬间文字生硬跳色 */
+.name, .price, .pct, .spark polyline, .spark .baseline {
+  transition: color .38s ease, stroke .38s ease, filter .38s ease;
+}
+
+body.backdrop {
+  background: rgba(8, 12, 18, .34);
+}
+
+body[data-text="dark"].backdrop {
+  background: rgba(255, 255, 255, .48);
+}
+
+#app {
+  padding: 6px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  width: 100%;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  height: 32px;
+  gap: 6px;
+  transition: opacity .2s ease;
+}
+
+.row.stale { opacity: .45; }
+
+body.loading .row {
+  opacity: .3;
+  transition: opacity .15s ease;
+}
+
+.spark {
+  flex: 0 0 auto;
+  width: 100px;
+  height: 22px;
+  overflow: visible;
+}
+
+.spark polyline {
+  fill: none;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+  filter: drop-shadow(0 0 2px rgba(0, 0, 0, .55));
+}
+
+body[data-text="dark"] .spark polyline {
+  filter: drop-shadow(0 0 2px rgba(255, 255, 255, .8));
+}
+
+.spark .baseline {
+  stroke: var(--sub);
+  stroke-width: 1;
+  stroke-dasharray: 2 3;
+  opacity: .45;
+  vector-effect: non-scaling-stroke;
+}
+
+.name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 11px;
+  letter-spacing: .2px;
+  color: var(--sub);
+  text-shadow: var(--shadow);
+}
+
+.price {
+  flex: 0 0 auto;
+  font-size: 14px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+  letter-spacing: .2px;
+  text-align: right;
+  text-shadow: var(--shadow);
+}
+
+.pct {
+  flex: 0 0 52px;
+  font-size: 11.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+  text-align: right;
+  text-shadow: var(--shadow);
+}
+
+.up   { color: var(--up); }
+.down { color: var(--down); }
+.flat { color: var(--flat); }
+
+body.noname .name { display: none; }

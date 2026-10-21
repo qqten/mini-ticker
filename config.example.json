@@ -1,0 +1,46 @@
+{
+  "symbols": [
+    "sh000001",
+    "sz399001",
+    "sz399006",
+    "sh000688"
+  ],
+  "watchlist": [
+    "sh000001",
+    "sz399001",
+    "sz399006",
+    "sh000688",
+    "sh000300",
+    "sh000016",
+    "sh000905",
+    "sh000852",
+    "bj899050",
+    "hkHSI",
+    "hkHSTECH",
+    "usDJI",
+    "usIXIC",
+    "usINX"
+  ],
+  "period": "minute",
+  "interval": 3000,
+  "alert": {
+    "enabled": true,
+    "time": "14:45"
+  },
+  "autoExit": {
+    "enabled": true,
+    "time": "15:05"
+  },
+  "autoStart": {
+    "enabled": false,
+    "time": "09:25"
+  },
+  "textMode": "auto",
+  "backdrop": false,
+  "showName": true,
+  "baseline": true,
+  "alwaysOnTop": true,
+  "locked": false,
+  "width": 320,
+  "pos": null
+}
