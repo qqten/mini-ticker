@@ -12,6 +12,7 @@ contextBridge.exposeInMainWorld('ticker', {
   setPeriod: function (p) { ipcRenderer.send('set-period', p); },
   save: function (patch) { ipcRenderer.send('save-config', patch); },
   onForceRefresh: function (fn) { ipcRenderer.on('force-refresh', fn); },
+  onRefitHeight: function (fn) { ipcRenderer.on('refit-height', function () { fn(); }); },
   onStateChanged: function (fn) { ipcRenderer.on('state-changed', function (e, cfg) { fn(cfg); }); },
 
   // 设置面板

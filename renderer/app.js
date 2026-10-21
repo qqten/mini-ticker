@@ -224,6 +224,12 @@
 
   window.ticker.onForceRefresh(function () { refresh(); });
 
+  // 菜单里选「高度跟随内容」后重新量一次，把窗口收回内容高度
+  window.ticker.onRefitHeight(function () {
+    lastHeight = 0;
+    syncHeight();
+  });
+
   // 周期/标的变了：整窗淡一下再拉新数据，避免新旧折线跳变
   window.ticker.onStateChanged(function (cfg) {
     applyState(cfg);

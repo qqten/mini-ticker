@@ -42,5 +42,6 @@
   "alwaysOnTop": true,
   "locked": false,
   "width": 320,
+  "height": 0,
   "pos": null
 }

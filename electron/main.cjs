@@ -81,6 +81,8 @@ const DEFAULT_CONFIG = {
   alwaysOnTop: true,
   locked: false,
   width: 320,
+  // 高度：0 表示跟随内容自动撑开，>0 表示用户手动拖过、以这个值为准
+  height: 0,
   pos: null
 };
 
@@ -97,6 +99,10 @@ let seriesCache = { at: 0, map: {}, period: null };
 
 let config = loadConfig();
 let win = null;
+// 渲染层最近一次算出的"内容自然高度"，用来区分用户手动拖高还是内容撑开
+let autoFitHeight = 0;
+// 最近一次拖动调尺寸的时间戳：拖动期间不允许内容高度插手，否则会互相抢
+let resizingAt = 0;
 let settingsWin = null;
 let dragTimer = null;
 let dragBase = null;
@@ -509,7 +515,7 @@ async function fetchAll() {
 function createWindow() {
   const opts = {
     width: config.width || 320,
-    height: 200,
+    height: config.height > 0 ? config.height : 200,
     frame: false,
     transparent: true,
     // alpha 给到 1（而不是 0）：Windows 对全透明像素会跳过命中测试，导致右键/拖动漏到桌面
@@ -519,6 +525,7 @@ function createWindow() {
     minWidth: 220,
     maxWidth: 640,
     minHeight: 56,
+    maxHeight: 900,
     maximizable: false,
     minimizable: false,
     fullscreenable: false,
@@ -625,24 +632,25 @@ function createWindow() {
     if (!win) return;
     const pos = win.getPosition();
     config.pos = { x: pos[0], y: pos[1] };
+    // 拖到别处后背景可能完全变了，松手就重采一次，不用干等下一个 4 秒周期
+    if (probeMoveTimer) clearTimeout(probeMoveTimer);
+    probeMoveTimer = setTimeout(function () { probeBackground(true); }, 260);
   });
 
-  // 拖边缘改宽度：高度由标的数量撑开，只允许水平方向变动
-  win.on('will-resize', function (e, b) {
-    if (!win || win.isDestroyed()) return;
-    if (b.height !== win.getSize()[1]) e.preventDefault();
-    if (b.width < 220 || b.width > 640) e.preventDefault();
-  });
-
+  // 四边都能拖：宽 220-640、高 56-900，min/max 已在窗口选项里限死。
+  // 手动调过高度后就以手动值为准，不再被内容自动撑开；
+  // 如果拖回去正好等于内容高度，就自动恢复成"跟随内容"。
   let sizeSaveTimer = null;
   win.on('resize', function () {
     if (!win || win.isDestroyed()) return;
-    const w = win.getSize()[0];
-    if (w === config.width) return;
+    resizingAt = Date.now();
     if (sizeSaveTimer) clearTimeout(sizeSaveTimer);
     sizeSaveTimer = setTimeout(function () {
       if (!win || win.isDestroyed()) return;
-      config.width = Math.max(220, Math.min(640, win.getSize()[0]));
+      const size = win.getSize();
+      const h = size[1];
+      config.width = Math.max(220, Math.min(640, size[0]));
+      config.height = Math.abs(h - autoFitHeight) > 4 ? h : 0;
       saveConfig();
       broadcast();
     }, 300);
@@ -690,12 +698,15 @@ function openSettings() {
 const LUMA_TO_DARK = 0.62;   // 背景亮到这个程度 → 换暗色文字
 const LUMA_TO_LIGHT = 0.42;  // 背景暗到这个程度 → 换亮色文字
 const PROBE_INTERVAL = 4000;
+const SCREEN_RETRY_EVERY = 8;  // 截屏失败后隔这么多个周期重试一次（约 30 秒）
 
 let autoTextMode = 'light';
 let autoSettled = false;   // 是否已完成首次判定（首次直接用 0.5 分界，之后才走迟滞）
 let probeTimer = null;
 let probeBusy = false;
 let probeFails = 0;
+let probeTick = 0;
+let probeMoveTimer = null;
 
 function effectiveTextMode() {
   if (config.textMode !== 'auto') return config.textMode === 'dark' ? 'dark' : 'light';
@@ -718,6 +729,22 @@ function medianLuma(img) {
   if (!vals.length) return null;
   vals.sort(function (a, b) { return a - b; });
   return vals[vals.length >> 1];
+}
+
+// 锁屏 / 远程桌面 / 部分显卡驱动下，desktopCapturer 会"成功"返回一张纯黑图，
+// 既不报错也没缩略图缺失。这时亮度恒为 0，文字会永远停在亮色，
+// 用户看到的就是"不再跟着背景切换了"。这里识别出来当作失败处理。
+function isBlankShot(img) {
+  if (!img || img.isEmpty()) return true;
+  const buf = img.toBitmap();
+  if (!buf || buf.length < 4) return true;
+  let sum = 0;
+  let n = 0;
+  for (let i = 0; i + 3 < buf.length; i += 4) {
+    sum += buf[i] + buf[i + 1] + buf[i + 2];
+    n++;
+  }
+  return n === 0 || sum / (n * 765) < 0.02;
 }
 
 // 截当前屏幕，裁出窗口所在的矩形
@@ -761,8 +788,10 @@ async function grabWindowRegion() {
   const cw = Math.max(1, Math.min(sz.width - cx, w));
   const ch = Math.max(1, Math.min(sz.height - cy, h));
 
-  return img.crop({ x: cx, y: cy, width: cw, height: ch })
+  const cropped = img.crop({ x: cx, y: cy, width: cw, height: ch })
     .resize({ width: 30, height: 16, quality: 'good' });
+  if (isBlankShot(cropped)) return null;
+  return cropped;
 }
 
 // 截屏不可用时（受限环境）退回读系统壁纸缓存
@@ -794,14 +823,16 @@ function grabWallpaperRegion() {
     const cw = Math.max(1, Math.min(sz.width - cx, w));
     const ch = Math.max(1, Math.min(sz.height - cy, h));
 
-    return img.crop({ x: cx, y: cy, width: cw, height: ch })
+    const cropped = img.crop({ x: cx, y: cy, width: cw, height: ch })
       .resize({ width: 30, height: 16, quality: 'good' });
+    if (isBlankShot(cropped)) return null;
+    return cropped;
   } catch (e) {
     return null;
   }
 }
 
-function applyLuma(luma) {
+function applyLuma(luma, useWallpaper) {
   let next;
   if (!autoSettled) {
     // 首次判定没有历史状态可参考，直接按中点分界，避免灰底两边都不上不下
@@ -815,6 +846,8 @@ function applyLuma(luma) {
   }
   if (next === autoTextMode) return;
   autoTextMode = next;
+  logLine('[bg]', '文字切换为' + (next === 'dark' ? '暗色' : '亮色') +
+    '（背景亮度 ' + luma.toFixed(2) + (useWallpaper ? '，采样来源=壁纸兜底' : '') + '）');
   if (config.textMode === 'auto') broadcast();
 }
 
@@ -824,15 +857,31 @@ async function probeBackground(force) {
   if (!force && config.textMode !== 'auto') return;
 
   probeBusy = true;
+  probeTick++;
+  let useWallpaper = false;
   try {
     let small = null;
-    if (probeFails < 3) {
+    // 连续失败 3 次先退回壁纸兜底，但每 SCREEN_RETRY_EVERY 个周期重试一次截屏。
+    // 否则启动瞬间若是锁屏 / 远程桌面 / 截屏受限，一次失败就会钉死成壁纸模式，
+    // 之后窗口挪到任何界面上文字都不再跟背景变——用户看到的就是"不自动切换了"。
+    const tryScreen = probeFails < 3 || probeTick % SCREEN_RETRY_EVERY === 0;
+    if (tryScreen) {
       try { small = await grabWindowRegion(); } catch (e) { small = null; }
-      if (!small) probeFails++;
+      if (small) {
+        if (probeFails >= 3) {
+          logLine('[bg]', '实时截屏已恢复（之前是壁纸兜底，共失败 ' + probeFails + ' 次）');
+        }
+        probeFails = 0;
+      } else {
+        probeFails++;
+      }
     }
-    if (!small) small = grabWallpaperRegion();
+    if (!small) {
+      small = grabWallpaperRegion();
+      useWallpaper = true;
+    }
     const luma = medianLuma(small);
-    if (luma != null) applyLuma(luma);
+    if (luma != null) applyLuma(luma, useWallpaper);
     if (process.env.TICKER_DEBUG_BG) {
       console.log('[bg] luma=' + (luma == null ? 'null' : luma.toFixed(3)) + ' mode=' + autoTextMode + ' fails=' + probeFails);
     }
@@ -913,6 +962,9 @@ ipcMain.handle('get-quotes', async function () {
 ipcMain.on('set-height', function (e, h) {
   if (!win || !isFinite(h)) return;
   const height = Math.max(24, Math.round(h));
+  autoFitHeight = height;
+  // 用户手动拖过高度，或者正在拖，都别按内容改回去
+  if (config.height > 0 || Date.now() - resizingAt < 600) return;
   if (win.getSize()[1] === height) return;
   const pos = win.getPosition();
   win.setBounds({ x: pos[0], y: pos[1], width: config.width || 320, height: height });
@@ -1359,6 +1411,18 @@ ipcMain.on('open-menu', function () {
       })
     },
     { label: '立即刷新', click: function () { win.webContents.send('force-refresh'); } },
+    {
+      label: '高度跟随内容',
+      type: 'checkbox',
+      checked: !(config.height > 0),
+      click: function () {
+        config.height = 0;
+        resizingAt = 0;
+        saveConfig();
+        // 让渲染层重新量一次内容高度
+        if (win && !win.isDestroyed()) win.webContents.send('refit-height');
+      }
+    },
     { type: 'separator' },
     { label: '退出', click: function () { app.quit(); } }
   ]);
