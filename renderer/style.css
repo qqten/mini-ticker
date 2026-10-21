@@ -13,6 +13,10 @@ html, body {
 
 body {
   border-radius: 10px;
+  /* 竖向 flex：head 固定高度，剩下全给 #app，行再按剩余高度均分 */
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
 }
 
 /* ---- 配色：中国市场习惯，涨红跌绿 ---- */
@@ -47,18 +51,41 @@ body[data-text="dark"].backdrop {
   background: rgba(255, 255, 255, .48);
 }
 
+/* 当前周期标识：右上角一行小字，不占按钮、不抢视线 */
+#head {
+  display: flex;
+  justify-content: flex-end;
+  padding: 3px 9px 0;
+  height: 15px;
+  flex: 0 0 auto;
+}
+
+#period-label {
+  font-size: 10px;
+  line-height: 12px;
+  letter-spacing: .08em;
+  color: var(--sub);
+  opacity: .8;
+  text-shadow: var(--shadow);
+  transition: color .38s ease;
+}
+
 #app {
   padding: 6px 8px;
   display: flex;
   flex-direction: column;
   gap: 0;
   width: 100%;
+  /* 占满 head 之外的全部高度，行按数量均分，窗口拉高时折线也跟着长高 */
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 .row {
   display: flex;
   align-items: center;
-  height: 32px;
+  flex: 1 1 0;
+  min-height: 32px;
   gap: 6px;
   transition: opacity .2s ease;
 }
@@ -73,7 +100,10 @@ body.loading .row {
 .spark {
   flex: 0 0 auto;
   width: 100px;
-  height: 22px;
+  /* 高度跟着行高走：窗口拉高，折线的纵向空间也变大 */
+  align-self: stretch;
+  min-height: 22px;
+  margin: 4px 0;
   overflow: visible;
 }
 

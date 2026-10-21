@@ -399,6 +399,17 @@ function buildFundItem(code, est, nav) {
     out.pct = ((out.price - out.prevClose) / out.prevClose) * 100;
   }
   if (isFinite(out.price) && isFinite(out.prevClose)) out.change = out.price - out.prevClose;
+  // 和行情类一致：日/月/年线按折线区间算涨跌
+  if (nav && config.period !== 'minute') {
+    const rc = rangeChange(out.points);
+    if (isFinite(rc)) {
+      out.pct = rc;
+      if (isFinite(out.price) && isFinite(out.points[0])) {
+        out.change = out.price - out.points[0];
+      }
+      out.range = true;
+    }
+  }
   out.ok = isFinite(out.price);
   return out;
 }
@@ -418,13 +429,22 @@ async function runPool(items, limit, fn) {
   await Promise.all(workers);
 }
 
+// 折线所展示这段区间的涨跌幅（首点 → 末点）。
+// 分时不用它：分时按昨收算「今日涨跌」才符合习惯。
+function rangeChange(points) {
+  if (!points || points.length < 2) return NaN;
+  const first = points[0];
+  const last = points[points.length - 1];
+  if (!isFinite(first) || !isFinite(last) || !first) return NaN;
+  return ((last - first) / first) * 100;
+}
+
 function buildItem(code, snap, points) {
   const out = {
     code: code, name: (snap && snap.name) || NAMES[code] || code,
     price: NaN, prevClose: NaN, pct: NaN, change: NaN,
     points: points || [], ok: false
-  };
-  if (snap) {
+  };  if (snap) {
     out.price = snap.price;
     out.prevClose = snap.prevClose;
     out.pct = snap.pct;
@@ -437,6 +457,18 @@ function buildItem(code, snap, points) {
   }
   if (!isFinite(out.change) && isFinite(out.price) && isFinite(out.prevClose)) {
     out.change = out.price - out.prevClose;
+  }
+  // 切到日/月/年线时，涨跌幅跟着换成"这条折线覆盖的区间"的涨跌，
+  // 否则折线变了、数字还停在今天的涨跌幅，看着就像没跟着周期走。
+  if (config.period !== 'minute') {
+    const rc = rangeChange(out.points);
+    if (isFinite(rc)) {
+      out.pct = rc;
+      if (isFinite(out.price) && isFinite(out.points[0])) {
+        out.change = out.price - out.points[0];
+      }
+      out.range = true;
+    }
   }
   out.ok = isFinite(out.price);
   return out;

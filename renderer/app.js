@@ -2,7 +2,10 @@
   var VW = 240, VH = 100, PAD = 7;
 
   var app = document.getElementById('app');
+  var head = document.getElementById('head');
+  var periodLabel = document.getElementById('period-label');
   var rowMap = {};
+  var PERIOD_LABEL = { minute: '分时', day: '日线', month: '月线', year: '年线' };
   var timer = null;
   var showBaseline = true;
   var currentPeriod = 'minute';
@@ -138,18 +141,32 @@
     syncHeight();
   }
 
+  var ROW_H = 32;   // 每行基准高度，窗口拉高时行会被均分拉伸，所以只能按基准值算
+
+  function naturalHeight() {
+    return Math.ceil(app.children.length * ROW_H + 12 + (head ? head.offsetHeight : 0));
+  }
+
   function syncHeight() {
-    var h = Math.ceil(app.getBoundingClientRect().height);
+    var h = naturalHeight();
     if (h && h !== lastHeight) {
       lastHeight = h;
       window.ticker.setHeight(h);
     }
   }
 
+  function updatePeriodLabel() {
+    if (!periodLabel) return;
+    periodLabel.textContent = PERIOD_LABEL[currentPeriod] || '';
+  }
+
   function refresh() {
     return window.ticker.getQuotes().then(function (res) {
       if (res && res.ok) {
-        if (res.period) currentPeriod = res.period;
+        if (res.period && res.period !== currentPeriod) {
+          currentPeriod = res.period;
+          updatePeriodLabel();
+        }
         document.body.classList.remove('stale');
         render(res.list || []);
       } else {
@@ -174,6 +191,7 @@
     document.body.classList.toggle('noname', s.showName === false);
     showBaseline = s.baseline !== false;
     if (s.period) currentPeriod = s.period;
+    updatePeriodLabel();
   }
 
   /* ---- 拖动 / 菜单 ---- */
