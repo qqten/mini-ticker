@@ -96,6 +96,8 @@ const FUND_HEADERS = { 'User-Agent': UA, 'Referer': 'https://fund.eastmoney.com/
 const MINUTE_TTL = 20000;
 const KLINE_TTL = 60000;
 let seriesCache = { at: 0, map: {}, period: null };
+// 取数失败只记一次日志，避免每 3 秒刷屏
+let seriesFailLogged = {};
 
 let config = loadConfig();
 let win = null;
@@ -153,28 +155,142 @@ async function fetchGbk(url, headers) {
 
 // 实时快照（GBK），一次请求拿全部标的
 async function fetchSnapshots(codes) {
-  const text = await fetchGbk('https://qt.gtimg.cn/q=' + codes.join(','));
+  // 调试用：TICKER_FORCE_SINA=1 时优先走新浪，验证兜底链路是否可用
+  if (process.env.TICKER_FORCE_SINA) {
+    try {
+      const alt = await fetchSinaSnapshots(codes);
+      if (Object.keys(alt).length) return alt;
+    } catch (e) {}
+  }
+  try {
+    const text = await fetchGbk('https://qt.gtimg.cn/q=' + codes.join(','));
+    const map = {};
+    text.split(';').forEach(function (line) {
+      const m = line.match(/v_([a-zA-Z0-9]+)="([^"]*)"/);
+      if (!m) return;
+      const a = m[2].split('~');
+      map[m[1]] = {
+        name: a[1] || m[1],
+        price: num(a[3]),
+        prevClose: num(a[4]),
+        pct: num(a[32]),
+        change: num(a[31]),
+        time: a[30] || ''
+      };
+    });
+    if (Object.keys(map).length) return map;
+    throw new Error('快照为空');
+  } catch (e) {
+    const alt = await fetchSinaSnapshots(codes);
+    if (Object.keys(alt).length) return alt;
+    throw e;
+  }
+}
+
+// 新浪快照兜底。新浪各家字段顺序不一样，按代码类型分开解析：
+//   int_ 美股指数：名称, 现价, 涨跌, 涨跌%
+//   hk   港股：    代码, 名称, 今开, 昨收, 最高, 最低, 现价, 涨跌, 涨跌%
+//   A股/指数：     名称, 今开, 昨收, 现价, 最高, 最低, ...
+const SINA_ALIAS = {
+  usDJI: 'int_dji',
+  usIXIC: 'int_nasdaq',
+  usINX: 'int_sp500'
+};
+
+function sinaSymbol(code) {
+  if (SINA_ALIAS[code]) return SINA_ALIAS[code];
+  if (/^(sh|sz|bj)/i.test(code)) return code.toLowerCase();
+  if (/^hk/i.test(code)) return code;                                // hkHSI 直接用
+  if (/^us/i.test(code)) return 'gb_' + code.slice(2).toLowerCase(); // 美股个股兜底
+  return null;
+}
+
+async function fetchSinaSnapshots(codes) {
+  const forward = {};
+  const backward = {};
+  codes.forEach(function (c) {
+    const s = sinaSymbol(c);
+    if (!s) return;
+    forward[c] = s;
+    backward[s] = c;
+  });
+  const syms = Object.keys(backward);
+  if (!syms.length) return {};
+
+  const text = await fetchGbk('https://hq.sinajs.cn/list=' + syms.join(','), SINA_HEADERS);
   const map = {};
   text.split(';').forEach(function (line) {
-    const m = line.match(/v_([a-zA-Z0-9]+)="([^"]*)"/);
-    if (!m) return;
-    const a = m[2].split('~');
-    map[m[1]] = {
-      name: a[1] || m[1],
-      price: num(a[3]),
-      prevClose: num(a[4]),
-      pct: num(a[32]),
-      change: num(a[31]),
-      time: a[30] || ''
-    };
+    const m = /hq_str_([A-Za-z0-9_$]+)="([^"]*)"/.exec(line);
+    if (!m || !m[2]) return;
+    const code = backward[m[1]];
+    if (!code) return;
+
+    const a = m[2].split(',');
+    let name = a[0], price = NaN, prev = NaN, chg = NaN, pct = NaN;
+
+    if (/^int_/.test(m[1])) {
+      name = a[0];
+      price = num(a[1]);
+      chg = num(a[2]);
+      pct = num(a[3]);
+      prev = isFinite(price) && isFinite(chg) ? price - chg : NaN;
+    } else if (/^hk/i.test(m[1])) {
+      name = a[1] || m[1];
+      price = num(a[6]);
+      prev = num(a[3]);
+      chg = num(a[7]);
+      pct = num(a[8]);
+    } else {
+      name = a[0] || m[1];
+      price = num(a[3]);
+      prev = num(a[2]);
+      if (isFinite(price) && isFinite(prev)) {
+        chg = price - prev;
+        pct = prev ? (chg / prev) * 100 : NaN;
+      }
+    }
+
+    if (!isFinite(price) || price <= 0) return;
+    map[code] = { name: name, price: price, prevClose: prev, pct: pct, change: chg, time: '' };
   });
+
+  if (Object.keys(map).length) noteSinaFallback();
   return map;
 }
 
 async function fetchJson(url) {
   const res = await fetch(url, { headers: HEADERS });
   if (!res.ok) throw new Error('HTTP ' + res.status);
-  return res.json();
+  const text = await res.text();
+  const head = text.trim().slice(0, 1);
+  // 被 WAF 拦下时返回的是 HTML 挑战页（甚至 200 状态码），直接 res.json() 会抛 SyntaxError
+  if (head === '<') throw new Error('接口返回网页（疑似被拦截）');
+  return JSON.parse(text);
+}
+
+// 腾讯行情有两个等价入口：主域名被 WAF 拦就换备用域名，数据格式完全一致
+const QT_HOSTS = [
+  'https://ifzq.gtimg.cn',
+  'https://proxy.finance.qq.com/ifzqgtimg'
+];
+let qtHostIdx = 0;
+
+async function fetchTencentJson(pathAndQuery) {
+  let lastErr = null;
+  for (let i = 0; i < QT_HOSTS.length; i++) {
+    const idx = (qtHostIdx + i) % QT_HOSTS.length;
+    try {
+      const j = await fetchJson(QT_HOSTS[idx] + pathAndQuery);
+      if (idx !== qtHostIdx) {
+        qtHostIdx = idx;
+        logLine('[quote]', '已切换到备用行情入口 ' + QT_HOSTS[idx]);
+      }
+      return j;
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr || new Error('行情接口不可用');
 }
 
 /* ---------------- 标的搜索：名称 / 拼音 / 代码 ---------------- */
@@ -237,32 +353,121 @@ async function searchSymbols(keyword) {
   return out.slice(0, 12);
 }
 
-// 当日分时（一次只能查一个 code）
-async function fetchMinuteSeries(code) {
-  const j = await fetchJson('https://web.ifzq.gtimg.cn/appstock/app/minute/query?code=' + encodeURIComponent(code));
-  const block = j && j.data && j.data[code];
-  const raw = block && block.data && block.data.data;
+/* ---------------- 新浪财经：腾讯接口全挂时的兜底 ---------------- */
+// 新浪只认 sh / sz / bj 前缀，港股美股它的 K 线接口返回 null
+function sinaSupported(code) {
+  return /^(sh|sz|bj)/i.test(code);
+}
+
+let sinaFallbackLogged = false;
+function noteSinaFallback() {
+  if (sinaFallbackLogged) return;
+  sinaFallbackLogged = true;
+  logLine('[quote]', '腾讯行情不可用，已切到新浪财经兜底');
+}
+
+// 新浪的 K 线是 JSONP：/*<script>...*/ x=([{...}])，把数组抠出来
+function parseSinaJsonp(text) {
+  const a = text.indexOf('[');
+  const b = text.lastIndexOf(']');
+  if (a < 0 || b <= a) return [];
+  try { return JSON.parse(text.slice(a, b + 1)); } catch (e) { return []; }
+}
+
+async function fetchSinaText(url) {
+  const res = await fetch(url, { headers: SINA_HEADERS });
+  if (!res.ok) throw new Error('HTTP ' + res.status);
+  return res.text();
+}
+
+// 当日分时 → 价格序列
+async function fetchSinaMinute(code) {
+  const url = 'https://quotes.sina.cn/cn/api/openapi.php/CN_MinlineService.getMinlineData?symbol=' +
+    encodeURIComponent(code) + '&scale=1&dpc=1';
+  const j = JSON.parse(await fetchSinaText(url));
+  const arr = (j && j.result && j.result.data) || [];
   const pts = [];
-  if (Array.isArray(raw)) {
-    for (let i = 0; i < raw.length; i++) {
-      const p = num(String(raw[i]).trim().split(/\s+/)[1]);
-      if (isFinite(p)) pts.push(p);
-    }
+  for (let i = 0; i < arr.length; i++) {
+    const p = num(arr[i] && arr[i].p);
+    if (isFinite(p)) pts.push(p);
   }
   return pts;
+}
+
+// 新浪 K 线周期：240=日 1200=周 7200=月
+const SINA_SCALE = { day: 240, week: 1200, month: 7200 };
+
+// 转成和腾讯一致的 [日期, 开, 收, 高, 低, 量]，这样 closeSeries 不用改
+async function fetchSinaKline(code, interval, count) {
+  const scale = SINA_SCALE[interval] || SINA_SCALE.day;
+  const url = 'https://quotes.sina.cn/cn/api/jsonp_v2.php/x=/CN_MarketDataService.getKLineData?symbol=' +
+    encodeURIComponent(code) + '&scale=' + scale + '&ma=no&datalen=' + count;
+  const arr = parseSinaJsonp(await fetchSinaText(url));
+  if (!Array.isArray(arr)) return [];
+  return arr.map(function (o) {
+    return [o.day, o.open, o.close, o.high, o.low, o.volume];
+  });
+}
+
+// 当日分时（一次只能查一个 code）
+async function fetchMinuteSeries(code) {
+  if (process.env.TICKER_FORCE_SINA && sinaSupported(code)) {
+    try {
+      const alt = await fetchSinaMinute(code);
+      if (alt.length >= 2) return alt;
+    } catch (e) {}
+  }
+  try {
+    const j = await fetchTencentJson('/appstock/app/minute/query?code=' + encodeURIComponent(code));
+    const block = j && j.data && j.data[code];
+    const raw = block && block.data && block.data.data;
+    const pts = [];
+    if (Array.isArray(raw)) {
+      for (let i = 0; i < raw.length; i++) {
+        const p = num(String(raw[i]).trim().split(/\s+/)[1]);
+        if (isFinite(p)) pts.push(p);
+      }
+    }
+    if (pts.length >= 2 || !sinaSupported(code)) return pts;
+    // 腾讯给回空数据，再用新浪试一次
+    const alt = await fetchSinaMinute(code);
+    if (alt.length >= 2) { noteSinaFallback(); return alt; }
+    return pts;
+  } catch (e) {
+    if (!sinaSupported(code)) throw e;
+    const alt = await fetchSinaMinute(code);
+    if (alt.length) { noteSinaFallback(); return alt; }
+    throw e;
+  }
 }
 
 // K 线原始行：[日期, 开, 收, 高, 低, 量]
 // 美股走 usfqkline，其余走 fqkline
 async function fetchKlineRaw(code, interval, count) {
-  const ep = code.slice(0, 2).toLowerCase() === 'us' ? 'usfqkline' : 'fqkline';
-  const url = 'https://web.ifzq.gtimg.cn/appstock/app/' + ep + '/get?param=' +
-    code + ',' + interval + ',,,' + count + ',qfq';
-  const j = await fetchJson(url);
-  const block = j && j.data && j.data[code];
-  if (!block) return [];
-  const arr = block['qfq' + interval] || block[interval] || [];
-  return Array.isArray(arr) ? arr : [];
+  if (process.env.TICKER_FORCE_SINA && sinaSupported(code)) {
+    try {
+      const alt = await fetchSinaKline(code, interval, count);
+      if (alt.length) return alt;
+    } catch (e) {}
+  }
+  try {
+    const ep = code.slice(0, 2).toLowerCase() === 'us' ? 'usfqkline' : 'fqkline';
+    const url = '/appstock/app/' + ep + '/get?param=' +
+      code + ',' + interval + ',,,' + count + ',qfq';
+    const j = await fetchTencentJson(url);
+    const block = j && j.data && j.data[code];
+    const arr = block ? (block['qfq' + interval] || block[interval] || []) : [];
+    if (Array.isArray(arr) && arr.length) return arr;
+    if (!sinaSupported(code)) return [];
+    const alt = await fetchSinaKline(code, interval, count);
+    if (alt.length) { noteSinaFallback(); return alt; }
+    return [];
+  } catch (e) {
+    if (!sinaSupported(code)) throw e;
+    const alt = await fetchSinaKline(code, interval, count);
+    if (alt.length) { noteSinaFallback(); return alt; }
+    throw e;
+  }
 }
 
 function closeSeries(rows) {
@@ -518,8 +723,14 @@ async function fetchAll() {
       } catch (e) {
         const old = seriesCache.period === period ? seriesCache.map[code] : null;
         pts = old || [];
+        // 同一个标的不要每次轮询都刷日志，只记第一次
+        if (!pts.length && !seriesFailLogged[code]) {
+          seriesFailLogged[code] = true;
+          logLine('[quote]', code + ' 折线取数失败：' + e.message);
+        }
       }
       map[code] = pts;
+      if (pts.length) seriesFailLogged[code] = false;
     });
     seriesCache = { at: now, map: map, period: period };
   }
