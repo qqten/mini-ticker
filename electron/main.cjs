@@ -107,6 +107,7 @@ let autoFitHeight = 0;
 let resizingAt = 0;
 let settingsWin = null;
 let dragTimer = null;
+let dragProbeTimer = null;
 let dragBase = null;
 
 function loadConfig() {
@@ -949,7 +950,8 @@ function openSettings() {
 
 const LUMA_TO_DARK = 0.62;   // 背景亮到这个程度 → 换暗色文字
 const LUMA_TO_LIGHT = 0.42;  // 背景暗到这个程度 → 换亮色文字
-const PROBE_INTERVAL = 4000;
+const PROBE_INTERVAL = 2000;  // 轮询间隔：背后内容变了（切应用/壁纸/视频）最多 2 秒跟上
+const DRAG_PROBE_INTERVAL = 400; // 拖动窗口时加密采样，颜色跟着走
 const SCREEN_RETRY_EVERY = 8;  // 截屏失败后隔这么多个周期重试一次（约 30 秒）
 
 let autoTextMode = 'light';
@@ -986,17 +988,20 @@ function medianLuma(img) {
 // 锁屏 / 远程桌面 / 部分显卡驱动下，desktopCapturer 会"成功"返回一张纯黑图，
 // 既不报错也没缩略图缺失。这时亮度恒为 0，文字会永远停在亮色，
 // 用户看到的就是"不再跟着背景切换了"。这里识别出来当作失败处理。
+// 注意：真正的暗背景（深色编辑器、黑壁纸）虽然平均亮度也很低，但有文字/图标/
+// 渐变细节，不是全黑；只有像素几乎全 0 的图才是截屏失败。
 function isBlankShot(img) {
   if (!img || img.isEmpty()) return true;
   const buf = img.toBitmap();
   if (!buf || buf.length < 4) return true;
-  let sum = 0;
-  let n = 0;
+  let n = 0, lit = 0;
   for (let i = 0; i + 3 < buf.length; i += 4) {
-    sum += buf[i] + buf[i + 1] + buf[i + 2];
+    // 单通道超过 12（约 0.05）就算"有内容"，真正的黑屏失败图全是 0
+    if (buf[i] > 12 || buf[i + 1] > 12 || buf[i + 2] > 12) lit++;
     n++;
   }
-  return n === 0 || sum / (n * 765) < 0.02;
+  // 少于 1% 的像素有内容，认为是黑屏失败
+  return n === 0 || (lit / n) < 0.01;
 }
 
 // 截当前屏幕，裁出窗口所在的矩形
@@ -1118,7 +1123,24 @@ async function probeBackground(force) {
     // 之后窗口挪到任何界面上文字都不再跟背景变——用户看到的就是"不自动切换了"。
     const tryScreen = probeFails < 3 || probeTick % SCREEN_RETRY_EVERY === 0;
     if (tryScreen) {
+      // 开了衬底时，窗口自己的半透明底色会被截屏算进去，和当前文字模式形成自反馈，
+      // 导致亮暗切不过去。截屏前临时去掉衬底，截完立刻恢复，采样到的就是窗口背后的真实内容。
+      let restoreBackdrop = false;
+      if (config.backdrop && win && !win.isDestroyed()) {
+        try {
+          await win.webContents.executeJavaScript("document.body.classList.remove('backdrop'); true");
+          restoreBackdrop = true;
+          await new Promise(function (r) { setTimeout(r, 60); });
+        } catch (e) {}
+      }
       try { small = await grabWindowRegion(); } catch (e) { small = null; }
+      if (restoreBackdrop && win && !win.isDestroyed()) {
+        try {
+          await win.webContents.executeJavaScript(
+            "document.body.classList.toggle('backdrop', " + (config.backdrop ? 'true' : 'false') + "); true"
+          );
+        } catch (e) {}
+      }
       if (small) {
         if (probeFails >= 3) {
           logLine('[bg]', '实时截屏已恢复（之前是壁纸兜底，共失败 ' + probeFails + ' 次）');
@@ -1152,6 +1174,7 @@ function startBackgroundProbe() {
 
 function stopDrag() {
   if (dragTimer) { clearInterval(dragTimer); dragTimer = null; }
+  if (dragProbeTimer) { clearInterval(dragProbeTimer); dragProbeTimer = null; }
   dragBase = null;
 }
 
@@ -1248,6 +1271,9 @@ ipcMain.on('drag-start', function () {
     const p = screen.getCursorScreenPoint();
     win.setPosition(p.x - dragBase.dx, p.y - dragBase.dy);
   }, 16);
+  // 拖动时加密采样：窗口从亮背景滑到暗背景，颜色跟着即时切
+  if (dragProbeTimer) clearInterval(dragProbeTimer);
+  dragProbeTimer = setInterval(function () { probeBackground(true); }, DRAG_PROBE_INTERVAL);
 });
 
 ipcMain.on('drag-end', function () {
