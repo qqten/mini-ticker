@@ -23,7 +23,7 @@
 需要 Node.js 18 及以上。
 
 ```bash
-git clone https://github.com/<your-name>/mini-ticker.git
+git clone https://github.com/qqten/mini-ticker.git
 cd mini-ticker
 npm install
 npm start
