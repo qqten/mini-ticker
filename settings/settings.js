@@ -398,7 +398,11 @@
 
   $('save').addEventListener('click', save);
   $('cancel').addEventListener('click', function () { window.ticker.closeSettings(); });
-  $('width').addEventListener('input', function () { $('width-val').textContent = this.value; });
+  $('width').addEventListener('input', function () {
+    $('width-val').textContent = this.value;
+    // 实时预览浮窗宽度；设置窗口关闭时主进程会按 config.width 统一还原
+    window.ticker.previewWidth(parseInt(this.value, 10));
+  });
   $('test-alert').addEventListener('click', function () {
     window.ticker.testAlert();
     setFoot('已发出测试提醒', 'ok');

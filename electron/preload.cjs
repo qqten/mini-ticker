@@ -21,5 +21,6 @@ contextBridge.exposeInMainWorld('ticker', {
   validateSymbol: function (code) { return ipcRenderer.invoke('validate-symbol', code); },
   searchSymbol: function (q) { return ipcRenderer.invoke('search-symbol', q); },
   testAlert: function () { ipcRenderer.send('test-alert'); },
-  closeSettings: function () { ipcRenderer.send('settings-close'); }
+  closeSettings: function () { ipcRenderer.send('settings-close'); },
+  previewWidth: function (w) { ipcRenderer.send('preview-width', w); }
 });

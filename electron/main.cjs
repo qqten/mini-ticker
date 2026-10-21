@@ -930,7 +930,16 @@ function openSettings() {
     }
   });
   settingsWin.loadFile(path.join(ROOT, 'settings', 'index.html'));
-  settingsWin.on('closed', function () { settingsWin = null; });
+  // 设置面板关闭时，主窗口宽度回到 config.width：
+  // 没点保存 → 滑块预览没写进 config，自然还原到原始宽度；
+  // 点了保存 → config.width 已是新值，保持新宽度。
+  settingsWin.on('closed', function () {
+    settingsWin = null;
+    if (win && !win.isDestroyed()) {
+      const w = Math.max(220, Math.min(640, Math.round(config.width || 320)));
+      win.setSize(w, win.getSize()[1]);
+    }
+  });
 }
 
 /* ---------------- 背景明暗自动检测 ---------------- */
@@ -1153,6 +1162,11 @@ function broadcast() {
 function setAndBroadcast(patch, clearCache) {
   Object.assign(config, patch);
   if (patch.alwaysOnTop !== undefined && win) win.setAlwaysOnTop(!!patch.alwaysOnTop);
+  if (patch.width !== undefined && win && isFinite(patch.width)) {
+    const w = Math.max(220, Math.min(640, Math.round(patch.width)));
+    const h = win.getSize()[1];
+    win.setSize(w, h);
+  }
   if (clearCache) seriesCache = { at: 0, map: {}, period: null };
   // 刚从手动切回自动时立刻测一次，不用等下一个轮询周期
   if (patch.textMode === 'auto') probeFails = 0;
@@ -1211,6 +1225,16 @@ ipcMain.on('set-height', function (e, h) {
   if (win.getSize()[1] === height) return;
   const pos = win.getPosition();
   win.setBounds({ x: pos[0], y: pos[1], width: config.width || 320, height: height });
+});
+
+// 设置面板滑块实时预览宽度：只调窗口尺寸，不落盘；取消/关闭时由设置面板发回原始宽度还原
+ipcMain.on('preview-width', function (e, w) {
+  if (!win) return;
+  const n = parseInt(w, 10);
+  if (!isFinite(n)) return;
+  const width = Math.max(220, Math.min(640, Math.round(n)));
+  if (win.getSize()[0] === width) return;
+  win.setSize(width, win.getSize()[1]);
 });
 
 ipcMain.on('drag-start', function () {
