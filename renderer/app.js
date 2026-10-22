@@ -141,7 +141,8 @@
       var cls = clsOf(item.change);
 
       if (item.name) row.name.textContent = item.name;
-      row.chg.textContent = fmtChange(item.change, item.fund);
+      // 第二栏显示「现在多少点」，涨跌方向靠颜色和后面的百分比表达
+      row.chg.textContent = fmtPrice(item.price, item.fund);
       row.chg.className = 'chg ' + cls;
       row.pct.textContent = fmtPct(item.pct);
       row.pct.className = 'pct ' + clsOf(item.pct);

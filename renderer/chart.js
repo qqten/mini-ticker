@@ -13,6 +13,7 @@
   var panel = document.getElementById('focus');
   var chartEl = document.getElementById('chart');
   var elName = document.getElementById('f-name');
+  var elPoint = document.getElementById('f-point');
   var elChg = document.getElementById('f-chg');
   var elPct = document.getElementById('f-pct');
   var elPos = document.getElementById('f-pos');
@@ -25,6 +26,11 @@
   function fx(v, d) { return isNum(v) ? v.toFixed(d == null ? 2 : d) : '--'; }
   function fPct(v) { return isNum(v) ? (v > 0 ? '+' : '') + v.toFixed(2) + '%' : '--'; }
   function fChg(v) { return isNum(v) ? (v > 0 ? '+' : '') + v.toFixed(2) : '--'; }
+  // 指数两位小数就够，几块钱的 ETF / 场外基金要四位
+  function fPrice(v) {
+    if (!isNum(v)) return '--';
+    return v.toFixed(Math.abs(v) < 10 ? 4 : 2);
+  }
   function clsOf(v) { return !isNum(v) ? 'flat' : v > 0 ? 'up' : v < 0 ? 'down' : 'flat'; }
 
   function fVol(v) {
@@ -397,6 +403,7 @@
 
   function paintHead(p) {
     elName.textContent = p.name || p.code || state.name || '--';
+    elPoint.textContent = fPrice(p.price);
     elChg.textContent = fChg(p.change);
     elChg.className = 'chg ' + clsOf(p.change);
     elPct.textContent = fPct(p.pct);

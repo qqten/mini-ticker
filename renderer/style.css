@@ -144,8 +144,10 @@ body.loading .row {
 }
 
 .spark {
-  flex: 0 0 auto;
+  /* 窄窗口时折线先让路：可以压缩到 56px，把宽度留给名称 */
+  flex: 0 1 100px;
   width: 100px;
+  min-width: 56px;
   /* 高度跟着行高走：窗口拉高，折线的纵向空间也变大 */
   align-self: stretch;
   min-height: 22px;
@@ -188,7 +190,8 @@ body[data-text="dark"] .spark polyline {
 
 .chg {
   flex: 0 0 auto;
-  min-width: 50px;
+  /* 宽度跟着内容走（点位位数不定），右对齐保证上下数字对齐 */
+  min-width: 0;
   font-size: 12.5px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
@@ -268,6 +271,14 @@ body.focus .row.active .name {
   letter-spacing: .3px;
 }
 
+#f-point {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+}
+
 #f-chg, #f-pct {
   font-weight: 600;
   font-variant-numeric: tabular-nums;
@@ -288,7 +299,9 @@ body.focus .row.active .name {
 #f-tabs {
   margin-left: auto;
   display: flex;
+  flex: 0 0 auto;
   gap: 1px;
+  white-space: nowrap;
 }
 
 #f-tabs button {
@@ -296,6 +309,7 @@ body.focus .row.active .name {
   border: 0;
   padding: 1px 6px;
   border-radius: 4px;
+  white-space: nowrap;
   color: var(--sub);
   font-family: inherit;
   font-size: 10px;
