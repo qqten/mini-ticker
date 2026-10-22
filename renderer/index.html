@@ -7,8 +7,26 @@
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <div id="head"><span id="period-label">分时</span></div>
-  <div id="app"></div>
+  <!-- 左列 = 原来的浮窗（周期标识 + 自选列表），聚焦时宽度不变，图表往右边长出来 -->
+  <div id="left">
+    <div id="head"><span id="period-label">分时</span></div>
+    <div id="app"></div>
+  </div>
+  <div id="focus">
+    <div id="focus-head">
+      <span id="f-name">--</span>
+      <span id="f-chg">--</span>
+      <span id="f-pct">--</span>
+      <span id="f-pos"></span>
+      <span id="f-tabs">
+        <button type="button" data-tab="minute">分时</button>
+        <button type="button" data-tab="five">5日</button>
+        <button type="button" data-tab="day">日K</button>
+      </span>
+    </div>
+    <div id="chart"></div>
+  </div>
   <script src="app.js"></script>
+  <script src="chart.js"></script>
 </body>
 </html>

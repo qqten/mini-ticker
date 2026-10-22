@@ -1,0 +1,552 @@
+(function () {
+  'use strict';
+
+  /* 聚焦图表：画在原浮窗里（不另开窗口），背景保持透明，
+     文字用 CSS 变量取当前亮/暗配色的颜色 + 描边光晕，压在任何桌面上都能看清。 */
+
+  var state = { on: false, code: '', tab: 'minute', index: -1, total: 0, name: '' };
+  var payload = null;
+  var timer = null;
+  var seq = 0;
+  var resizeTimer = null;
+
+  var panel = document.getElementById('focus');
+  var chartEl = document.getElementById('chart');
+  var elName = document.getElementById('f-name');
+  var elChg = document.getElementById('f-chg');
+  var elPct = document.getElementById('f-pct');
+  var elPos = document.getElementById('f-pos');
+  var tabsEl = document.getElementById('f-tabs');
+  var appEl = document.getElementById('app');
+
+  /* ---------------- 小工具 ---------------- */
+
+  function isNum(v) { return typeof v === 'number' && isFinite(v); }
+  function fx(v, d) { return isNum(v) ? v.toFixed(d == null ? 2 : d) : '--'; }
+  function fPct(v) { return isNum(v) ? (v > 0 ? '+' : '') + v.toFixed(2) + '%' : '--'; }
+  function fChg(v) { return isNum(v) ? (v > 0 ? '+' : '') + v.toFixed(2) : '--'; }
+  function clsOf(v) { return !isNum(v) ? 'flat' : v > 0 ? 'up' : v < 0 ? 'down' : 'flat'; }
+
+  function fVol(v) {
+    if (!isNum(v)) return '--';
+    if (v >= 1e8) return (v / 1e8).toFixed(2) + '亿';
+    if (v >= 1e4) return (v / 1e4).toFixed(2) + '万';
+    return String(Math.round(v));
+  }
+
+  // 每次绘制都重新取一遍：自动配色切换后，线条颜色要跟着变
+  function theme() {
+    var cs = getComputedStyle(document.body);
+    function v(name, dft) {
+      var x = cs.getPropertyValue(name).trim();
+      return x || dft;
+    }
+    return {
+      up: v('--up', '#ff3b46'),
+      down: v('--down', '#0fb87a'),
+      line: v('--chart-line', '#3ba7ff'),
+      avg: v('--chart-avg', '#f2c14e'),
+      ma10: v('--chart-ma10', '#7aa2f7'),
+      ma20: v('--chart-ma20', '#c586f0'),
+      grid: v('--chart-grid', 'rgba(255,255,255,.1)'),
+      sub: v('--sub', '#9aa4b2')
+    };
+  }
+
+  function txt(x, y, s, anchor, color, size) {
+    return '<text x="' + x.toFixed(1) + '" y="' + y.toFixed(1) + '" fill="' + (color || 'currentColor') +
+      '" font-size="' + (size || 10) + '" text-anchor="' + (anchor || 'start') + '">' + s + '</text>';
+  }
+
+  function empty(msg) {
+    chartEl.innerHTML = '<div class="empty">' + msg + '</div>';
+  }
+
+  function shortDate(d) {
+    var s = String(d || '');
+    if (/^\d{8}$/.test(s)) return s.slice(4, 6) + '-' + s.slice(6, 8);
+    return s.length >= 10 ? s.slice(5, 10) : s;
+  }
+
+  // 均线：简单移动平均，前 n-1 个点没有值
+  function ma(arr, n) {
+    var out = [], sum = 0;
+    for (var i = 0; i < arr.length; i++) {
+      sum += arr[i];
+      if (i >= n) sum -= arr[i - n];
+      out.push(i >= n - 1 ? sum / n : NaN);
+    }
+    return out;
+  }
+
+  function ema(arr, n) {
+    var k = 2 / (n + 1), out = [], prev = arr[0];
+    for (var i = 0; i < arr.length; i++) {
+      prev = i === 0 ? arr[0] : arr[i] * k + prev * (1 - k);
+      out.push(prev);
+    }
+    return out;
+  }
+
+  /* ---------------- 版面 ---------------- */
+
+  function geom(withMacd) {
+    var box = chartEl.getBoundingClientRect();
+    var W = Math.max(260, Math.round(box.width) - 10);
+    var H = Math.max(120, Math.round(box.height) - 2);
+    var padL = 54, padR = 44, padT = 6, axisH = 16, gap = 7;
+    var body = H - padT - axisH - gap * (withMacd ? 2 : 1);
+    var volH = Math.round(body * (withMacd ? 0.2 : 0.24));
+    var macdH = withMacd ? Math.round(body * 0.22) : 0;
+    var priceH = body - volH - macdH;
+
+    var g = {
+      W: W, H: H, padL: padL, padR: padR, plotW: W - padL - padR,
+      priceTop: padT, priceH: priceH, priceBot: padT + priceH,
+      volTop: padT + priceH + gap, volH: volH,
+      axisY: H - 4
+    };
+    g.volBot = g.volTop + volH;
+    if (withMacd) {
+      g.macdTop = g.volBot + gap;
+      g.macdH = macdH;
+      g.macdBot = g.macdTop + macdH;
+    }
+    return g;
+  }
+
+  /* ---------------- 分时 / 5日 ---------------- */
+
+  function sessionTicks(code, session) {
+    if (/^hk/i.test(code)) {
+      return [[0, '09:30'], [100, '11:00'], [182, '13:00'], [272, '15:00'], [session - 1, '16:00']];
+    }
+    if (/^us/i.test(code)) {
+      return [[0, '09:30'], [120, '11:30'], [212, '13:00'], [322, '15:00'], [session - 1, '16:00']];
+    }
+    return [[0, '09:30'], [60, '10:30'], [120, '13:00'], [180, '14:00'], [session - 1, '15:00']];
+  }
+
+  function renderMinute(p) {
+    var days = p.days || [];
+    if (!days.length) return empty('暂无分时数据');
+    var T = theme();
+
+    var g = geom(false);
+    var session = p.session || 242;
+    var total = session * days.length;
+    var pts = [];
+
+    for (var d = 0; d < days.length; d++) {
+      var arr = days[d].points || [];
+      var prec = days[d].prec;
+      for (var i = 0; i < arr.length; i++) {
+        pts.push({
+          x: d * session + i,
+          p: arr[i].price,
+          v: arr[i].vol,
+          a: arr[i].avg,
+          prec: prec,
+          first: i === 0
+        });
+      }
+    }
+    if (pts.length < 2) return empty('暂无分时数据');
+
+    var lo = Infinity, hi = -Infinity, maxV = 0, sumV = 0;
+    for (var k = 0; k < pts.length; k++) {
+      if (pts[k].p < lo) lo = pts[k].p;
+      if (pts[k].p > hi) hi = pts[k].p;
+      if (pts[k].v > maxV) maxV = pts[k].v;
+      sumV += pts[k].v;
+    }
+    if (!(hi > lo)) { hi += 1; lo -= 1; }
+    var padY = (hi - lo) * 0.08;
+    lo -= padY;
+    hi += padY;
+
+    var X = function (i) { return g.padL + (i / (total - 1)) * g.plotW; };
+    var Y = function (v) { return g.priceBot - ((v - lo) / (hi - lo)) * g.priceH; };
+    var VY = function (v) { return g.volBot - (maxV ? (v / maxV) * g.volH : 0); };
+
+    var s = ['<svg width="' + g.W + '" height="' + g.H + '" viewBox="0 0 ' + g.W + ' ' + g.H + '">'];
+
+    // 昨收虚线 + 5日分隔
+    for (var dd = 0; dd < days.length; dd++) {
+      var pc = days[dd].prec;
+      var x0 = X(dd * session);
+      var x1 = X(dd * session + Math.max(1, (days[dd].points || []).length - 1));
+      if (isNum(pc) && pc > 0) {
+        var yb = Y(pc);
+        s.push('<line x1="' + x0.toFixed(1) + '" y1="' + yb.toFixed(1) + '" x2="' + x1.toFixed(1) +
+          '" y2="' + yb.toFixed(1) + '" stroke="' + T.sub + '" stroke-width="1" stroke-dasharray="2 3" opacity=".45"/>');
+      }
+      if (dd > 0) {
+        s.push('<line x1="' + x0.toFixed(1) + '" y1="' + g.priceTop + '" x2="' + x0.toFixed(1) +
+          '" y2="' + g.volBot + '" stroke="' + T.grid + '" stroke-dasharray="2 4"/>');
+      }
+    }
+
+    // 成交量柱：与上一分钟比价定色，当天第一根和昨收比
+    var bw = Math.max(1, (g.plotW / total) * 0.7);
+    for (var b = 0; b < pts.length; b++) {
+      var ref = pts[b].first ? pts[b].prec : pts[b - 1].p;
+      var col = pts[b].p >= ref ? T.up : T.down;
+      var y = VY(pts[b].v);
+      var h = Math.max(0.6, g.volBot - y);
+      s.push('<rect x="' + (X(pts[b].x) - bw / 2).toFixed(1) + '" y="' + y.toFixed(1) +
+        '" width="' + bw.toFixed(1) + '" height="' + h.toFixed(1) + '" fill="' + col + '" opacity=".8"/>');
+    }
+
+    // 价格线 + 均价线
+    var linePts = [], avgPts = [];
+    for (var n = 0; n < pts.length; n++) {
+      var xx = X(pts[n].x).toFixed(1);
+      linePts.push(xx + ',' + Y(pts[n].p).toFixed(1));
+      if (isNum(pts[n].a)) avgPts.push(xx + ',' + Y(pts[n].a).toFixed(1));
+    }
+    if (avgPts.length > 1) {
+      s.push('<polyline points="' + avgPts.join(' ') + '" fill="none" stroke="' + T.avg +
+        '" stroke-width="1" opacity=".9"/>');
+    }
+    s.push('<polyline points="' + linePts.join(' ') + '" fill="none" stroke="' + T.line +
+      '" stroke-width="1.3" stroke-linejoin="round"/>');
+
+    // 价格刻度（左）
+    s.push(txt(g.padL - 6, g.priceTop + 9, fx(hi), 'end', T.sub));
+    s.push(txt(g.padL - 6, g.priceBot - 1, fx(lo), 'end', T.sub));
+
+    // 涨跌幅刻度（右）
+    var lastPrec = p.prevClose;
+    if (isNum(lastPrec) && lastPrec > 0) {
+      s.push(txt(g.W - g.padR + 6, g.priceTop + 9, fPct(((hi - lastPrec) / lastPrec) * 100), 'start', T.sub));
+      s.push(txt(g.W - g.padR + 6, g.priceBot - 1, fPct(((lo - lastPrec) / lastPrec) * 100), 'start', T.sub));
+      var y0 = Y(lastPrec);
+      if (y0 > g.priceTop + 16 && y0 < g.priceBot - 6) {
+        s.push(txt(g.W - g.padR + 6, y0 + 3, '0%', 'start', T.sub));
+      }
+    }
+
+    // 成交量总量：放量区左上，别贴右边的涨跌幅刻度（会挤在一起看不清）
+    s.push(txt(g.padL + 2, g.volTop + 9, '量 ' + fVol(sumV), 'start', T.sub, 9));
+
+    // 横轴
+    if (days.length > 1) {
+      for (var q = 0; q < days.length; q++) {
+        var cx = X(q * session + Math.floor(session / 2));
+        s.push(txt(cx, g.axisY, shortDate(days[q].date), 'middle', T.sub));
+      }
+    } else {
+      var ticks = sessionTicks(p.code, session);
+      var right = g.W - g.padR;
+      for (var t = 0; t < ticks.length; t++) {
+        var tx = Math.max(g.padL, Math.min(right, X(ticks[t][0])));
+        // 首尾两个刻度贴边，改锚点避免超出绘图区
+        var anchor = tx <= g.padL + 2 ? 'start' : tx >= right - 2 ? 'end' : 'middle';
+        s.push(txt(tx, g.axisY, ticks[t][1], anchor, T.sub));
+      }
+    }
+
+    s.push('</svg>');
+    chartEl.innerHTML = s.join('');
+  }
+
+  /* ---------------- 日K（K线 + 均线 + 成交量 + MACD） ---------------- */
+
+  function renderDay(p) {
+    var c = p.candles || [];
+    if (c.length < 2) return empty('暂无 K 线数据');
+    var T = theme();
+
+    var closes = c.map(function (x) { return x.c; });
+    var ma5 = ma(closes, 5), ma10 = ma(closes, 10), ma20 = ma(closes, 20);
+
+    var e12 = ema(closes, 12), e26 = ema(closes, 26);
+    var dif = closes.map(function (v, i) { return e12[i] - e26[i]; });
+    var dea = ema(dif, 9);
+    var macd = dif.map(function (v, i) { return (v - dea[i]) * 2; });
+
+    var start = Math.max(0, c.length - 120);
+    var rows = [];
+    for (var i = start; i < c.length; i++) {
+      rows.push({
+        d: c[i].d, o: c[i].o, c: c[i].c, h: c[i].h, l: c[i].l, v: c[i].v,
+        ma5: ma5[i], ma10: ma10[i], ma20: ma20[i],
+        dif: dif[i], dea: dea[i], macd: macd[i]
+      });
+    }
+    var n = rows.length;
+
+    var g = geom(true);
+    var hi = -Infinity, lo = Infinity, maxV = 0, maxM = 0, sumV = 0;
+    for (var k = 0; k < n; k++) {
+      var r = rows[k];
+      if (r.h > hi) hi = r.h;
+      if (r.l < lo) lo = r.l;
+      if (r.v > maxV) maxV = r.v;
+      sumV += r.v;
+      var m = Math.max(Math.abs(r.dif), Math.abs(r.dea), Math.abs(r.macd));
+      if (m > maxM) maxM = m;
+    }
+    if (!(hi > lo)) { hi += 1; lo -= 1; }
+    var padY = (hi - lo) * 0.06;
+    hi += padY;
+    lo -= padY;
+
+    var step = g.plotW / n;
+    var cw = Math.max(1.2, Math.min(14, step * 0.62));
+    var Xc = function (i) { return g.padL + step * (i + 0.5); };
+    var Y = function (v) { return g.priceBot - ((v - lo) / (hi - lo)) * g.priceH; };
+    var VY = function (v) { return g.volBot - (maxV ? (v / maxV) * g.volH : 0); };
+    var Mzero = g.macdTop + g.macdH / 2;
+    var MY = function (v) { return Mzero - (maxM ? (v / maxM) * (g.macdH / 2 - 2) : 0); };
+
+    var s = ['<svg width="' + g.W + '" height="' + g.H + '" viewBox="0 0 ' + g.W + ' ' + g.H + '">'];
+
+    // 淡网格
+    [0.25, 0.5, 0.75].forEach(function (rr) {
+      var yy = g.priceTop + g.priceH * rr;
+      s.push('<line x1="' + g.padL + '" y1="' + yy.toFixed(1) + '" x2="' + (g.padL + g.plotW) +
+        '" y2="' + yy.toFixed(1) + '" stroke="' + T.grid + '"/>');
+    });
+
+    // 成交量
+    for (var v = 0; v < n; v++) {
+      var rr = rows[v];
+      var col = rr.c >= rr.o ? T.up : T.down;
+      var vy = VY(rr.v);
+      s.push('<rect x="' + (Xc(v) - cw / 2).toFixed(1) + '" y="' + vy.toFixed(1) + '" width="' +
+        cw.toFixed(1) + '" height="' + Math.max(0.6, g.volBot - vy).toFixed(1) +
+        '" fill="' + col + '" opacity=".75"/>');
+    }
+
+    // K 线
+    for (var i2 = 0; i2 < n; i2++) {
+      var q = rows[i2];
+      var cc = q.c >= q.o ? T.up : T.down;
+      var x = Xc(i2);
+      s.push('<line x1="' + x.toFixed(1) + '" y1="' + Y(q.h).toFixed(1) + '" x2="' + x.toFixed(1) +
+        '" y2="' + Y(q.l).toFixed(1) + '" stroke="' + cc + '" stroke-width="1"/>');
+      var yTop = Y(Math.max(q.o, q.c));
+      var yBot = Y(Math.min(q.o, q.c));
+      s.push('<rect x="' + (x - cw / 2).toFixed(1) + '" y="' + yTop.toFixed(1) + '" width="' +
+        cw.toFixed(1) + '" height="' + Math.max(1, yBot - yTop).toFixed(1) + '" fill="' + cc + '"/>');
+    }
+
+    // 均线
+    function lineOf(key, color, width) {
+      var pts = [];
+      for (var j = 0; j < n; j++) {
+        if (isNum(rows[j][key])) pts.push(Xc(j).toFixed(1) + ',' + Y(rows[j][key]).toFixed(1));
+      }
+      if (pts.length < 2) return;
+      s.push('<polyline points="' + pts.join(' ') + '" fill="none" stroke="' + color +
+        '" stroke-width="' + width + '" opacity=".9"/>');
+    }
+    lineOf('ma5', T.avg, 1);
+    lineOf('ma10', T.ma10, 1);
+    lineOf('ma20', T.ma20, 1);
+
+    // MACD
+    s.push('<line x1="' + g.padL + '" y1="' + Mzero.toFixed(1) + '" x2="' + (g.padL + g.plotW) +
+      '" y2="' + Mzero.toFixed(1) + '" stroke="' + T.grid + '"/>');
+    for (var m2 = 0; m2 < n; m2++) {
+      var mv = rows[m2].macd;
+      if (!isNum(mv)) continue;
+      var y1 = MY(mv), y0 = Mzero;
+      var top = Math.min(y0, y1), hgt = Math.max(0.6, Math.abs(y1 - y0));
+      s.push('<rect x="' + (Xc(m2) - cw / 2).toFixed(1) + '" y="' + top.toFixed(1) + '" width="' +
+        cw.toFixed(1) + '" height="' + hgt.toFixed(1) + '" fill="' + (mv >= 0 ? T.up : T.down) +
+        '" opacity=".7"/>');
+    }
+    function macdLine(key, color) {
+      var pts = [];
+      for (var j = 0; j < n; j++) {
+        if (isNum(rows[j][key])) pts.push(Xc(j).toFixed(1) + ',' + MY(rows[j][key]).toFixed(1));
+      }
+      if (pts.length < 2) return;
+      s.push('<polyline points="' + pts.join(' ') + '" fill="none" stroke="' + color +
+        '" stroke-width="1" opacity=".95"/>');
+    }
+    macdLine('dif', T.ma10);
+    macdLine('dea', T.avg);
+
+    // 刻度
+    s.push(txt(g.padL - 6, g.priceTop + 9, fx(hi), 'end', T.sub));
+    s.push(txt(g.padL - 6, g.priceBot - 1, fx(lo), 'end', T.sub));
+    s.push(txt(g.padL + 2, g.volTop + 9, '量 ' + fVol(sumV), 'start', T.sub, 9));
+    s.push(txt(g.padL + 2, g.macdTop + 8, 'MACD(12,26,9)', 'start', T.sub, 8.5));
+
+    // 均线图例
+    s.push(txt(g.padL + g.plotW - 112, g.priceTop + 9, 'MA5', 'start', T.avg, 9));
+    s.push(txt(g.padL + g.plotW - 80, g.priceTop + 9, 'MA10', 'start', T.ma10, 9));
+    s.push(txt(g.padL + g.plotW - 44, g.priceTop + 9, 'MA20', 'start', T.ma20, 9));
+
+    // 横轴日期
+    var cnt = n >= 5 ? 5 : n;
+    for (var t = 0; t < cnt; t++) {
+      var idx = cnt === 1 ? 0 : Math.round((t * (n - 1)) / (cnt - 1));
+      s.push(txt(Xc(idx), g.axisY, shortDate(rows[idx].d), 'middle', T.sub));
+    }
+
+    s.push('</svg>');
+    chartEl.innerHTML = s.join('');
+  }
+
+  /* ---------------- 头部与行高亮 ---------------- */
+
+  function paintHead(p) {
+    elName.textContent = p.name || p.code || state.name || '--';
+    elChg.textContent = fChg(p.change);
+    elChg.className = 'chg ' + clsOf(p.change);
+    elPct.textContent = fPct(p.pct);
+    elPct.className = 'pct ' + clsOf(p.pct);
+    elPos.textContent = (state.index >= 0 ? state.index + 1 : '-') + '/' + (state.total || 0);
+  }
+
+  function paintTabs(tab) {
+    var bs = tabsEl.querySelectorAll('button[data-tab]');
+    for (var i = 0; i < bs.length; i++) {
+      bs[i].classList.toggle('on', bs[i].getAttribute('data-tab') === tab);
+    }
+  }
+
+  // 当前聚焦的标的，在列表里点亮那一行
+  function paintActiveRow(code) {
+    if (!appEl) return;
+    var rows = appEl.children;
+    for (var i = 0; i < rows.length; i++) {
+      rows[i].classList.toggle('active', rows[i].dataset.code === code);
+    }
+  }
+
+  function render() {
+    if (!state.on || !payload) return;
+    if (payload.tab === 'day') renderDay(payload);
+    else renderMinute(payload);
+  }
+
+  /* ---------------- 数据 ---------------- */
+
+  function load() {
+    var mine = ++seq;
+    return window.ticker.focusData().then(function (res) {
+      if (mine !== seq || !state.on) return;
+      if (!res || !res.ok) {
+        document.body.classList.add('stale');
+        empty(res && res.error ? '取数失败：' + res.error : '暂无数据');
+        return;
+      }
+      document.body.classList.remove('stale');
+      payload = res;
+      paintHead(res);
+      render();
+    }).catch(function () {
+      if (mine !== seq) return;
+      document.body.classList.add('stale');
+      empty('取数失败');
+    });
+  }
+
+  function schedule() {
+    if (timer) clearTimeout(timer);
+    if (!state.on) return;
+    var ms = state.tab === 'minute' ? 4000 : 20000;
+    timer = setTimeout(function () {
+      load().then(schedule);
+    }, ms);
+  }
+
+  function stop() {
+    if (timer) clearTimeout(timer);
+    timer = null;
+  }
+
+  function applyMeta(s) {
+    if (!s) return;
+    var was = state.on;
+    var sameTarget = state.code === s.code && state.tab === s.tab;
+    state.on = !!s.on;
+    state.code = s.code;
+    state.tab = s.tab;
+    state.index = s.index;
+    state.total = s.total;
+    state.name = s.name;
+
+    document.body.classList.toggle('focus', state.on);
+    // 左列保持展开前的宽度（主进程算的），右边剩下的全归图表
+    if (s.leftW) document.body.style.setProperty('--left-w', Math.round(s.leftW) + 'px');
+    paintTabs(s.tab);
+    paintActiveRow(s.code);
+
+    if (!state.on) {
+      stop();
+      payload = null;
+      chartEl.innerHTML = '';
+      return;
+    }
+    elPos.textContent = (s.index >= 0 ? s.index + 1 : '-') + '/' + (s.total || 0);
+    // 只是窗口尺寸变了（同标的同周期）就别重新取数，按新宽度重画即可
+    if (was && sameTarget && payload) {
+      render();
+      return;
+    }
+    load().then(schedule);
+  }
+
+  function logOpen() { /* 预留：窗口展开后的首帧重绘由 load 触发 */ }
+
+  /* ---------------- 交互 ---------------- */
+
+  tabsEl.addEventListener('click', function (e) {
+    var b = e.target.closest('button[data-tab]');
+    if (!b) return;
+    e.stopPropagation();
+    window.ticker.focusTab(b.getAttribute('data-tab'));
+  });
+
+  document.addEventListener('keydown', function (e) {
+    if (!state.on) return;
+    var k = e.key;
+    if (k === 'ArrowUp') { e.preventDefault(); window.ticker.focusStep(-1); }
+    else if (k === 'ArrowDown') { e.preventDefault(); window.ticker.focusStep(1); }
+    else if (k === 'ArrowLeft') { e.preventDefault(); cycleTab(-1); }
+    else if (k === 'ArrowRight') { e.preventDefault(); cycleTab(1); }
+    else if (k === '1') { window.ticker.focusTab('minute'); }
+    else if (k === '2') { window.ticker.focusTab('five'); }
+    else if (k === '3') { window.ticker.focusTab('day'); }
+    else if (k === 'Escape') { e.preventDefault(); window.ticker.focusClose(); }
+  });
+
+  function cycleTab(dir) {
+    var order = ['minute', 'five', 'day'];
+    var i = order.indexOf(state.tab);
+    if (i < 0) i = 0;
+    i = (i + dir + order.length) % order.length;
+    window.ticker.focusTab(order[i]);
+  }
+
+  window.ticker.onFocusState(applyMeta);
+
+  window.addEventListener('resize', function () {
+    if (!state.on) return;
+    if (resizeTimer) clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(render, 120);
+  });
+
+  // 自动配色切换后线条颜色要跟着换；文字靠 CSS 变量自己变，图里的是内联色，得重画
+  var lastTheme = '';
+  function themeKey() {
+    return document.body.getAttribute('data-text') || 'light';
+  }
+  new MutationObserver(function () {
+    var k = themeKey();
+    if (k === lastTheme) return;
+    lastTheme = k;
+    render();
+  }).observe(document.body, { attributes: true, attributeFilter: ['data-text'] });
+
+  /* ---------------- 启动 ---------------- */
+
+  window.ticker.focusGet().then(applyMeta).catch(function () {});
+})();

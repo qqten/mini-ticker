@@ -41,6 +41,12 @@
     return (v > 0 ? '+' : '') + v.toFixed(2) + '%';
   }
 
+  // 列表只报「上下多少点」，不再报绝对点位：+12.34 比 3714.48 更容易扫
+  function fmtChange(v, isFund) {
+    if (!isFinite(v)) return '--';
+    return (v > 0 ? '+' : '') + v.toFixed(isFund ? 4 : 2);
+  }
+
   function paintSpark(row, item) {
     var poly = row.poly;
     var base = row.base;
@@ -113,13 +119,14 @@
     if (row) return row;
     var el = document.createElement('div');
     el.className = 'row';
-    el.innerHTML = SPARK_SVG + '<span class="name"></span><span class="price"></span><span class="pct"></span>';
+    el.dataset.code = code;
+    el.innerHTML = SPARK_SVG + '<span class="name"></span><span class="chg"></span><span class="pct"></span>';
     row = {
       el: el,
       poly: el.querySelector('polyline'),
       base: el.querySelector('.baseline'),
       name: el.querySelector('.name'),
-      price: el.querySelector('.price'),
+      chg: el.querySelector('.chg'),
       pct: el.querySelector('.pct')
     };
     rowMap[code] = row;
@@ -131,13 +138,16 @@
     for (var i = 0; i < list.length; i++) {
       var item = list[i];
       var row = ensureRow(item.code);
-      var cls = clsOf(item.pct);
+      var cls = clsOf(item.change);
 
       if (item.name) row.name.textContent = item.name;
-      row.price.textContent = fmtPrice(item.price, item.fund);
-      row.price.className = 'price ' + cls;
+      row.chg.textContent = fmtChange(item.change, item.fund);
+      row.chg.className = 'chg ' + cls;
       row.pct.textContent = fmtPct(item.pct);
-      row.pct.className = 'pct ' + cls;
+      row.pct.className = 'pct ' + clsOf(item.pct);
+      // 点位不显示了，鼠标停一下还能看到
+      row.el.title = (item.name || item.code) + '  ' + fmtPrice(item.price, item.fund) +
+        '  ' + fmtChange(item.change, item.fund) + '  ' + fmtPct(item.pct);
 
       paintSpark(row, item);
 
@@ -146,7 +156,11 @@
     }
 
     // 清掉已经不在列表里的行
-    while (app.children.length > list.length) app.removeChild(app.lastChild);
+    while (app.children.length > list.length) {
+      var dead = app.lastChild;
+      delete rowMap[dead.dataset.code];
+      app.removeChild(dead);
+    }
 
     syncHeight();
   }
@@ -227,6 +241,8 @@
     if (e.button !== 0) return;
     if (pinned) return; // 固定模式不响应拖动
     if (e.target === pinBtn) return;
+    // 图表区（含周期按钮）要能交互，别被当成拖窗口；拖窗口从左列拖
+    if (e.target.closest && e.target.closest('#focus')) return;
     if (nearEdge(e)) return;
     dragging = true;
     try { e.target.setPointerCapture(e.pointerId); } catch (err) {}

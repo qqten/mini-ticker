@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, Menu, screen, shell, Notification, desktopCapturer, nativeImage } = require('electron');
+const { app, BrowserWindow, ipcMain, Menu, screen, shell, Notification, desktopCapturer, nativeImage, globalShortcut } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { execFile } = require('child_process');
@@ -938,16 +938,49 @@ function createWindow() {
           }, 5600);
         }
       }
-      setTimeout(function () {
+      if (which === 'focus') {
+        setFocus(true);
+        // 调试：TICKER_SHOT_FOCUS_TAB=day/five/minute 指定周期；TICKER_SHOT_FOCUS_STEP=1 切换下一个自选
+        if (process.env.TICKER_SHOT_FOCUS_TAB) {
+          setTimeout(function () { focusSetTab(process.env.TICKER_SHOT_FOCUS_TAB); }, 1600);
+        }
+        if (process.env.TICKER_SHOT_FOCUS_STEP) {
+          setTimeout(function () {
+            focusStep(Number(process.env.TICKER_SHOT_FOCUS_STEP) || 1);
+          }, 2400);
+        }
+        // 调试：TICKER_SHOT_FOCUS_CLOSE=1 展开后收起，验证窗口能还原
+        if (process.env.TICKER_SHOT_FOCUS_CLOSE) {
+          setTimeout(function () { setFocus(false); }, 3800);
+        }
+      }
+
+      setTimeout(async function () {
         const target = (which === 'settings' && settingsWin) ? settingsWin : win;
         if (!target || target.isDestroyed()) return;
-        target.webContents.capturePage().then(function (img) {
-          const dir = path.join(ROOT, '.dev');
-          try { fs.mkdirSync(dir, { recursive: true }); } catch (e) {}
-          fs.writeFileSync(path.join(dir, which === 'settings' ? 'settings.png' : 'self.png'), img.toPNG());
-          app.quit();
-        });
-      }, which === 'settings' ? 7000 : 5000);
+        // 调试：TICKER_SHOT_LAYOUT=1 时把各区块实际尺寸打进日志，排查布局问题
+        if (process.env.TICKER_SHOT_LAYOUT) {
+          try {
+            const txt = await target.webContents.executeJavaScript(
+              "(function(){var r=function(id){var e=document.getElementById(id);if(!e)return null;" +
+              "var b=e.getBoundingClientRect();return [Math.round(b.x),Math.round(b.y),Math.round(b.width),Math.round(b.height)];};" +
+              "var row=document.querySelector('.row');var rb=row?row.getBoundingClientRect():null;" +
+              "return JSON.stringify({win:[innerWidth,innerHeight],left:r('left'),app:r('app'),focus:r('focus'),chart:r('chart')," +
+              "row:rb?[Math.round(rb.width),Math.round(rb.height)]:null,lw:getComputedStyle(document.body).getPropertyValue('--left-w')," +
+              "cls:document.body.className});})()"
+            );
+            logLine('[layout]', String(txt));
+          } catch (e) {
+            logLine('[layout]', 'fail ' + e.message);
+          }
+        }
+        const img = await target.webContents.capturePage();
+        const dir = path.join(ROOT, '.dev');
+        try { fs.mkdirSync(dir, { recursive: true }); } catch (e) {}
+        const file = which === 'settings' ? 'settings.png' : which === 'focus' ? 'focus.png' : 'self.png';
+        fs.writeFileSync(path.join(dir, file), img.toPNG());
+        app.quit();
+      }, which === 'settings' ? 7000 : which === 'focus' ? 6500 : 5000);
     });
   }
 
@@ -967,12 +1000,22 @@ function createWindow() {
   win.on('resize', function () {
     if (!win || win.isDestroyed()) return;
     resizingAt = Date.now();
+    if (Date.now() < skipResizeUntil) return;   // 聚焦展开/收起是程序改的，别当成用户拖动
     if (sizeSaveTimer) clearTimeout(sizeSaveTimer);
     sizeSaveTimer = setTimeout(function () {
       if (!win || win.isDestroyed()) return;
       const size = win.getSize();
+      const w = size[0];
       const h = size[1];
-      config.width = Math.max(220, Math.min(640, size[0]));
+      if (focusOn) {
+        // 聚焦时拖的是图表栏宽度：总宽减去左侧列表宽度，列表宽度不变
+        focusChartW = Math.max(160, Math.min(1200, w - focusLeftW));
+        config.focusChartWidth = focusChartW;
+        saveConfig();
+        broadcast();
+        return;
+      }
+      config.width = Math.max(220, Math.min(640, w));
       config.height = Math.abs(h - autoFitHeight) > 4 ? h : 0;
       saveConfig();
       broadcast();
@@ -981,6 +1024,7 @@ function createWindow() {
 
   win.on('closed', function () {
     win = null;
+    focusOn = false;
     if (settingsWin && !settingsWin.isDestroyed()) settingsWin.close();
   });
 }
@@ -1020,6 +1064,266 @@ function openSettings() {
       win.setSize(w, win.getSize()[1]);
     }
   });
+}
+
+/* ---------------- 聚焦图表：单标的分时 / 5日 / 日K ---------------- */
+
+const FOCUS_TABS = ['minute', 'five', 'day'];
+const FOCUS_SESSION_A = 242;   // A 股一个交易日：09:30-11:30 + 13:00-15:00，含首尾共 242 个分钟点
+const FOCUS_SESSION_HK = 332;  // 港股：09:30-12:00 + 13:00-16:00
+const FOCUS_SESSION_US = 392;  // 美股：09:30-16:00（东部时间）
+const FOCUS_TTL = { minute: 15000, five: 60000, day: 60000 };
+
+// 聚焦不是另开窗口：直接把浮窗本身加宽加高，上面照旧是自选列表，下面挂图表。
+let focusOn = false;
+let focusCode = '';
+let focusTab = 'minute';
+let focusCache = {};
+let focusHotkeyAcc = '';
+let focusRestore = null;      // 展开前的窗口位置尺寸，收起时原样还原
+let focusChartW = 620;        // 图表栏宽度，拖窗口时自动记住（config.focusChartWidth）
+let focusLeftW = 320;         // 展开时左侧列表占的宽度 = 展开前的窗口宽度
+let skipResizeUntil = 0;      // 程序化改尺寸期间，别当成用户拖动落盘
+
+function sessionMinutes(code) {
+  if (/^hk/i.test(code)) return FOCUS_SESSION_HK;
+  if (/^us/i.test(code)) return FOCUS_SESSION_US;
+  return FOCUS_SESSION_A;
+}
+
+// 分时原始行：`0930 3714.48 3228780 5179731313.30`（时间 价格 累计量 累计额）
+// 累计量要差分回每分钟成交量；均价线用「价格×该分钟量」累加算 VWAP，
+// 不能用 累计额/累计量 —— 指数的量是手、额是元，除出来是市场平均股价，不是点位。
+function parseMinuteLines(lines) {
+  const pts = [];
+  let prevCum = 0, cumVol = 0, cumPV = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const f = String(lines[i]).trim().split(/\s+/);
+    const t = f[0];
+    const p = num(f[1]);
+    const cum = num(f[2]);
+    if (!isFinite(p) || !/^\d{3,4}$/.test(t)) continue;
+    let v = isFinite(cum) ? cum - prevCum : 0;
+    if (!(v > 0)) v = 0;
+    if (isFinite(cum)) prevCum = cum;
+    cumVol += v;
+    cumPV += p * v;
+    pts.push({ t: t, price: p, vol: v, avg: cumVol > 0 ? cumPV / cumVol : p });
+  }
+  return pts;
+}
+
+async function buildFocusPayload(code, tab) {
+  const snapP = fetchSnapshots([code]).catch(function () { return {}; });
+  let name = NAMES[code] || code;
+  let price = NaN, pct = NaN, prevClose = NaN, change = NaN;
+  let days = [];
+  let candles = [];
+  let session = sessionMinutes(code);
+
+  if (tab === 'day') {
+    const rows = await fetchKlineRaw(code, 'day', 160);
+    candles = rows.map(function (r) {
+      return { d: String(r[0]), o: num(r[1]), c: num(r[2]), h: num(r[3]), l: num(r[4]), v: num(r[5]) };
+    }).filter(function (x) { return isFinite(x.c) && isFinite(x.o) && isFinite(x.h) && isFinite(x.l); });
+    if (candles.length) {
+      const last = candles[candles.length - 1];
+      price = last.c;
+      if (candles.length > 1) prevClose = candles[candles.length - 2].c;
+      if (!isFinite(prevClose) || prevClose === 0) prevClose = last.o;
+      pct = ((price - prevClose) / prevClose) * 100;
+      change = price - prevClose;
+    }
+  } else if (tab === 'five') {
+    const j = await fetchTencentJson('/appstock/app/day/query?code=' + encodeURIComponent(code));
+    const block = j && j.data && j.data[code];
+    const arr = (block && block.data) || [];
+    // 接口按「今天 → 前 4 天」倒序给，画图要正序
+    const list = arr.slice().sort(function (a, b) {
+      return String(a.date).localeCompare(String(b.date));
+    });
+    days = list.map(function (d) {
+      const pts = parseMinuteLines(d.data || []);
+      return { date: String(d.date || ''), prec: num(d.prec), points: pts };
+    }).filter(function (d) { return d.points.length > 1; });
+    if (days.length) {
+      const lastDay = days[days.length - 1];
+      const lastPt = lastDay.points[lastDay.points.length - 1];
+      price = lastPt.price;
+      prevClose = lastDay.prec;
+      if (!isFinite(prevClose) || !prevClose) prevClose = days[0].points[0].price;
+      pct = ((price - prevClose) / prevClose) * 100;
+      change = price - prevClose;
+    }
+  } else {
+    const j = await fetchTencentJson('/appstock/app/minute/query?code=' + encodeURIComponent(code));
+    const block = j && j.data && j.data[code];
+    const lines = (block && block.data && block.data.data) || [];
+    const qt = (block && block.qt && block.qt[code]) || [];
+    const pts = parseMinuteLines(lines);
+    if (pts.length > 1) {
+      days = [{ date: String((block.data && block.data.date) || ''), prec: num(qt[4]), points: pts }];
+      const lastPt = pts[pts.length - 1];
+      price = lastPt.price;
+      prevClose = num(qt[4]);
+      pct = num(qt[32]);
+      change = num(qt[31]);
+      if (qt[1]) name = qt[1];
+      if (!isFinite(prevClose) || !prevClose) prevClose = pts[0].price;
+      if (!isFinite(pct)) pct = ((price - prevClose) / prevClose) * 100;
+    }
+  }
+
+  const snap = await snapP;
+  if (snap && snap[code]) {
+    if (snap[code].name) name = snap[code].name;
+    if (!isFinite(price) && isFinite(snap[code].price)) price = snap[code].price;
+    if (!isFinite(prevClose) && isFinite(snap[code].prevClose)) prevClose = snap[code].prevClose;
+    if (!isFinite(pct) && isFinite(snap[code].pct)) pct = snap[code].pct;
+  }
+
+  const hasData = tab === 'day' ? candles.length > 1 : days.length > 0;
+  return {
+    code: code, name: name, tab: tab, session: session,
+    price: price, pct: pct, prevClose: prevClose, change: change,
+    days: days, candles: candles, hasData: hasData, at: Date.now()
+  };
+}
+
+async function focusPayload(code, tab) {
+  const key = code + '|' + tab;
+  const hit = focusCache[key];
+  if (hit && Date.now() - hit.at < FOCUS_TTL[tab]) return hit.data;
+  const data = await buildFocusPayload(code, tab);
+  focusCache[key] = { at: Date.now(), data: data };
+  return data;
+}
+
+// 聚焦时上下键翻的就是左列显示的那几行（config.symbols），
+// 而不是背后更长的 watchlist —— 否则高亮行会跟着跑到看不见的地方
+function focusList() {
+  const shown = (config.symbols || []).filter(Boolean);
+  if (shown.length) return shown.slice();
+  const wl = (config.watchlist && config.watchlist.length) ? config.watchlist : [];
+  return wl.slice();
+}
+
+function focusMeta() {
+  const list = focusList();
+  const hit = focusCache[focusCode + '|' + focusTab];
+  return {
+    on: focusOn,
+    code: focusCode,
+    tab: focusTab,
+    tabs: FOCUS_TABS,
+    list: list,
+    index: list.indexOf(focusCode),
+    total: list.length,
+    name: (hit && hit.data && hit.data.name) || NAMES[focusCode] || focusCode,
+    hotkey: focusHotkeyAcc,
+    leftW: Math.round(focusLeftW),
+    chartW: focusChartW
+  };
+}
+
+function pushFocusState() {
+  if (!win || win.isDestroyed()) return;
+  try { win.webContents.send('focus-state', focusMeta()); } catch (e) {}
+}
+
+// 展开方式：不改高度，只把窗口往右边加宽（右边顶到屏幕边缘时改往左加宽），
+// 左边这一块宽度保持原样，多出来的部分给图表。这样列表位置和字号完全不变。
+const FOCUS_CHART_MIN = 320;
+const FOCUS_CHART_MAX = 1100;
+const FOCUS_CHART_DEFAULT = 620;
+
+function focusTargetBounds() {
+  const cur = win.getBounds();
+  const area = screen.getDisplayMatching(cur).workArea;
+  const leftW = Math.round(cur.width);
+  let chartW = Math.round(config.focusChartWidth || FOCUS_CHART_DEFAULT);
+  if (!isFinite(chartW)) chartW = FOCUS_CHART_DEFAULT;
+  chartW = Math.max(FOCUS_CHART_MIN, Math.min(FOCUS_CHART_MAX, chartW));
+  // 屏幕放不下就压缩图表栏，宁可窄一点也不能溢出可视区
+  const room = area.width - leftW - 8;
+  chartW = Math.max(160, Math.min(chartW, room));
+  const width = leftW + chartW;
+  const height = Math.min(cur.height, area.height);
+
+  // 优先向右扩；右侧放不下就整体向左挪，右边缘保持不动
+  let x = cur.x;
+  if (x + width > area.x + area.width) x = cur.x - (width - cur.width);
+  x = Math.max(area.x, Math.min(x, area.x + area.width - width));
+  const y = Math.max(area.y, Math.min(cur.y, area.y + area.height - height));
+  return { x: x, y: y, width: width, height: height, leftW: leftW, chartW: chartW };
+}
+
+function setFocus(on) {
+  if (!win || win.isDestroyed()) return;
+  on = !!on;
+  if (on === focusOn) { if (on) pushFocusState(); return; }
+
+  if (on) {
+    const list = focusList();
+    if (!focusCode || list.indexOf(focusCode) < 0) {
+      const first = (config.symbols || []).filter(function (c) { return list.indexOf(c) >= 0; })[0];
+      focusCode = first || list[0] || 'sh000001';
+    }
+    const b = focusTargetBounds();
+    focusRestore = win.getBounds();
+    focusLeftW = b.leftW;
+    focusChartW = b.chartW;
+    focusOn = true;
+    // maxWidth 平时卡在 640，展开前先放开，否则 setBounds 会被裁回 640
+    try { win.setMaximumSize(1600, 900); } catch (e) {}
+    skipResizeUntil = Date.now() + 900;
+    resizingAt = Date.now();
+    win.setBounds({ x: b.x, y: b.y, width: b.width, height: b.height });
+    win.focus();
+    logLine('[focus]', '展开图表 ' + focusCode + ' tab=' + focusTab + ' 宽度 ' + b.leftW + '+' + b.chartW);
+  } else {
+    focusOn = false;
+    const r = focusRestore;
+    focusRestore = null;
+    try { win.setMaximumSize(640, 900); } catch (e) {}
+    if (r) {
+      skipResizeUntil = Date.now() + 900;
+      resizingAt = Date.now();
+      win.setBounds(r);
+    }
+    logLine('[focus]', '收起图表');
+  }
+  pushFocusState();
+}
+
+function focusStep(dir) {
+  if (!focusOn) return;
+  const list = focusList();
+  if (!list.length) return;
+  let i = list.indexOf(focusCode);
+  if (i < 0) i = 0;
+  i = (i + (dir > 0 ? 1 : -1) + list.length) % list.length;
+  focusCode = list[i];
+  logLine('[focus]', '切换标的自选 ' + focusCode);
+  pushFocusState();
+}
+
+function focusSetTab(tab) {
+  if (FOCUS_TABS.indexOf(tab) < 0 || tab === focusTab) return;
+  focusTab = tab;
+  pushFocusState();
+}
+
+// Ctrl+Alt+F 全局唤起；再按一次收起
+function toggleFocus() { setFocus(!focusOn); }
+
+function registerFocusHotkey() {
+  const acc = config.focusHotkey || 'CommandOrControl+Alt+F';
+  try { if (focusHotkeyAcc) globalShortcut.unregister(focusHotkeyAcc); } catch (e) {}
+  let ok = false;
+  try { ok = globalShortcut.register(acc, function () { logLine('[hotkey]', '触发 ' + acc); toggleFocus(); }); } catch (e) {}
+  focusHotkeyAcc = acc;
+  logLine('[hotkey]', '聚焦图表 ' + acc + (ok ? ' 注册成功' : ' 注册失败（可能被其它程序占用）'));
 }
 
 /* ---------------- 背景明暗自动检测 ---------------- */
@@ -1321,6 +1625,8 @@ ipcMain.on('set-height', function (e, h) {
   autoFitHeight = height;
   // 用户手动拖过高度，或者正在拖，都别按内容改回去
   if (config.height > 0 || Date.now() - resizingAt < 600) return;
+  // 聚焦展开时窗口高度 = 列表 + 图表，列表本身的高度只记在 autoFitHeight 里
+  if (focusOn) return;
   if (win.getSize()[1] === height) return;
   const pos = win.getPosition();
   win.setBounds({ x: pos[0], y: pos[1], width: config.width || 320, height: height });
@@ -1781,6 +2087,29 @@ ipcMain.handle('settings-save', async function (e, patch) {
 
 ipcMain.on('open-settings', function () { openSettings(); });
 
+/* ---------------- 聚焦图表 IPC ---------------- */
+
+ipcMain.handle('focus-state', function () { return focusMeta(); });
+
+ipcMain.handle('focus-data', async function () {
+  try {
+    const data = await focusPayload(focusCode, focusTab);
+    return Object.assign({ ok: true }, data);
+  } catch (e) {
+    logLine('[focus]', '取数失败 ' + focusCode + ' (' + focusTab + ')：' + e.message);
+    return { ok: false, error: e.message, code: focusCode, tab: focusTab, name: NAMES[focusCode] || focusCode };
+  }
+});
+
+ipcMain.on('focus-open', function (e, code) {
+  if (code && focusList().indexOf(code) >= 0) focusCode = code;
+  setFocus(true);
+});
+ipcMain.on('focus-toggle', function () { toggleFocus(); });
+ipcMain.on('focus-step', function (e, dir) { focusStep(dir); });
+ipcMain.on('focus-tab', function (e, tab) { focusSetTab(tab); });
+ipcMain.on('focus-close', function () { logLine('[focus]', 'IPC focus-close'); setFocus(false); });
+
 ipcMain.on('set-period', function (e, p) {
   if (PERIODS.indexOf(p) >= 0) setPeriod(p);
 });
@@ -1794,6 +2123,13 @@ ipcMain.on('open-menu', function () {
   // 菜单只留盯盘当下要用的：其余开关都在设置面板里
   const menu = Menu.buildFromTemplate([
     { label: '设置…', accelerator: 'CmdOrCtrl+,', click: function () { openSettings(); } },
+    {
+      label: '聚焦图表',
+      type: 'checkbox',
+      checked: focusOn,
+      sublabel: focusHotkeyAcc || 'Ctrl+Alt+F',
+      click: function () { toggleFocus(); }
+    },
     { type: 'separator' },
     {
       label: '周期',
@@ -1900,6 +2236,7 @@ if (!gotTheLock) {
 
     app.setAppUserModelId('com.miniticker.watch');
     createWindow();
+    registerFocusHotkey();
     startAlertTimer();
     startBackgroundProbe();
     startAutoExitTimer();
@@ -1920,6 +2257,10 @@ app.on('window-all-closed', function () {
 app.on('before-quit', function () {
   logLine('[before-quit]', '准备退出');
   saveConfig();
+});
+
+app.on('will-quit', function () {
+  try { globalShortcut.unregisterAll(); } catch (e) {}
 });
 
 app.on('quit', function (e, code) {

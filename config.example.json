@@ -41,6 +41,8 @@
   "baseline": true,
   "alwaysOnTop": true,
   "locked": false,
+  "focusHotkey": "CommandOrControl+Alt+F",
+  "focusChartWidth": 620,
   "width": 320,
   "height": 0,
   "pos": null

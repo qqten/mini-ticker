@@ -13,10 +13,27 @@ html, body {
 
 body {
   border-radius: 10px;
-  /* 竖向 flex：head 固定高度，剩下全给 #app，行再按剩余高度均分 */
+  /* 横向 flex：#left 是原浮窗，#focus 是聚焦时向右长出来的图表栏 */
+  display: flex;
+  flex-direction: row;
+  height: 100vh;
+}
+
+#left {
   display: flex;
   flex-direction: column;
-  height: 100vh;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  /* 聚焦展开后左边这一列保持展开前的宽度（由主进程算出，写入 --left-w） */
+  flex-basis: auto;
+}
+
+body.focus #left {
+  /* 用 min() 兜底：窗口被拖窄时左列自动让位，图表永远留 160px */
+  flex: 0 0 auto;
+  width: min(var(--left-w, 320px), calc(100% - 160px));
+  min-width: 0;
 }
 
 /* ---- 配色：中国市场习惯，涨红跌绿 ---- */
@@ -27,6 +44,14 @@ body {
   --text: #f4f7fb;
   --sub: #b6c0ce;
   --shadow: 0 1px 3px rgba(0, 0, 0, .9), 0 0 1px rgba(0, 0, 0, .7);
+
+  /* 图表线条：亮字模式（深色桌面） */
+  --chart-line: #4bb2ff;
+  --chart-avg: #f2c14e;
+  --chart-ma10: #8fb4ff;
+  --chart-ma20: #cf98f5;
+  --chart-grid: rgba(255, 255, 255, .16);
+  --chart-halo: rgba(0, 0, 0, .55);
 }
 
 body[data-text="dark"] {
@@ -36,10 +61,18 @@ body[data-text="dark"] {
   --down: #07996a;
   --flat: #6b7683;
   --shadow: 0 1px 3px rgba(255, 255, 255, .95), 0 0 1px rgba(255, 255, 255, .8);
+
+  /* 图表线条：暗字模式（浅色桌面），压低亮度保证在浅背景上可读 */
+  --chart-line: #0b63c4;
+  --chart-avg: #9a6a05;
+  --chart-ma10: #2f56c8;
+  --chart-ma20: #7b3bb0;
+  --chart-grid: rgba(0, 0, 0, .16);
+  --chart-halo: rgba(255, 255, 255, .9);
 }
 
 /* 自动配色切换时淡入，避免背景变化瞬间文字生硬跳色 */
-.name, .price, .pct, .spark polyline, .spark .baseline {
+.name, .chg, .pct, .spark polyline, .spark .baseline {
   transition: color .38s ease, stroke .38s ease, filter .38s ease;
 }
 
@@ -153,9 +186,10 @@ body[data-text="dark"] .spark polyline {
   text-shadow: var(--shadow);
 }
 
-.price {
+.chg {
   flex: 0 0 auto;
-  font-size: 14px;
+  min-width: 50px;
+  font-size: 12.5px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
   font-feature-settings: "tnum";
@@ -179,3 +213,142 @@ body[data-text="dark"] .spark polyline {
 .flat { color: var(--flat); }
 
 body.noname .name { display: none; }
+
+/* ================= 聚焦图表：长在原窗口右边，背景保持透明 ================= */
+
+#focus {
+  display: none;
+  /* 不吃宽度：窗口被主进程加宽了多少，图表就占多少 */
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+  /* 只一条极淡竖线分隔，不铺任何背景色 */
+  border-left: 1px solid var(--chart-grid);
+}
+
+body.focus #focus { display: flex; }
+
+/* 展开后列表仍按行数均分高度，宽度由 #left 固定 */
+body.focus #app { flex: 1 1 auto; }
+body.focus .row { flex: 1 1 0; }
+
+/* 聚焦时行里只留「名称 + 点数 + 涨跌幅」，折线交给右边的大图 */
+body.focus .spark { display: none; }
+
+body.focus .row.active {
+  background: rgba(128, 140, 160, .14);
+  border-radius: 5px;
+}
+body.focus .row.active .name {
+  color: var(--text);
+  font-weight: 600;
+}
+
+#focus-head {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  flex: 0 0 auto;
+  height: 20px;
+  padding: 0 9px 2px;
+  font-size: 11px;
+  color: var(--sub);
+  text-shadow: var(--shadow);
+}
+
+#f-name {
+  max-width: 38%;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 12px;
+  color: var(--text);
+  letter-spacing: .3px;
+}
+
+#f-chg, #f-pct {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+}
+
+/* 涨跌色要单独提权：上面给 #f-chg 设了颜色，.up/.down 是类选择器压不过 id */
+#f-chg.up, #f-pct.up { color: var(--up); }
+#f-chg.down, #f-pct.down { color: var(--down); }
+#f-chg.flat, #f-pct.flat { color: var(--flat); }
+
+#f-pos {
+  margin-left: 2px;
+  opacity: .5;
+  font-variant-numeric: tabular-nums;
+}
+
+#f-tabs {
+  margin-left: auto;
+  display: flex;
+  gap: 1px;
+}
+
+#f-tabs button {
+  background: transparent;
+  border: 0;
+  padding: 1px 6px;
+  border-radius: 4px;
+  color: var(--sub);
+  font-family: inherit;
+  font-size: 10px;
+  line-height: 14px;
+  opacity: .5;
+  cursor: pointer;
+  text-shadow: var(--shadow);
+  transition: opacity .15s ease, color .15s ease;
+}
+
+#f-tabs button:hover { opacity: .85; }
+
+#f-tabs button.on {
+  opacity: 1;
+  color: var(--text);
+  background: rgba(128, 140, 160, .2);
+}
+
+#chart {
+  flex: 1 1 auto;
+  min-height: 0;
+  position: relative;
+  padding: 0 4px 2px;
+}
+
+#chart svg { display: block; }
+
+/* 透明窗口压在任意桌面上：给文字加描边光晕，给线条加投影，否则遇到同色背景就消失 */
+#chart text {
+  paint-order: stroke;
+  stroke: var(--chart-halo);
+  stroke-width: 2.4px;
+  stroke-linejoin: round;
+  font-family: inherit;
+}
+
+#chart svg {
+  filter: drop-shadow(0 0 1.2px rgba(0, 0, 0, .45));
+}
+
+body[data-text="dark"] #chart svg {
+  filter: drop-shadow(0 0 1.2px rgba(255, 255, 255, .5));
+}
+
+#chart .empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  color: var(--sub);
+  text-shadow: var(--shadow);
+}
+
+body.stale #chart { opacity: .45; }

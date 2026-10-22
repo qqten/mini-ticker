@@ -15,6 +15,16 @@ contextBridge.exposeInMainWorld('ticker', {
   onRefitHeight: function (fn) { ipcRenderer.on('refit-height', function () { fn(); }); },
   onStateChanged: function (fn) { ipcRenderer.on('state-changed', function (e, cfg) { fn(cfg); }); },
 
+  // 聚焦图表（在原窗口里展开，不另开窗口）
+  focusOpen: function (code) { ipcRenderer.send('focus-open', code); },
+  focusToggle: function () { ipcRenderer.send('focus-toggle'); },
+  focusClose: function () { ipcRenderer.send('focus-close'); },
+  focusGet: function () { return ipcRenderer.invoke('focus-state'); },
+  focusData: function () { return ipcRenderer.invoke('focus-data'); },
+  focusStep: function (dir) { ipcRenderer.send('focus-step', dir); },
+  focusTab: function (tab) { ipcRenderer.send('focus-tab', tab); },
+  onFocusState: function (fn) { ipcRenderer.on('focus-state', function (e, s) { fn(s); }); },
+
   // 设置面板
   getSettings: function () { return ipcRenderer.invoke('settings-get'); },
   saveSettings: function (patch) { return ipcRenderer.invoke('settings-save', patch); },
