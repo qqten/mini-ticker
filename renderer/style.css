@@ -70,6 +70,19 @@ body[data-text="dark"].backdrop {
   transition: color .38s ease;
 }
 
+#pin-btn {
+  margin-left: 8px;
+  cursor: pointer;
+  opacity: .35;
+  transition: opacity .15s ease;
+  user-select: none;
+  -webkit-user-select: none;
+  fill: var(--sub);
+}
+
+#pin-btn:hover { opacity: 1; }
+body.pinned #pin-btn { opacity: 1; fill: var(--up); }
+
 #app {
   padding: 6px 8px;
   display: flex;

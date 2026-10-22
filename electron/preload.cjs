@@ -22,5 +22,7 @@ contextBridge.exposeInMainWorld('ticker', {
   searchSymbol: function (q) { return ipcRenderer.invoke('search-symbol', q); },
   testAlert: function () { ipcRenderer.send('test-alert'); },
   closeSettings: function () { ipcRenderer.send('settings-close'); },
-  previewWidth: function (w) { ipcRenderer.send('preview-width', w); }
+  previewWidth: function (w) { ipcRenderer.send('preview-width', w); },
+  setPinned: function (on) { ipcRenderer.send('set-pinned', on); },
+  setPinZone: function (on) { ipcRenderer.send('set-pin-zone', on); }
 });

@@ -50,7 +50,16 @@ const NAMES = {
   usDJI: '道琼斯',
   usIXIC: '纳斯达克',
   usINX: '标普500',
-  usNDX: '纳指100'
+  usNDX: '纳指100',
+  hf_GC: '纽约金',
+  hf_XAU: '伦敦金',
+  hf_SI: '纽约白银',
+  hf_XAG: '伦敦银',
+  hf_XPT: '纽约铂金',
+  hf_CL: 'WTI原油',
+  hf_OIL: '布伦特原油',
+  hf_HG: 'COMEX铜',
+  hf_NG: '美国天然气'
 };
 
 const DEFAULT_WATCHLIST = [
@@ -169,17 +178,33 @@ async function fetchSnapshots(codes) {
     const text = await fetchGbk('https://qt.gtimg.cn/q=' + codes.join(','));
     const map = {};
     text.split(';').forEach(function (line) {
-      const m = line.match(/v_([a-zA-Z0-9]+)="([^"]*)"/);
+      const m = line.match(/v_([a-zA-Z0-9_]+)="([^"]*)"/);
       if (!m) return;
+      const code = m[1];
       const a = m[2].split('~');
-      map[m[1]] = {
-        name: a[1] || m[1],
-        price: num(a[3]),
-        prevClose: num(a[4]),
-        pct: num(a[32]),
-        change: num(a[31]),
-        time: a[30] || ''
-      };
+      if (/^hf_/i.test(code)) {
+        // 外盘期货：现价,涨跌,...,最高,最低,时间,昨结,今开,...,日期,名称
+        const price = num(a[0]);
+        const change = num(a[1]);
+        const prev = num(a[7]);
+        map[code] = {
+          name: NAMES[code] || a[13] || code,
+          price: price,
+          prevClose: prev,
+          pct: (isFinite(price) && isFinite(prev) && prev) ? (change / prev) * 100 : NaN,
+          change: change,
+          time: (a[12] || '') + ' ' + (a[6] || '')
+        };
+      } else {
+        map[code] = {
+          name: a[1] || code,
+          price: num(a[3]),
+          prevClose: num(a[4]),
+          pct: num(a[32]),
+          change: num(a[31]),
+          time: a[30] || ''
+        };
+      }
     });
     if (Object.keys(map).length) return map;
     throw new Error('快照为空');
@@ -324,34 +349,53 @@ async function searchSymbols(keyword) {
   const q = String(keyword || '').trim();
   if (!q) return [];
 
-  const text = await fetchGbk('https://smartbox.gtimg.cn/s3/?q=' + encodeURIComponent(q) + '&t=all&c=1');
-  const m = /v_hint="([^"]*)"/.exec(text);
-  if (!m || !m[1] || m[1] === 'N') return [];
-
   const out = [];
   const seen = {};
-  m[1].split('^').forEach(function (row) {
-    const a = row.split('~');
-    if (a.length < 5) return;
 
-    const market = String(a[0] || '').toLowerCase();
-    const raw = String(a[1] || '');
-    const name = unescapeUnicode(a[2] || '');
-    const type = a[4] || '';
+  // 用户直接输入代码（如 hf_GC、sh518880）时，即使搜索接口没有也直接返回
+  if (isValidCode(q)) {
+    out.push({ code: q, name: NAMES[q] || q, market: q.slice(0, 2).toLowerCase(), type: '', typeLabel: '' });
+    seen[q] = true;
+  }
 
-    // 场外基金在内部统一用 6 位纯数字（走新浪估值），其余是「市场前缀 + 代码」
-    const code = (market === 'jj' || market === 'of' || type === 'KJ') ? raw : market + raw;
-
-    if (!isValidCode(code) || seen[code]) return;
-    seen[code] = true;
-    out.push({
-      code: code,
-      name: name || code,
-      market: market,
-      type: type,
-      typeLabel: TYPE_LABEL[type] || ''
-    });
+  // 外盘期货（hf_）搜索接口不覆盖，按名称本地匹配
+  const ql = q.toLowerCase();
+  Object.keys(NAMES).forEach(function (code) {
+    if (!/^hf_/i.test(code)) return;
+    const name = NAMES[code];
+    if (seen[code]) return;
+    if (name.toLowerCase().indexOf(ql) >= 0 || code.toLowerCase().indexOf(ql) >= 0) {
+      out.push({ code: code, name: name, market: 'hf', type: '', typeLabel: '外盘期货' });
+      seen[code] = true;
+    }
   });
+
+  const text = await fetchGbk('https://smartbox.gtimg.cn/s3/?q=' + encodeURIComponent(q) + '&t=all&c=1');
+  const m = /v_hint="([^"]*)"/.exec(text);
+  if (m && m[1] && m[1] !== 'N') {
+    m[1].split('^').forEach(function (row) {
+      const a = row.split('~');
+      if (a.length < 5) return;
+
+      const market = String(a[0] || '').toLowerCase();
+      const raw = String(a[1] || '');
+      const name = unescapeUnicode(a[2] || '');
+      const type = a[4] || '';
+
+      // 场外基金在内部统一用 6 位纯数字（走新浪估值），其余是「市场前缀 + 代码」
+      const code = (market === 'jj' || market === 'of' || type === 'KJ') ? raw : market + raw;
+
+      if (!isValidCode(code) || seen[code]) return;
+      seen[code] = true;
+      out.push({
+        code: code,
+        name: name || code,
+        market: market,
+        type: type,
+        typeLabel: TYPE_LABEL[type] || ''
+      });
+    });
+  }
 
   return out.slice(0, 12);
 }
@@ -496,7 +540,38 @@ function yearlySeries(rows) {
   return order.map(function (y) { return byYear[y]; });
 }
 
+// 外盘期货（hf_）→ 东方财富 secid 映射（腾讯不提供外盘分时/K线）
+const HF_EM_SECID = {
+  hf_XAU: '122.XAU',   // 伦敦金（现货黄金）
+  hf_XAG: '122.XAG',   // 伦敦银（现货白银）
+  hf_GC: '101.GC00Y',  // COMEX 黄金
+  hf_SI: '101.SI00Y',  // COMEX 白银
+  hf_CL: '102.CL00Y',  // NYMEX WTI 原油
+  hf_OIL: '112.B00Y',  // 布伦特原油
+  hf_HG: '101.HG00Y',  // COMEX 铜
+  hf_NG: '102.NG00Y',  // NYMEX 天然气
+  hf_XPT: '102.PL00Y'  // NYMEX 铂金
+};
+
 async function fetchSeries(code, period) {
+  // 外盘期货（hf_ 前缀）：腾讯不提供分时/K线，走东方财富
+  if (/^hf_/i.test(code)) {
+    const secid = HF_EM_SECID[code];
+    if (secid && period === 'minute') {
+      // 当天分时：东财 trends2 接口
+      const url = 'https://push2.eastmoney.com/api/qt/stock/trends2/get?secid=' + secid +
+        '&fields1=f1,f2,f3,f4,f5,f6,f7,f8&fields2=f51,f52,f53,f54,f55&iscr=0&ndays=1';
+      const j = await fetchJson(url);
+      const trends = (j && j.data && j.data.trends) || [];
+      return trends.map(function (t) { return num(String(t).split(',')[1]); }).filter(isFinite);
+    }
+    // 日K：新浪外盘期货日K，只取最近 30 个交易日
+    const sym = code.slice(3).toUpperCase();
+    const url = 'https://stock2.finance.sina.com.cn/futures/api/openapi.php/GlobalFuturesService.getGlobalFuturesDailyKLine?symbol=' + sym;
+    const j = await fetchJson(url);
+    const rows = (j && j.result && j.result.data) || [];
+    return rows.slice(-30).map(function (r) { return num(r.close); }).filter(isFinite);
+  }
   if (period === 'day') return closeSeries(await fetchKlineRaw(code, 'day', 120));
   if (period === 'month') return closeSeries(await fetchKlineRaw(code, 'month', 120));
   if (period === 'year') return yearlySeries(await fetchKlineRaw(code, 'month', 240));
@@ -648,10 +723,12 @@ function rangeChange(points) {
 }
 
 function buildItem(code, snap, points) {
+  // 场内 ETF/LOF 价格精度 3-4 位小数，和场外基金一样显示 4 位
+  const isEtf = /^sh5\d{5}$/i.test(code) || /^sz1[56]\d{4}$/i.test(code);
   const out = {
     code: code, name: (snap && snap.name) || NAMES[code] || code,
     price: NaN, prevClose: NaN, pct: NaN, change: NaN,
-    points: points || [], ok: false
+    points: points || [], ok: false, fund: isEtf
   };  if (snap) {
     out.price = snap.price;
     out.prevClose = snap.prevClose;
@@ -1280,6 +1357,23 @@ ipcMain.on('drag-end', function () {
   setTimeout(function () { probeBackground(true); }, 400);
 });
 
+// 图钉固定：开启后窗口不可拖动/拉伸，且鼠标穿透到下层应用
+let pinned = false;
+ipcMain.on('set-pinned', function (e, on) {
+  if (!win || win.isDestroyed()) return;
+  pinned = !!on;
+  win.setMovable(!pinned);
+  win.setResizable(!pinned);
+  win.setIgnoreMouseEvents(pinned, { forward: true });
+});
+
+// 鼠标移到右上角图钉按钮区域时临时恢复点击，移出后恢复穿透
+ipcMain.on('set-pin-zone', function (e, on) {
+  if (!win || win.isDestroyed()) return;
+  if (!pinned) return;
+  win.setIgnoreMouseEvents(!on, { forward: true });
+});
+
 ipcMain.on('save-config', function (e, patch) {
   if (!patch || typeof patch !== 'object') return;
   setAndBroadcast(patch, false);
@@ -1522,7 +1616,7 @@ function startScheduledTradingCheck() {
 
 function isValidCode(c) {
   if (typeof c !== 'string') return false;
-  return /^(sh|sz|bj|hk|us)[a-z0-9.]{1,12}$/i.test(c) || /^\d{6}$/.test(c);
+  return /^(sh|sz|bj|hk|us|hf)[a-z0-9._]{1,12}$/i.test(c) || /^\d{6}$/.test(c);
 }
 
 ipcMain.handle('settings-get', async function () {

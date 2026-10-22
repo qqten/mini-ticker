@@ -3,6 +3,7 @@
 
   var app = document.getElementById('app');
   var head = document.getElementById('head');
+  head.innerHTML = '<span id="period-label"></span><svg id="pin-btn" width="10" height="12" viewBox="0 0 10 12" title="固定窗口（点击穿透，不可拖动）"><path d="M5 0C2.8 0 1 1.8 1 4c0 1.5.8 2.8 2 3.5V11l2-1.5V7.5c1.2-.7 2-2 2-3.5 0-2.2-1.8-4-2-4z"/></svg>';
   var periodLabel = document.getElementById('period-label');
   var rowMap = {};
   var PERIOD_LABEL = { minute: '分时', day: '日线', month: '月线', year: '年线' };
@@ -64,7 +65,16 @@
     if (max < prev) max = prev;
     if (min > prev) min = prev;
 
-    var step = VW / (pts.length - 1);
+    // A 股交易日共 240 个交易分钟（上午 120 + 下午 120），午休不占宽度。
+    // 外盘期货每天交易约 23 小时（北京时间 6:00 到次日 5:00，中间休市 1 小时），
+    // 共约 1380 个分钟点。都按交易时间占比映射，开盘初期数据少就只占左边一段。
+    var TOTAL_MINUTES_A = 240;
+    var TOTAL_MINUTES_HF = 1380;
+    var isHf = /^hf_/i.test(item.code || '');
+    var total = isHf ? TOTAL_MINUTES_HF : TOTAL_MINUTES_A;
+    var xScale = (currentPeriod === 'minute')
+      ? (VW / total)
+      : (VW / Math.max(1, pts.length - 1));
     var out = [];
     var baseY;
 
@@ -77,7 +87,7 @@
       for (var j = 0; j < pts.length; j++) {
         var y = VH / 2 - ((pts[j] - prev) / span) * usable;
         if (y < 1) y = 1; else if (y > VH - 1) y = VH - 1;
-        out.push((j * step).toFixed(1) + ',' + y.toFixed(1));
+        out.push((j * xScale).toFixed(1) + ',' + y.toFixed(1));
       }
       baseY = VH / 2;
     } else {
@@ -87,7 +97,7 @@
       var room = VH - PAD * 2;
       for (var k = 0; k < pts.length; k++) {
         var yy = PAD + ((hi - pts[k]) / (hi - lo)) * room;
-        out.push((k * step).toFixed(1) + ',' + yy.toFixed(1));
+        out.push((k * xScale).toFixed(1) + ',' + yy.toFixed(1));
       }
       baseY = PAD + ((hi - prev) / (hi - lo)) * room;
     }
@@ -195,6 +205,16 @@
     updatePeriodLabel();
   }
 
+  var pinned = false;
+  var pinBtn = document.getElementById('pin-btn');
+
+  pinBtn.addEventListener('click', function (e) {
+    e.stopPropagation();
+    pinned = !pinned;
+    document.body.classList.toggle('pinned', pinned);
+    window.ticker.setPinned(pinned);
+  });
+
   /* ---- 拖动 / 菜单 ---- */
   // 边缘留 6px 给系统做缩放：否则一按到边上就变成拖窗口，拉不大
   function nearEdge(e) {
@@ -205,9 +225,10 @@
 
   document.addEventListener('pointerdown', function (e) {
     if (e.button !== 0) return;
+    if (pinned) return; // 固定模式不响应拖动
+    if (e.target === pinBtn) return;
     if (nearEdge(e)) return;
     dragging = true;
-    // 指针捕获：即使鼠标滑出窗口再松手也能收到 pointerup，避免窗口粘住鼠标
     try { e.target.setPointerCapture(e.pointerId); } catch (err) {}
     window.ticker.startDrag();
   });
@@ -221,6 +242,22 @@
   document.addEventListener('pointerup', endDrag);
   document.addEventListener('pointercancel', endDrag);
   window.addEventListener('blur', endDrag);
+
+  // 固定模式下：平时鼠标穿透到下层应用，鼠标移到右上角图钉按钮区域时临时恢复点击
+  var pinZoneActive = false;
+  document.addEventListener('mousemove', function (e) {
+    if (!pinned) return;
+    var rect = pinBtn.getBoundingClientRect();
+    var near = e.clientX >= rect.left - 10 && e.clientX <= rect.right + 10 &&
+               e.clientY >= rect.top - 4 && e.clientY <= rect.bottom + 10;
+    if (near && !pinZoneActive) {
+      pinZoneActive = true;
+      window.ticker.setPinZone(true);
+    } else if (!near && pinZoneActive) {
+      pinZoneActive = false;
+      window.ticker.setPinZone(false);
+    }
+  });
 
   window.addEventListener('contextmenu', function (e) {
     e.preventDefault();
