@@ -1,4 +1,4 @@
-(function () {
+﻿(function () {
   var VW = 240, VH = 100, PAD = 7;
 
   var app = document.getElementById('app');
@@ -76,7 +76,7 @@
     // 共约 1380 个分钟点。都按交易时间占比映射，开盘初期数据少就只占左边一段。
     var TOTAL_MINUTES_A = 240;
     var TOTAL_MINUTES_HF = 1380;
-    var isHf = /^hf_/i.test(item.code || '');
+    var isHf = /^hf_/i.test(item.code || '') || /^usDXY$/i.test(item.code || '');
     var total = isHf ? TOTAL_MINUTES_HF : TOTAL_MINUTES_A;
     var xScale = (currentPeriod === 'minute')
       ? (VW / total)
@@ -120,7 +120,7 @@
     var el = document.createElement('div');
     el.className = 'row';
     el.dataset.code = code;
-    el.innerHTML = SPARK_SVG + '<span class="name"></span><span class="chg"></span><span class="pct"></span>';
+    el.innerHTML = SPARK_SVG + '<div class="grip"></div><span class="name"></span><span class="chg"></span><span class="pct"></span>';
     row = {
       el: el,
       poly: el.querySelector('polyline'),
@@ -207,6 +207,32 @@
     timer = setInterval(refresh, Math.max(800, ms || 3000));
   }
 
+  /* ---- 折线宽度：sparkWidth 是「想要的宽度」，实际还要受窗口宽度约束 ---- */
+  var sparkWant = 120;
+
+  // 一行里除了折线和名称，其它列（手柄 / 点位 / 涨跌率）占掉多少
+  function sparkMax() {
+    var row = app.querySelector('.row');
+    if (!row) return sparkWant;
+    var kids = row.children, others = 0;
+    for (var i = 0; i < kids.length; i++) {
+      if (kids[i].classList.contains('spark') || kids[i].classList.contains('name')) continue;
+      others += kids[i].getBoundingClientRect().width;
+    }
+    var cs = getComputedStyle(row);
+    var gap = parseFloat(cs.columnGap || cs.gap) || 6;
+    others += gap * Math.max(0, kids.length - 1);
+    // 名称至少留 46px，剩下的才给折线
+    return Math.max(30, Math.round(row.clientWidth - others - 46));
+  }
+
+  function applySpark(w) {
+    sparkWant = Math.max(30, Math.min(400, Math.round(w || sparkWant)));
+    var real = Math.min(sparkWant, sparkMax());
+    document.body.style.setProperty('--spark-w', real + 'px');
+    return real;
+  }
+
   function applyState(s) {
     if (!s) return;
     // 自动模式下由主进程给出实际生效的配色
@@ -214,6 +240,7 @@
     document.body.setAttribute('data-text', mode === 'dark' ? 'dark' : 'light');
     document.body.classList.toggle('backdrop', !!s.backdrop);
     document.body.style.setProperty('--bd-op', ((s.backdropOpacity != null ? s.backdropOpacity : 40) / 100).toFixed(3));
+    if (s.sparkWidth != null) applySpark(s.sparkWidth);
     document.body.classList.toggle('noname', s.showName === false);
     showBaseline = s.baseline !== false;
     if (s.period) currentPeriod = s.period;
@@ -245,6 +272,32 @@
     // 图表区（含周期按钮）要能交互，别被当成拖窗口；拖窗口从左列拖
     if (e.target.closest && e.target.closest('#focus')) return;
     if (e.target === splitter) return;   // 分界线有自己的一套拖动
+    // 拖拽调整折线宽度（手柄只改折线宽，不拖窗口、也不触发聚焦）
+    if (e.target.classList && e.target.classList.contains('grip')) {
+      var grip = e.target;
+      grip.classList.add('dragging');
+      e.preventDefault();
+      var startX = e.clientX;
+      var sparkEl = grip.parentElement.querySelector('.spark');
+      var startW = sparkEl ? sparkEl.getBoundingClientRect().width : 120;
+      var finalW = startW;
+      var onMove = function (ev) {
+        // 拖动过程中就按窗口宽度收边，别让折线把名称挤没了
+        finalW = applySpark(startW + (ev.clientX - startX));
+      };
+      var onUp = function () {
+        grip.classList.remove('dragging');
+        window.removeEventListener('pointermove', onMove);
+        window.removeEventListener('pointerup', onUp);
+        window.removeEventListener('pointercancel', onUp);
+        window.ticker.save({ sparkWidth: Math.round(finalW) });
+      };
+      // 挂 window：鼠标移出手柄或系统没给 pointer capture 时也能继续跟手
+      window.addEventListener('pointermove', onMove);
+      window.addEventListener('pointerup', onUp);
+      window.addEventListener('pointercancel', onUp);
+      return;
+    }
     if (nearEdge(e)) return;
     dragging = true;
     try { e.target.setPointerCapture(e.pointerId); } catch (err) {}
@@ -303,15 +356,18 @@
   /* ---- 左键单击：没聚焦时展开图表，已聚焦时切到点的那一行 ---- */
   var downAt = null;
   document.addEventListener('pointerdown', function (e) {
-    downAt = { x: e.clientX, y: e.clientY };
+    // 记录屏幕坐标：拖窗口时窗口跟着鼠标跑，clientX 几乎不变，只有屏幕坐标能看出位移
+    downAt = { x: e.clientX, y: e.clientY, sx: e.screenX, sy: e.screenY };
   }, true);
 
   document.addEventListener('click', function (e) {
-    if (e.target.closest && (e.target.closest('#focus') || e.target.closest('#splitter'))) return;
-    if (e.target === pinBtn) return;
+    var t = e.target;
+    if (t.closest && (t.closest('#focus') || t.closest('#splitter') || t.closest('.grip'))) return;
+    if (t === pinBtn) return;
     // 拖着窗口跑（起点和落点差得多）不算点击，别顺手展开 / 换标的
-    if (downAt && (Math.abs(e.clientX - downAt.x) > 4 || Math.abs(e.clientY - downAt.y) > 4)) return;
-    var row = e.target.closest ? e.target.closest('.row') : null;
+    if (downAt && (Math.abs(e.screenX - downAt.sx) > 3 || Math.abs(e.screenY - downAt.sy) > 3 ||
+      Math.abs(e.clientX - downAt.x) > 4 || Math.abs(e.clientY - downAt.y) > 4)) return;
+    var row = t.closest ? t.closest('.row') : null;
     var code = (row && row.dataset.code) || '';
     if (document.body.classList.contains('focus')) {
       if (code) window.ticker.focusSelect(code);
@@ -326,6 +382,8 @@
     var w = leftEl.clientWidth;
     document.body.classList.toggle('compact', w < 300);
     document.body.classList.toggle('tight', w < 240);
+    // 窗口宽度变了，折线按新空间重新收边
+    applySpark(sparkWant);
   }).observe(leftEl);
 
   // 固定模式下：平时鼠标穿透到下层应用，鼠标移到右上角图钉按钮区域时临时恢复点击

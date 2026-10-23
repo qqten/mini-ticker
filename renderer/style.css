@@ -186,16 +186,43 @@ body.loading .row {
 }
 
 .spark {
-  /* 窄窗口时折线先让路：可以压缩到 56px，把宽度留给名称 */
-  flex: 0 1 100px;
-  width: 100px;
-  min-width: 56px;
+  /* 宽度由 sparkWidth（拖手柄 / 设置面板）决定，窗口太窄时允许压缩，别把名称挤没 */
+  flex: 0 1 var(--spark-w, 120px);
+  min-width: 30px;
   /* 高度跟着行高走：窗口拉高，折线的纵向空间也变大 */
   align-self: stretch;
   min-height: 22px;
   margin: 4px 0;
   overflow: visible;
 }
+
+.grip {
+  /* 折线宽度手柄：平时一条很淡的竖线，鼠标移到这一行就变亮，好抓也好认 */
+  flex: 0 0 9px;
+  position: relative;
+  align-self: stretch;
+  margin: 0 -3px;
+  cursor: col-resize;
+  opacity: .35;
+  transition: opacity .12s ease;
+}
+
+.grip::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 22%;
+  bottom: 22%;
+  width: 2px;
+  margin-left: -1px;
+  border-radius: 1px;
+  background: var(--sub);
+  opacity: .5;
+}
+
+.row:hover .grip { opacity: .8; }
+.grip:hover { opacity: 1; }
+.grip:hover::after, .grip.dragging::after { opacity: 1; background: var(--text); }
 
 .spark polyline {
   fill: none;
@@ -266,6 +293,7 @@ body.compact .pct { flex: 0 0 46px; font-size: 10.5px; }
 /* 二级（<240）：数值再小一号，迷你折线收起，宽度全给名称 */
 body.tight .row { gap: 3px; }
 body.tight .spark { display: none; }
+body.tight .grip { display: none; }
 body.tight .name { font-size: 10.5px; }
 body.tight .chg { font-size: 10.5px; }
 body.tight .pct { flex: 0 0 42px; font-size: 10px; }
@@ -292,6 +320,7 @@ body.focus .row { flex: 1 1 0; }
 
 /* 聚焦时行里只留「名称 + 点数 + 涨跌幅」，折线交给右边的大图 */
 body.focus .spark { display: none; }
+body.focus .grip { display: none; }
 
 body.focus .row.active {
   background: rgba(128, 140, 160, .14);
