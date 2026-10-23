@@ -22,7 +22,9 @@ contextBridge.exposeInMainWorld('ticker', {
   focusGet: function () { return ipcRenderer.invoke('focus-state'); },
   focusData: function () { return ipcRenderer.invoke('focus-data'); },
   focusStep: function (dir) { ipcRenderer.send('focus-step', dir); },
+  focusSelect: function (code) { ipcRenderer.send('focus-select', code); },
   focusTab: function (tab) { ipcRenderer.send('focus-tab', tab); },
+  focusSplit: function (leftW) { ipcRenderer.send('focus-split', leftW); },
   onFocusState: function (fn) { ipcRenderer.on('focus-state', function (e, s) { fn(s); }); },
 
   // 设置面板

@@ -9,9 +9,6 @@ logs/
 # 本地个人配置（含自选标的、窗口位置等）
 config.json
 
-# 凭据（雪球 Cookie 等），千万别提交
-credentials.json
-
 # 编辑器 / 系统
 .workbuddy/
 .idea/

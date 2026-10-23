@@ -953,8 +953,70 @@ function createWindow() {
         if (process.env.TICKER_SHOT_FOCUS_CLOSE) {
           setTimeout(function () { setFocus(false); }, 3800);
         }
+        // 调试：TICKER_SHOT_ROW=2 点第 3 行，验证「鼠标点行切标的」
+        if (process.env.TICKER_SHOT_ROW) {
+          setTimeout(function () {
+            if (!win || win.isDestroyed()) return;
+            win.webContents.executeJavaScript(
+              "(function(){var rows=document.querySelectorAll('#app .row');" +
+              "var r=rows[" + (Number(process.env.TICKER_SHOT_ROW) || 0) + "];" +
+              "if(!r)return 'no-row';r.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true}));" +
+              "return r.dataset.code;})()"
+            ).then(function (c) { logLine('[focus]', '调试点行 ' + c); }).catch(function () {});
+          }, 2800);
+        }
+        // 调试：TICKER_SHOT_SPLIT=520 从分界线拖到 x=520，验证「拖动 -> 重绘 -> 落盘」整条链路
+        if (process.env.TICKER_SHOT_SPLIT) {
+          setTimeout(async function () {
+            if (!win || win.isDestroyed()) return;
+            const to = Number(process.env.TICKER_SHOT_SPLIT);
+            let sx = 0;
+            try {
+              sx = await win.webContents.executeJavaScript(
+                "(function(){var b=document.getElementById('splitter').getBoundingClientRect();" +
+                "return Math.round(b.x+b.width/2);})()"
+              );
+            } catch (e) { logLine('[focus]', '取分界线位置失败 ' + e.message); return; }
+            const y = 40;
+            win.webContents.sendInputEvent({ type: 'mouseDown', x: sx, y: y, button: 'left', clickCount: 1 });
+            for (let i = 1; i <= 6; i++) {
+              const x = Math.round(sx + (to - sx) * i / 6);
+              win.webContents.sendInputEvent({ type: 'mouseMove', x: x, y: y, button: 'left' });
+            }
+            win.webContents.sendInputEvent({ type: 'mouseUp', x: to, y: y, button: 'left', clickCount: 1 });
+            logLine('[focus]', '调试拖分界线 ' + sx + ' -> ' + to);
+          }, 3400);
+        }
       }
 
+      // 调试：TICKER_SHOT_MENU=1 打出右键菜单项，验证只剩设置 / 退出
+      if (process.env.TICKER_SHOT_MENU) {
+        setTimeout(function () {
+          try {
+            const items = buildMainMenu().items.map(function (i) { return i.label || i.type; });
+            logLine('[menu]', items.join(' | '));
+          } catch (e) { logLine('[menu]', '构建失败 ' + e.message); }
+        }, 3000);
+      }
+      // 调试：TICKER_SHOT_CLICKROW=2 普通模式下点第 3 行，验证「单击进聚焦」
+      if (process.env.TICKER_SHOT_CLICKROW && which !== 'focus') {
+        setTimeout(async function () {
+          if (!win || win.isDestroyed()) return;
+          const idx = Number(process.env.TICKER_SHOT_CLICKROW) || 0;
+          let pt = null;
+          try {
+            pt = await win.webContents.executeJavaScript(
+              "(function(){var r=document.querySelectorAll('#app .row')[" + idx + "];" +
+              "if(!r)return null;var b=r.getBoundingClientRect();" +
+              "return {x:Math.round(b.x+40),y:Math.round(b.y+b.height/2),code:r.dataset.code,cls:document.body.className};})()"
+            );
+          } catch (e) { logLine('[focus]', '取行位置失败 ' + e.message); return; }
+          if (!pt) { logLine('[focus]', '调试点行：没找到第 ' + idx + ' 行'); return; }
+          win.webContents.sendInputEvent({ type: 'mouseDown', x: pt.x, y: pt.y, button: 'left', clickCount: 1 });
+          win.webContents.sendInputEvent({ type: 'mouseUp', x: pt.x, y: pt.y, button: 'left', clickCount: 1 });
+          logLine('[focus]', '调试单击行 ' + pt.code + ' 之前 body=' + pt.cls);
+        }, 2600);
+      }
       setTimeout(async function () {
         const target = (which === 'settings' && settingsWin) ? settingsWin : win;
         if (!target || target.isDestroyed()) return;
@@ -966,7 +1028,9 @@ function createWindow() {
               "var b=e.getBoundingClientRect();return [Math.round(b.x),Math.round(b.y),Math.round(b.width),Math.round(b.height)];};" +
               "var row=document.querySelector('.row');var rb=row?row.getBoundingClientRect():null;" +
               "return JSON.stringify({win:[innerWidth,innerHeight],left:r('left'),app:r('app'),focus:r('focus'),chart:r('chart')," +
+              "splitter:r('splitter')," +
               "row:rb?[Math.round(rb.width),Math.round(rb.height)]:null,lw:getComputedStyle(document.body).getPropertyValue('--left-w')," +
+              "active:(function(){var a=document.querySelector('.row.active');return a?a.dataset.code:null;})()," +
               "cls:document.body.className});})()"
             );
             logLine('[layout]', String(txt));
@@ -1231,11 +1295,34 @@ function pushFocusState() {
   try { win.webContents.send('focus-state', focusMeta()); } catch (e) {}
 }
 
+// 拖分界线：窗口总宽不变，只是把宽度在「列表」和「图表」之间重新分配。
+// 松手后把左列宽度写回 config.width，这样收起窗口后列表宽度跟手调的一致，下次展开也沿用它。
+function focusSetSplit(leftW) {
+  if (!win || win.isDestroyed() || !focusOn) return;
+  const total = win.getSize()[0];
+  const maxLeft = Math.max(FOCUS_LEFT_MIN, Math.min(FOCUS_LEFT_MAX, total - FOCUS_CHART_KEEP));
+  const lw = Math.max(FOCUS_LEFT_MIN, Math.min(Math.round(leftW), maxLeft));
+  focusLeftW = lw;
+  focusChartW = Math.max(120, total - lw);
+  config.width = lw;
+  config.focusChartWidth = focusChartW;
+  // 收起时要还原到的宽度也跟着改，否则列表会被裁掉一截
+  if (focusRestore) focusRestore.width = lw;
+  saveConfig();
+  logLine('[focus]', '分界线 ' + lw + ' / 图表 ' + focusChartW);
+  pushFocusState();
+}
+
 // 展开方式：不改高度，只把窗口往右边加宽（右边顶到屏幕边缘时改往左加宽），
 // 左边这一块宽度保持原样，多出来的部分给图表。这样列表位置和字号完全不变。
 const FOCUS_CHART_MIN = 320;
 const FOCUS_CHART_MAX = 1100;
 const FOCUS_CHART_DEFAULT = 620;
+// 拖分界线时的边界：左列不能窄于收起状态的最小窗口宽度，也不能宽过 640（收起时的 maxWidth），
+// 右边永远给图表留 200px，否则 K 线挤成一团没法看
+const FOCUS_LEFT_MIN = 220;
+const FOCUS_LEFT_MAX = 640;
+const FOCUS_CHART_KEEP = 200;
 
 function focusTargetBounds() {
   const cur = win.getBounds();
@@ -1305,6 +1392,16 @@ function focusStep(dir) {
   i = (i + (dir > 0 ? 1 : -1) + list.length) % list.length;
   focusCode = list[i];
   logLine('[focus]', '切换标的自选 ' + focusCode);
+  pushFocusState();
+}
+
+// 鼠标点行切换标的（跟 ↑↓ 走同一条路，只是不用键盘）
+function focusSelect(code) {
+  if (!focusOn || !code || code === focusCode) return;
+  const list = focusList();
+  if (list.indexOf(code) < 0) return;
+  focusCode = code;
+  logLine('[focus]', '点选标的 ' + code);
   pushFocusState();
 }
 
@@ -2107,7 +2204,12 @@ ipcMain.on('focus-open', function (e, code) {
 });
 ipcMain.on('focus-toggle', function () { toggleFocus(); });
 ipcMain.on('focus-step', function (e, dir) { focusStep(dir); });
+ipcMain.on('focus-select', function (e, code) { focusSelect(code); });
 ipcMain.on('focus-tab', function (e, tab) { focusSetTab(tab); });
+ipcMain.on('focus-split', function (e, leftW) {
+  if (!isFinite(leftW)) return;
+  focusSetSplit(leftW);
+});
 ipcMain.on('focus-close', function () { logLine('[focus]', 'IPC focus-close'); setFocus(false); });
 
 ipcMain.on('set-period', function (e, p) {
@@ -2118,48 +2220,18 @@ ipcMain.on('settings-close', function () {
   if (settingsWin && !settingsWin.isDestroyed()) settingsWin.close();
 });
 
-ipcMain.on('open-menu', function () {
-  if (!win) return;
-  // 菜单只留盯盘当下要用的：其余开关都在设置面板里
-  const menu = Menu.buildFromTemplate([
+// 右键菜单只有两项：其余操作（周期、刷新、高度、聚焦）都有快捷键或在设置面板里
+function buildMainMenu() {
+  return Menu.buildFromTemplate([
     { label: '设置…', accelerator: 'CmdOrCtrl+,', click: function () { openSettings(); } },
-    {
-      label: '聚焦图表',
-      type: 'checkbox',
-      checked: focusOn,
-      sublabel: focusHotkeyAcc || 'Ctrl+Alt+F',
-      click: function () { toggleFocus(); }
-    },
-    { type: 'separator' },
-    {
-      label: '周期',
-      submenu: PERIODS.map(function (p, i) {
-        return {
-          label: PERIOD_LABEL[p],
-          type: 'radio',
-          checked: config.period === p,
-          sublabel: 'Ctrl+' + (i + 1),
-          click: function () { setPeriod(p); }
-        };
-      })
-    },
-    { label: '立即刷新', click: function () { win.webContents.send('force-refresh'); } },
-    {
-      label: '高度跟随内容',
-      type: 'checkbox',
-      checked: !(config.height > 0),
-      click: function () {
-        config.height = 0;
-        resizingAt = 0;
-        saveConfig();
-        // 让渲染层重新量一次内容高度
-        if (win && !win.isDestroyed()) win.webContents.send('refit-height');
-      }
-    },
     { type: 'separator' },
     { label: '退出', click: function () { app.quit(); } }
   ]);
-  menu.popup({ window: win });
+}
+
+ipcMain.on('open-menu', function () {
+  if (!win) return;
+  buildMainMenu().popup({ window: win });
 });
 
 ipcMain.on('test-alert', function () { fireAlert(false); });

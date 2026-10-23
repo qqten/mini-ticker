@@ -30,10 +30,52 @@ body {
 }
 
 body.focus #left {
-  /* 用 min() 兜底：窗口被拖窄时左列自动让位，图表永远留 160px */
+  /* 用 min() 兜底：窗口被拖窄时左列自动让位，图表永远留 200px */
   flex: 0 0 auto;
-  width: min(var(--left-w, 320px), calc(100% - 160px));
+  width: min(var(--left-w, 320px), calc(100% - 200px));
   min-width: 0;
+}
+
+/* ---- 可拖动的分界线 ---- */
+#splitter {
+  display: none;
+  flex: 0 0 5px;
+  align-self: stretch;
+  cursor: col-resize;
+  position: relative;
+  z-index: 6;
+  /* 加宽热区，方便抓到 */
+  margin: 0 -1px;
+  -webkit-app-region: no-drag;
+}
+
+body.focus #splitter { display: block; }
+
+/* 平时一条极淡竖线，悬停/拖拽时变亮变粗 */
+#splitter::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  transform: translateX(-50%);
+  background: var(--chart-grid);
+  transition: background .12s, width .12s;
+}
+
+#splitter:hover::after,
+body.splitting #splitter::after {
+  width: 2px;
+  background: var(--text);
+  opacity: .6;
+}
+
+/* 拖动分界线时整窗禁止选中，免得文字被一起选中 */
+body.splitting,
+body.splitting * {
+  cursor: col-resize !important;
+  user-select: none;
 }
 
 /* ---- 配色：中国市场习惯，涨红跌绿 ---- */
@@ -215,6 +257,19 @@ body[data-text="dark"] .spark polyline {
 .down { color: var(--down); }
 .flat { color: var(--flat); }
 
+/* ---- 左列变窄时的两级压缩：先收数值，再藏折线，名称最后才被截 ---- */
+/* 一级（<300）：数值字号小一档、间距收紧（折线不动，先让数值让路） */
+body.compact .row { gap: 4px; }
+body.compact .chg { font-size: 11px; }
+body.compact .pct { flex: 0 0 46px; font-size: 10.5px; }
+
+/* 二级（<240）：数值再小一号，迷你折线收起，宽度全给名称 */
+body.tight .row { gap: 3px; }
+body.tight .spark { display: none; }
+body.tight .name { font-size: 10.5px; }
+body.tight .chg { font-size: 10.5px; }
+body.tight .pct { flex: 0 0 42px; font-size: 10px; }
+
 body.noname .name { display: none; }
 
 /* ================= 聚焦图表：长在原窗口右边，背景保持透明 ================= */
@@ -227,8 +282,6 @@ body.noname .name { display: none; }
   min-height: 0;
   flex-direction: column;
   overflow: hidden;
-  /* 只一条极淡竖线分隔，不铺任何背景色 */
-  border-left: 1px solid var(--chart-grid);
 }
 
 body.focus #focus { display: flex; }
@@ -248,6 +301,10 @@ body.focus .row.active .name {
   color: var(--text);
   font-weight: 600;
 }
+
+/* 聚焦时行可以点，点谁就画谁 */
+body.focus .row { cursor: pointer; }
+body.focus .row:hover .name { color: var(--text); }
 
 #focus-head {
   display: flex;

@@ -541,6 +541,21 @@
     resizeTimer = setTimeout(render, 120);
   });
 
+  // 拖分界线时窗口尺寸没变，只是图表容器变宽/变窄，靠 ResizeObserver 逐帧重画
+  var rafId = 0;
+  var lastBoxW = 0;
+  new ResizeObserver(function () {
+    if (!state.on) return;
+    var w = Math.round(chartEl.getBoundingClientRect().width);
+    if (w === lastBoxW) return;
+    lastBoxW = w;
+    if (rafId) return;
+    rafId = requestAnimationFrame(function () {
+      rafId = 0;
+      if (state.on) render();
+    });
+  }).observe(chartEl);
+
   // 自动配色切换后线条颜色要跟着换；文字靠 CSS 变量自己变，图里的是内联色，得重画
   var lastTheme = '';
   function themeKey() {

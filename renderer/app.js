@@ -244,6 +244,7 @@
     if (e.target === pinBtn) return;
     // 图表区（含周期按钮）要能交互，别被当成拖窗口；拖窗口从左列拖
     if (e.target.closest && e.target.closest('#focus')) return;
+    if (e.target === splitter) return;   // 分界线有自己的一套拖动
     if (nearEdge(e)) return;
     dragging = true;
     try { e.target.setPointerCapture(e.pointerId); } catch (err) {}
@@ -259,6 +260,73 @@
   document.addEventListener('pointerup', endDrag);
   document.addEventListener('pointercancel', endDrag);
   window.addEventListener('blur', endDrag);
+
+  /* ---- 分界线：左右拖动，重新分配「列表 / 图表」的宽度 ---- */
+  var splitter = document.getElementById('splitter');
+  var splitting = false;
+
+  // 左列 220~640，右边至少留 200 给图表；跟主进程的钳制保持一致，松手后才不会跳一下
+  function clampSplit(x) {
+    var hi = Math.min(640, window.innerWidth - 200);
+    if (hi < 220) hi = Math.max(220, Math.round(window.innerWidth * 0.55));
+    return Math.round(Math.max(220, Math.min(x, hi)));
+  }
+
+  splitter.addEventListener('pointerdown', function (e) {
+    if (e.button !== 0) return;
+    if (!document.body.classList.contains('focus')) return;
+    e.preventDefault();
+    e.stopPropagation();
+    splitting = true;
+    document.body.classList.add('splitting');
+    try { splitter.setPointerCapture(e.pointerId); } catch (err) {}
+  });
+
+  // move/up 挂在 window 上：鼠标拖出分界线（或系统没给 pointer capture）时也能继续跟手
+  window.addEventListener('pointermove', function (e) {
+    if (!splitting) return;
+    document.body.style.setProperty('--left-w', clampSplit(e.clientX) + 'px');
+  });
+
+  function endSplit() {
+    if (!splitting) return;
+    splitting = false;
+    document.body.classList.remove('splitting');
+    var w = parseInt(document.body.style.getPropertyValue('--left-w'), 10);
+    if (isFinite(w)) window.ticker.focusSplit(w);
+  }
+
+  window.addEventListener('pointerup', endSplit);
+  window.addEventListener('pointercancel', endSplit);
+  window.addEventListener('blur', endSplit);
+
+  /* ---- 左键单击：没聚焦时展开图表，已聚焦时切到点的那一行 ---- */
+  var downAt = null;
+  document.addEventListener('pointerdown', function (e) {
+    downAt = { x: e.clientX, y: e.clientY };
+  }, true);
+
+  document.addEventListener('click', function (e) {
+    if (e.target.closest && (e.target.closest('#focus') || e.target.closest('#splitter'))) return;
+    if (e.target === pinBtn) return;
+    // 拖着窗口跑（起点和落点差得多）不算点击，别顺手展开 / 换标的
+    if (downAt && (Math.abs(e.clientX - downAt.x) > 4 || Math.abs(e.clientY - downAt.y) > 4)) return;
+    var row = e.target.closest ? e.target.closest('.row') : null;
+    var code = (row && row.dataset.code) || '';
+    if (document.body.classList.contains('focus')) {
+      if (code) window.ticker.focusSelect(code);
+    } else {
+      window.ticker.focusOpen(code);
+    }
+  });
+
+  /* ---- 左列变窄时先压缩数值列，把宽度让给名称 ---- */
+  var leftEl = document.getElementById('left');
+  new ResizeObserver(function () {
+    var w = leftEl.clientWidth;
+    document.body.classList.toggle('compact', w < 300);
+    document.body.classList.toggle('tight', w < 240);
+  }).observe(leftEl);
 
   // 固定模式下：平时鼠标穿透到下层应用，鼠标移到右上角图钉按钮区域时临时恢复点击
   var pinZoneActive = false;
