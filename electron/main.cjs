@@ -699,10 +699,98 @@ async function fetchFundNav(code) {
   return out;
 }
 
+/* ---- 场外基金没有分钟行情：把每轮拿到的盘中估值按交易时间攒成当日分时 ----
+   净值序列是日频的（一天一个点），套到 240 分钟轴上只会画出左边一小段就停住，
+   所以分时改成自己攒：15 秒一个点，落盘到 cache/fund-minute.json，重启能接着画。 */
+
+const FUND_MINUTE_PATH = path.join(ROOT, 'cache', 'fund-minute.json');
+const fundMinute = {};               // code -> { date:'2026-10-23', pts:{ '分钟': 价格 } }
+let fundMinuteReady = false;
+let fundMinuteDirty = false;
+let fundMinuteTimer = null;
+
+function localYmd(d) {
+  return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
+}
+
+// A 股一天 240 个交易分钟：09:30-11:30 + 13:00-15:00，午休不占宽度。
+// 分钟之内再按 15 秒细分，刚启动半分钟内也能看出趋势。
+function minuteIndexOf(d) {
+  const t = d.getHours() * 60 + d.getMinutes();
+  const AM = 9 * 60 + 30, AM_END = 11 * 60 + 30, PM = 13 * 60, PM_END = 15 * 60;
+  let idx;
+  if (t <= AM) idx = 0;
+  else if (t <= AM_END) idx = t - AM;
+  else if (t < PM) idx = 120;
+  else if (t <= PM_END) idx = 120 + (t - PM);
+  else idx = 239;
+  const sec = Math.floor(d.getSeconds() / 15) * 15;
+  return Math.min(239.9, idx + sec / 60);
+}
+
+function loadFundMinute() {
+  if (fundMinuteReady) return;
+  fundMinuteReady = true;
+  try {
+    const raw = JSON.parse(fs.readFileSync(FUND_MINUTE_PATH, 'utf8'));
+    const today = localYmd(new Date());
+    Object.keys(raw).forEach(function (code) {
+      const it = raw[code];
+      // 只认当天的，昨天攒的留着也没用
+      if (it && it.date === today && it.pts) fundMinute[code] = it;
+    });
+  } catch (e) {}
+}
+
+function flushFundMinute() {
+  if (!fundMinuteDirty) return;
+  fundMinuteDirty = false;
+  try {
+    fs.mkdirSync(path.dirname(FUND_MINUTE_PATH), { recursive: true });
+    fs.writeFileSync(FUND_MINUTE_PATH, JSON.stringify(fundMinute));
+  } catch (e) {}
+}
+
+// 一轮轮询可能连着改好几支基金，合并成一次写盘；退出前由 before-quit 强制 flush
+function saveFundMinute(force) {
+  fundMinuteDirty = true;
+  if (force) { flushFundMinute(); return; }
+  if (fundMinuteTimer) return;
+  fundMinuteTimer = setTimeout(function () {
+    fundMinuteTimer = null;
+    flushFundMinute();
+  }, 4000);
+}
+
+function recordFundMinute(code, est) {
+  if (!est || !(est.price > 0)) return;
+  loadFundMinute();
+  const date = est.date || localYmd(new Date());
+  const key = minuteIndexOf(new Date()).toFixed(2);
+  let slot = fundMinute[code];
+  if (!slot || slot.date !== date) {
+    slot = { date: date, pts: {} };
+    fundMinute[code] = slot;
+    saveFundMinute(true);   // 换天先落一次，别把新数据留在内存里
+  }
+  if (slot.pts[key] === est.price) return;
+  slot.pts[key] = est.price;
+  saveFundMinute();
+}
+
+// 当日累积 → { values:[价格], x:[分钟位置] }
+function fundMinuteSeries(code) {
+  loadFundMinute();
+  const slot = fundMinute[code];
+  if (!slot) return { values: [], x: [] };
+  // 键是 '118.25' 这种定位字符串，排序要按数值、取值必须用原字符串键
+  const keys = Object.keys(slot.pts).sort(function (a, b) { return Number(a) - Number(b); });
+  return { values: keys.map(function (k) { return slot.pts[k]; }), x: keys.map(Number) };
+}
+
 // 日频净值序列 → 目标周期
 function fundSeriesForPeriod(rows, period) {
   if (!rows.length) return [];
-  if (period === 'minute') return rows.slice(-60).map(function (r) { return r[1]; });
   if (period === 'day') return rows.slice(-120).map(function (r) { return r[1]; });
 
   const buckets = new Map();
@@ -729,9 +817,17 @@ function buildFundItem(code, est, nav) {
     out.pct = est.pct;
     out.estTime = est.time;
   }
+  const period0 = config.period || 'minute';
+  if (period0 === 'minute') {
+    // 分时用本地攒的当日估值曲线（带 x 位置，按时间轴摆），不是日净值
+    const s = fundMinuteSeries(code);
+    out.points = s.values;
+    out.xIndex = s.x;
+  } else if (nav) {
+    out.points = fundSeriesForPeriod(nav.rows, period0);
+  }
   if (nav) {
     if (nav.name && !est) out.name = nav.name;
-    out.points = fundSeriesForPeriod(nav.rows, config.period || 'minute');
     if (!isFinite(out.prevClose)) out.prevClose = nav.prev;
     if (!isFinite(out.price)) out.price = nav.last;
   }
@@ -841,6 +937,8 @@ async function fetchAll() {
     } catch (e) {
       funds = {};
     }
+    // 每轮都把估值记进当日分时：这类基金没有分钟行情，曲线只能自己攒
+    Object.keys(funds).forEach(function (c) { recordFundMinute(c, funds[c]); });
   }
 
   // 行情类折线：分时 20s、K 线 60s 缓存
@@ -1097,6 +1195,22 @@ function createWindow() {
       setTimeout(async function () {
         const target = (which === 'settings' && settingsWin) ? settingsWin : win;
         if (!target || target.isDestroyed()) return;
+        // 调试：TICKER_SHOT_DUMP=1 打出每支标的的点数 / x 轴长度 / 昨收，排查折线画不出来
+        if (process.env.TICKER_SHOT_DUMP) {
+          try {
+            const txt = await target.webContents.executeJavaScript(
+              "window.ticker.getQuotes().then(function(r){return JSON.stringify({period:r.period,list:(r.list||[]).map(function(x){" +
+              "return {c:x.code,pts:(x.points||[]).length,xi:x.xIndex?x.xIndex.length:-1,prev:x.prevClose,ok:x.ok};})});})"
+            );
+            logLine('[dump]', String(txt));
+            const dom = await target.webContents.executeJavaScript(
+              "JSON.stringify([].slice.call(document.querySelectorAll('#app .row')).map(function(r){" +
+              "var p=r.querySelector('polyline');var s=p?p.getAttribute('points')||'':'';" +
+              "return {c:r.dataset.code,len:s.length,head:s.slice(0,44),stroke:p?getComputedStyle(p).stroke:''};}))"
+            );
+            logLine('[dom]', String(dom));
+          } catch (e) { logLine('[dump]', 'fail ' + e.message); }
+        }
         // 调试：TICKER_SHOT_LAYOUT=1 时把各区块实际尺寸打进日志，排查布局问题
         if (process.env.TICKER_SHOT_LAYOUT) {
           try {
@@ -2406,6 +2520,7 @@ app.on('window-all-closed', function () {
 app.on('before-quit', function () {
   logLine('[before-quit]', '准备退出');
   saveConfig();
+  flushFundMinute();   // 兜住最后几秒还没落盘的估值点
 });
 
 app.on('will-quit', function () {

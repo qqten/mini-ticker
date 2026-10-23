@@ -86,6 +86,8 @@
       : (VW / Math.max(1, pts.length - 1));
     var out = [];
     var baseY;
+    // 场外基金的估值曲线自带时间位置（xIndex），按真实交易时间摆；其它标的按点数顺序摆
+    var xIdx = item.xIndex;
 
     if (currentPeriod === 'minute') {
       // 分时：以昨收为中心上下对称，中线始终居中
@@ -96,7 +98,8 @@
       for (var j = 0; j < pts.length; j++) {
         var y = VH / 2 - ((pts[j] - prev) / span) * usable;
         if (y < 1) y = 1; else if (y > VH - 1) y = VH - 1;
-        out.push((j * xScale).toFixed(1) + ',' + y.toFixed(1));
+        var xi = (xIdx && isFinite(xIdx[j])) ? xIdx[j] : j;
+        out.push((xi * xScale).toFixed(1) + ',' + y.toFixed(1));
       }
       baseY = VH / 2;
     } else {
