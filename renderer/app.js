@@ -1,4 +1,4 @@
-(function () {
+﻿(function () {
   var VW = 240, VH = 100, PAD = 7;
 
   var app = document.getElementById('app');
@@ -76,7 +76,7 @@
     // 共约 1380 个分钟点。都按交易时间占比映射，开盘初期数据少就只占左边一段。
     var TOTAL_MINUTES_A = 240;
     var TOTAL_MINUTES_HF = 1380;
-    var isHf = /^hf_/i.test(item.code || '');
+    var isHf = /^hf_/i.test(item.code || '') || /^usDXY$/i.test(item.code || '');
     var total = isHf ? TOTAL_MINUTES_HF : TOTAL_MINUTES_A;
     var xScale = (currentPeriod === 'minute')
       ? (VW / total)
@@ -120,7 +120,7 @@
     var el = document.createElement('div');
     el.className = 'row';
     el.dataset.code = code;
-    el.innerHTML = SPARK_SVG + '<span class="name"></span><span class="chg"></span><span class="pct"></span>';
+    el.innerHTML = SPARK_SVG + '<div class="grip"></div><span class="name"></span><span class="chg"></span><span class="pct"></span>';
     row = {
       el: el,
       poly: el.querySelector('polyline'),
@@ -214,6 +214,7 @@
     document.body.setAttribute('data-text', mode === 'dark' ? 'dark' : 'light');
     document.body.classList.toggle('backdrop', !!s.backdrop);
     document.body.style.setProperty('--bd-op', ((s.backdropOpacity != null ? s.backdropOpacity : 40) / 100).toFixed(3));
+    if (s.sparkWidth != null) document.body.style.setProperty('--spark-w', s.sparkWidth + 'px');
     document.body.classList.toggle('noname', s.showName === false);
     showBaseline = s.baseline !== false;
     if (s.period) currentPeriod = s.period;
@@ -244,6 +245,30 @@
     if (e.target === pinBtn) return;
     // 图表区（含周期按钮）要能交互，别被当成拖窗口；拖窗口从左列拖
     if (e.target.closest && e.target.closest('#focus')) return;
+    // 拖拽调整折线宽度
+    if (e.target.classList && e.target.classList.contains('grip')) {
+      e.target.classList.add('dragging');
+      e.preventDefault();
+      try { e.target.setPointerCapture(e.pointerId); } catch (err) {}
+      var startX = e.clientX;
+      var sparkEl = e.target.parentElement.querySelector('.spark');
+      var startW = sparkEl.getBoundingClientRect().width;
+      var finalW = startW;
+      var onMove = function (ev) {
+        var w = Math.max(30, Math.min(400, startW + (ev.clientX - startX)));
+        finalW = w;
+        document.body.style.setProperty('--spark-w', w + 'px');
+      };
+      var onUp = function () {
+        e.target.classList.remove('dragging');
+        document.removeEventListener('pointermove', onMove);
+        document.removeEventListener('pointerup', onUp);
+        window.ticker.save({ sparkWidth: Math.round(finalW) });
+      };
+      document.addEventListener('pointermove', onMove);
+      document.addEventListener('pointerup', onUp);
+      return;
+    }
     if (nearEdge(e)) return;
     dragging = true;
     try { e.target.setPointerCapture(e.pointerId); } catch (err) {}

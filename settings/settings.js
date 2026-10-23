@@ -264,6 +264,7 @@
       backdrop: $('backdrop').checked,
       backdropOpacity: parseInt($('backdropOpacity').value, 10),
       probeIntervalMs: parseInt($('probeIntervalSec').value, 10) * 1000,
+      sparkWidth: parseInt($('sparkWidth').value, 10),
       showName: $('showName').checked,
       baseline: $('baseline').checked,
       alwaysOnTop: $('alwaysOnTop').checked,
@@ -332,6 +333,8 @@
     const pis = Math.round((d.probeIntervalMs != null ? d.probeIntervalMs : 4000) / 1000);
     $('probeIntervalSec').value = pis;
     $('probeIntervalSec-val').textContent = pis;
+    $('sparkWidth').value = d.sparkWidth != null ? d.sparkWidth : 120;
+    $('sparkWidth-val').textContent = $('sparkWidth').value;
     $('showName').checked = d.showName !== false;
     $('baseline').checked = d.baseline !== false;
     $('alwaysOnTop').checked = !!d.alwaysOnTop;
@@ -419,6 +422,10 @@
   $('probeIntervalSec').addEventListener('input', function () {
     $('probeIntervalSec-val').textContent = this.value;
     window.ticker.save({ probeIntervalMs: parseInt(this.value, 10) * 1000 });
+  });
+  $('sparkWidth').addEventListener('input', function () {
+    $('sparkWidth-val').textContent = this.value;
+    window.ticker.save({ sparkWidth: parseInt(this.value, 10) });
   });
   $('backdrop').addEventListener('change', function () {
     $('backdropOpacity').disabled = !this.checked;

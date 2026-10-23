@@ -59,7 +59,13 @@ const NAMES = {
   hf_CL: 'WTI原油',
   hf_OIL: '布伦特原油',
   hf_HG: 'COMEX铜',
-  hf_NG: '美国天然气'
+  hf_NG: '美国天然气',
+  usDXY: '美元指数'
+};
+
+// 东财特殊品种（非 hf_ 前缀）：美元指数等
+const EM_SECID = {
+  usDXY: '100.UDI'   // 美元指数
 };
 
 const DEFAULT_WATCHLIST = [
@@ -87,6 +93,7 @@ const DEFAULT_CONFIG = {
   textMode: 'auto',
   backdrop: false,
   backdropOpacity: 40,
+  sparkWidth: 120,
   showName: true,
   baseline: true,
   alwaysOnTop: true,
@@ -167,6 +174,33 @@ async function fetchGbk(url, headers) {
 
 // 实时快照（GBK），一次请求拿全部标的
 async function fetchSnapshots(codes) {
+  // 东财特殊品种（美元指数等）：腾讯不支持，单独走东财快照
+  const emCodes = codes.filter(function (c) { return EM_SECID[c]; });
+  const txCodes = codes.filter(function (c) { return !EM_SECID[c]; });
+  const out = {};
+  for (let i = 0; i < emCodes.length; i++) {
+    const code = emCodes[i];
+    const secid = EM_SECID[code];
+    try {
+      const j = await fetchJson('https://push2.eastmoney.com/api/qt/stock/get?secid=' + secid +
+        '&fields=f43,f44,f45,f46,f57,f58,f60,f170');
+      const d = j.data;
+      if (!d) continue;
+      // 东财价格放大了 100 倍（美元指数两位小数）
+      const price = (d.f43 || 0) / 100;
+      const prev = (d.f60 || 0) / 100;
+      out[code] = {
+        name: NAMES[code] || d.f58 || code,
+        price: price,
+        prevClose: prev,
+        pct: (d.f170 || 0) / 100,
+        change: price - prev,
+        time: ''
+      };
+    } catch (e) {}
+  }
+  if (!txCodes.length) return out;
+  codes = txCodes;
   // 调试用：TICKER_FORCE_SINA=1 时优先走新浪，验证兜底链路是否可用
   if (process.env.TICKER_FORCE_SINA) {
     try {
@@ -206,11 +240,18 @@ async function fetchSnapshots(codes) {
         };
       }
     });
-    if (Object.keys(map).length) return map;
+    if (Object.keys(map).length) {
+      // 合并东财特殊品种结果
+      Object.keys(out).forEach(function (k) { map[k] = out[k]; });
+      return map;
+    }
     throw new Error('快照为空');
   } catch (e) {
     const alt = await fetchSinaSnapshots(codes);
-    if (Object.keys(alt).length) return alt;
+    if (Object.keys(alt).length) {
+      Object.keys(out).forEach(function (k) { alt[k] = out[k]; });
+      return alt;
+    }
     throw e;
   }
 }
@@ -358,14 +399,14 @@ async function searchSymbols(keyword) {
     seen[q] = true;
   }
 
-  // 外盘期货（hf_）搜索接口不覆盖，按名称本地匹配
+  // 外盘期货（hf_）和东财特殊品种（usDXY）搜索接口不覆盖，按名称本地匹配
   const ql = q.toLowerCase();
   Object.keys(NAMES).forEach(function (code) {
-    if (!/^hf_/i.test(code)) return;
+    if (!/^hf_/i.test(code) && !EM_SECID[code]) return;
     const name = NAMES[code];
     if (seen[code]) return;
     if (name.toLowerCase().indexOf(ql) >= 0 || code.toLowerCase().indexOf(ql) >= 0) {
-      out.push({ code: code, name: name, market: 'hf', type: '', typeLabel: '外盘期货' });
+      out.push({ code: code, name: name, market: /^hf_/i.test(code) ? 'hf' : 'em', type: '', typeLabel: '外盘期货' });
       seen[code] = true;
     }
   });
@@ -458,6 +499,15 @@ async function fetchSinaKline(code, interval, count) {
 
 // 当日分时（一次只能查一个 code）
 async function fetchMinuteSeries(code) {
+  // 东财特殊品种（美元指数等）和外盘期货：腾讯不支持分时，走东财 trends2
+  if (EM_SECID[code] || HF_EM_SECID[code]) {
+    const secid = EM_SECID[code] || HF_EM_SECID[code];
+    const url = 'https://push2.eastmoney.com/api/qt/stock/trends2/get?secid=' + secid +
+      '&fields1=f1,f2,f3,f4,f5,f6,f7,f8&fields2=f51,f52,f53,f54,f55&iscr=0&ndays=1';
+    const j = await fetchJson(url);
+    const trends = (j && j.data && j.data.trends) || [];
+    return trends.map(function (t) { return num(String(t).split(',')[1]); }).filter(isFinite);
+  }
   if (process.env.TICKER_FORCE_SINA && sinaSupported(code)) {
     try {
       const alt = await fetchSinaMinute(code);
@@ -554,6 +604,14 @@ const HF_EM_SECID = {
 };
 
 async function fetchSeries(code, period) {
+  // 东财特殊品种（美元指数等）：走东财分时
+  if (EM_SECID[code] && period === 'minute') {
+    const url = 'https://push2.eastmoney.com/api/qt/stock/trends2/get?secid=' + EM_SECID[code] +
+      '&fields1=f1,f2,f3,f4,f5,f6,f7,f8&fields2=f51,f52,f53,f54,f55&iscr=0&ndays=1';
+    const j = await fetchJson(url);
+    const trends = (j && j.data && j.data.trends) || [];
+    return trends.map(function (t) { return num(String(t).split(',')[1]); }).filter(isFinite);
+  }
   // 外盘期货（hf_ 前缀）：腾讯不提供分时/K线，走东方财富
   if (/^hf_/i.test(code)) {
     const secid = HF_EM_SECID[code];
@@ -2157,6 +2215,7 @@ ipcMain.on('open-menu', function () {
       }
     },
     { type: 'separator' },
+    { label: '重启', click: function () { app.relaunch(); app.exit(0); } },
     { label: '退出', click: function () { app.quit(); } }
   ]);
   menu.popup({ window: win });

@@ -144,16 +144,25 @@ body.loading .row {
 }
 
 .spark {
-  /* 窄窗口时折线先让路：可以压缩到 56px，把宽度留给名称 */
-  flex: 0 1 100px;
-  width: 100px;
-  min-width: 56px;
+  flex: 0 0 var(--spark-w, 120px);
+  min-width: 30px;
   /* 高度跟着行高走：窗口拉高，折线的纵向空间也变大 */
   align-self: stretch;
   min-height: 22px;
   margin: 4px 0;
   overflow: visible;
 }
+
+.grip {
+  flex: 0 0 4px;
+  cursor: col-resize;
+  margin: 0 -1px;
+  align-self: stretch;
+  opacity: .3;
+  transition: opacity .15s ease;
+}
+
+.grip:hover, .grip.dragging { opacity: .9; }
 
 .spark polyline {
   fill: none;
