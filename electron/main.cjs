@@ -1056,6 +1056,25 @@ function createWindow() {
           } catch (e) { logLine('[menu]', '构建失败 ' + e.message); }
         }, 3000);
       }
+      // 调试：TICKER_SHOT_HOVER=0 把鼠标移到第 1 行的折线上，验证 hover 时的拖动标识
+      if (process.env.TICKER_SHOT_HOVER) {
+        setTimeout(async function () {
+          if (!win || win.isDestroyed()) return;
+          const idx = Number(process.env.TICKER_SHOT_HOVER) || 0;
+          let pt = null;
+          try {
+            pt = await win.webContents.executeJavaScript(
+              "(function(){var r=document.querySelectorAll('#app .row')[" + idx + "];" +
+              "if(!r)return null;var s=r.querySelector('.spark');if(!s)return null;" +
+              "var b=s.getBoundingClientRect();" +
+              "return {x:Math.round(b.x+b.width-6),y:Math.round(b.y+b.height/2),w:Math.round(b.width)};})()"
+            );
+          } catch (e) { logLine('[hover]', '取折线位置失败 ' + e.message); return; }
+          if (!pt) { logLine('[hover]', '调试悬停：没找到折线'); return; }
+          win.webContents.sendInputEvent({ type: 'mouseMove', x: pt.x, y: pt.y });
+          logLine('[hover]', '调试悬停 x=' + pt.x + ' y=' + pt.y + ' 折线宽=' + pt.w);
+        }, 2600);
+      }
       // 调试：TICKER_SHOT_CLICKROW=2 普通模式下点第 3 行，验证「单击进聚焦」
       if (process.env.TICKER_SHOT_CLICKROW && which !== 'focus') {
         setTimeout(async function () {

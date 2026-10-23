@@ -194,35 +194,24 @@ body.loading .row {
   min-height: 22px;
   margin: 4px 0;
   overflow: visible;
-}
-
-.grip {
-  /* 折线宽度手柄：平时一条很淡的竖线，鼠标移到这一行就变亮，好抓也好认 */
-  flex: 0 0 9px;
-  position: relative;
-  align-self: stretch;
-  margin: 0 -3px;
   cursor: col-resize;
-  opacity: .35;
+}
+
+/* 折线自己就是宽度手柄：hover 时右端浮出一小段竖线。
+   画在 SVG 内部（x 贴近右边界），跟折线共用坐标系，所以永远对齐；
+   preserveAspectRatio=none 会把 y 拉伸，所以竖线长度按百分比给。 */
+.spark .grip {
+  stroke: var(--text);
+  stroke-width: 2;
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+  opacity: 0;
   transition: opacity .12s ease;
+  pointer-events: none;
 }
 
-.grip::after {
-  content: '';
-  position: absolute;
-  left: 50%;
-  top: 22%;
-  bottom: 22%;
-  width: 2px;
-  margin-left: -1px;
-  border-radius: 1px;
-  background: var(--sub);
-  opacity: .5;
-}
-
-.row:hover .grip { opacity: .8; }
-.grip:hover { opacity: 1; }
-.grip:hover::after, .grip.dragging::after { opacity: 1; background: var(--text); }
+.spark:hover .grip { opacity: .4; }
+.spark.dragging .grip { opacity: .95; }
 
 .spark polyline {
   fill: none;
@@ -293,7 +282,6 @@ body.compact .pct { flex: 0 0 46px; font-size: 10.5px; }
 /* 二级（<240）：数值再小一号，迷你折线收起，宽度全给名称 */
 body.tight .row { gap: 3px; }
 body.tight .spark { display: none; }
-body.tight .grip { display: none; }
 body.tight .name { font-size: 10.5px; }
 body.tight .chg { font-size: 10.5px; }
 body.tight .pct { flex: 0 0 42px; font-size: 10px; }
@@ -320,7 +308,6 @@ body.focus .row { flex: 1 1 0; }
 
 /* 聚焦时行里只留「名称 + 点数 + 涨跌幅」，折线交给右边的大图 */
 body.focus .spark { display: none; }
-body.focus .grip { display: none; }
 
 body.focus .row.active {
   background: rgba(128, 140, 160, .14);

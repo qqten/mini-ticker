@@ -12,12 +12,15 @@
   var currentPeriod = 'minute';
   var lastHeight = 0;
   var dragging = false;
+  var suppressClick = false;
   var lastList = [];
 
+  // 右端那条 short line 是宽度抓手：画在 SVG 里，天然贴着折线右边缘，不参与布局也就不会错位
   var SPARK_SVG =
     '<svg class="spark" viewBox="0 0 240 100" preserveAspectRatio="none">' +
     '<line class="baseline" x1="0" y1="50" x2="240" y2="50"></line>' +
     '<polyline points=""></polyline>' +
+    '<line class="grip" x1="238" y1="30" x2="238" y2="70"></line>' +
     '</svg>';
 
   function colorVar(pct) {
@@ -120,7 +123,7 @@
     var el = document.createElement('div');
     el.className = 'row';
     el.dataset.code = code;
-    el.innerHTML = SPARK_SVG + '<div class="grip"></div><span class="name"></span><span class="chg"></span><span class="pct"></span>';
+    el.innerHTML = SPARK_SVG + '<span class="name"></span><span class="chg"></span><span class="pct"></span>';
     row = {
       el: el,
       poly: el.querySelector('polyline'),
@@ -272,27 +275,33 @@
     // 图表区（含周期按钮）要能交互，别被当成拖窗口；拖窗口从左列拖
     if (e.target.closest && e.target.closest('#focus')) return;
     if (e.target === splitter) return;   // 分界线有自己的一套拖动
-    // 拖拽调整折线宽度（手柄只改折线宽，不拖窗口、也不触发聚焦）
-    if (e.target.classList && e.target.classList.contains('grip')) {
-      var grip = e.target;
-      grip.classList.add('dragging');
+    // 折线本身就是宽度手柄：左右拖改折线宽（不拖窗口、也不触发聚焦）
+    var sp = e.target.closest ? e.target.closest('.spark') : null;
+    if (sp) {
+      sp.classList.add('dragging');
       e.preventDefault();
       var startX = e.clientX;
-      var sparkEl = grip.parentElement.querySelector('.spark');
-      var startW = sparkEl ? sparkEl.getBoundingClientRect().width : 120;
+      var startW = sp.getBoundingClientRect().width;
       var finalW = startW;
+      var moved = false;
       var onMove = function (ev) {
         // 拖动过程中就按窗口宽度收边，别让折线把名称挤没了
+        if (Math.abs(ev.clientX - startX) > 1) moved = true;
         finalW = applySpark(startW + (ev.clientX - startX));
       };
       var onUp = function () {
-        grip.classList.remove('dragging');
+        sp.classList.remove('dragging');
         window.removeEventListener('pointermove', onMove);
         window.removeEventListener('pointerup', onUp);
         window.removeEventListener('pointercancel', onUp);
         window.ticker.save({ sparkWidth: Math.round(finalW) });
+        // 拖过宽度就当这次不点行，别顺手展开聚焦
+        if (moved) {
+          suppressClick = true;
+          setTimeout(function () { suppressClick = false; }, 400);
+        }
       };
-      // 挂 window：鼠标移出手柄或系统没给 pointer capture 时也能继续跟手
+      // 挂 window：鼠标移出折线或系统没给 pointer capture 时也能继续跟手
       window.addEventListener('pointermove', onMove);
       window.addEventListener('pointerup', onUp);
       window.addEventListener('pointercancel', onUp);
@@ -362,7 +371,8 @@
 
   document.addEventListener('click', function (e) {
     var t = e.target;
-    if (t.closest && (t.closest('#focus') || t.closest('#splitter') || t.closest('.grip'))) return;
+    if (suppressClick) { suppressClick = false; return; }
+    if (t.closest && (t.closest('#focus') || t.closest('#splitter'))) return;
     if (t === pinBtn) return;
     // 拖着窗口跑（起点和落点差得多）不算点击，别顺手展开 / 换标的
     if (downAt && (Math.abs(e.screenX - downAt.sx) > 3 || Math.abs(e.screenY - downAt.sy) > 3 ||
