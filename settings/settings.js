@@ -395,8 +395,33 @@
     state.updaterOn = d.updaterOn;
     state.isPortable = d.isPortable;
     $('curVersion').textContent = d.version || '-';
+    $('ver').textContent = d.version || '-';
     if (d.update) updState = d.update;
     renderUpdate();
+  }
+
+  /* ---- 左侧边栏分类切换 ---- */
+  function switchCat(cat) {
+    var secs = document.querySelectorAll('section[data-cat]');
+    for (var i = 0; i < secs.length; i++) {
+      // 显式 block：CSS 默认全部 display:none，不能用 '' 回退
+      secs[i].style.display = secs[i].getAttribute('data-cat') === cat ? 'block' : 'none';
+    }
+    var items = document.querySelectorAll('.nav-item');
+    for (var j = 0; j < items.length; j++) {
+      items[j].classList.toggle('active', items[j].getAttribute('data-target') === cat);
+    }
+    var wrap = document.querySelector('.wrap');
+    if (wrap) wrap.scrollTop = 0;
+  }
+
+  function bindNav() {
+    var items = document.querySelectorAll('.nav-item');
+    for (var i = 0; i < items.length; i++) {
+      items[i].addEventListener('click', function () {
+        switchCat(this.getAttribute('data-target'));
+      });
+    }
   }
 
   function save() {
@@ -505,6 +530,8 @@
     initShortcuts(d);
     initUpdate(d);
     bindUpdate();
+    bindNav();
+    switchCat('symbols');
     renderList();
 
     // 打开时把焦点放到输入框，方便直接敲代码；列表回滚到顶部

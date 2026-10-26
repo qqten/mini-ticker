@@ -1427,12 +1427,12 @@ function openSettings() {
     return;
   }
   const area = screen.getPrimaryDisplay().workAreaSize;
-  const winH = Math.max(520, Math.min(880, area.height - 70));
+  const winH = Math.max(520, Math.min(560, area.height - 70));
 
   settingsWin = new BrowserWindow({
-    width: 640,
+    width: 650,
     height: winH,
-    minWidth: 560,
+    minWidth: 580,
     minHeight: 480,
     title: '盯盘设置',
     backgroundColor: '#14171d',
@@ -1450,7 +1450,8 @@ function openSettings() {
   // 点了保存 → config.width 已是新值，保持新宽度。
   settingsWin.on('closed', function () {
     settingsWin = null;
-    if (win && !win.isDestroyed()) {
+    if (win && !win.isDestroyed() && !focusOn) {
+      // 聚焦展开时保持当前尺寸（列表+图表栏），收起时再回 config.width
       const w = Math.max(220, Math.min(640, Math.round(config.width || 320)));
       win.setSize(w, win.getSize()[1]);
     }
@@ -1556,8 +1557,19 @@ async function buildFocusPayload(code, tab) {
         '&fields1=f1,f2,f3,f4,f5,f6,f7,f8&fields2=f51,f52,f53,f54,f55&iscr=0&ndays=1';
       const j = await fetchJson(url);
       const trends = (j && j.data && j.data.trends) || [];
-      const pts = trends.map(function (t) { return { t: String(t).split(',')[0], price: num(String(t).split(',')[1]) }; })
-        .filter(function (x) { return isFinite(x.price); });
+      // trends 行：时间,价,涨跌额,涨跌幅,当日累计量 → 累计量差分回每分钟量
+      const pts = [];
+      let prevCum = 0;
+      for (const t of trends) {
+        const f = String(t).split(',');
+        const p = num(f[1]);
+        if (!isFinite(p)) continue;
+        const cum = num(f[4]);
+        let v = isFinite(cum) ? cum - prevCum : 0;
+        if (v < 0) v = 0;
+        if (isFinite(cum)) prevCum = cum;
+        pts.push({ t: f[0], price: p, vol: v });
+      }
       if (pts.length > 1) {
         days = [{ date: String((j.data && j.data.date) || ''), prec: NaN, points: pts }];
         const lastPt = pts[pts.length - 1];
@@ -2009,7 +2021,8 @@ function broadcast() {
 function setAndBroadcast(patch, clearCache) {
   Object.assign(config, patch);
   if (patch.alwaysOnTop !== undefined && win) win.setAlwaysOnTop(!!patch.alwaysOnTop);
-  if (patch.width !== undefined && win && isFinite(patch.width)) {
+  // 聚焦展开时别改窗口宽度：宽度由列表+图表栏决定，宽度值先落 config，收起后自然生效
+  if (patch.width !== undefined && win && isFinite(patch.width) && !focusOn) {
     const w = Math.max(220, Math.min(640, Math.round(patch.width)));
     const h = win.getSize()[1];
     win.setSize(w, h);
@@ -2080,6 +2093,7 @@ ipcMain.on('set-height', function (e, h) {
 // 设置面板滑块实时预览宽度：只调窗口尺寸，不落盘；取消/关闭时由设置面板发回原始宽度还原
 ipcMain.on('preview-width', function (e, w) {
   if (!win) return;
+  if (focusOn) return;  // 聚焦展开时窗口宽度由列表+图表栏决定，别被预览宽度压扁
   const n = parseInt(w, 10);
   if (!isFinite(n)) return;
   const width = Math.max(220, Math.min(640, Math.round(n)));

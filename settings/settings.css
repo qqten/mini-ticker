@@ -25,8 +25,66 @@ html, body {
 
 body {
   display: flex;
-  flex-direction: column;
   height: 100vh;
+}
+
+/* ---------- 左侧边栏 ---------- */
+.sidebar {
+  flex: 0 0 148px;
+  display: flex;
+  flex-direction: column;
+  background: #12151b;
+  border-right: 1px solid var(--line);
+  padding: 14px 10px 12px;
+  overflow: hidden;
+}
+
+.brand {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: .5px;
+  color: var(--text);
+  padding: 2px 8px 14px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 10px;
+}
+
+.nav { display: flex; flex-direction: column; gap: 2px; flex: 1 1 auto; overflow-y: auto; }
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  height: 34px;
+  padding: 0 12px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--sub);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  transition: .15s;
+  font-family: inherit;
+}
+
+.nav-item:hover { background: #1c212a; color: var(--text); }
+.nav-item.active { background: var(--accent-soft); color: var(--accent); font-weight: 500; }
+
+.sidebar-foot {
+  padding: 10px 8px 0;
+  font-size: 11.5px;
+  color: #565f6e;
+  border-top: 1px solid var(--line);
+  margin-top: 8px;
+}
+
+/* ---------- 右侧内容区 ---------- */
+.content {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
 }
 
 .wrap {
@@ -41,6 +99,10 @@ body {
 .wrap::-webkit-scrollbar-track { background: transparent; }
 
 section { margin-bottom: 13px; }
+
+/* 打开时默认只显示「标的」，避免所有分类闪现后再切 */
+section[data-cat] { display: none; }
+section[data-cat="symbols"] { display: block; }
 
 h2 {
   font-size: 12px;

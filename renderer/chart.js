@@ -74,6 +74,109 @@
     return s.length >= 10 ? s.slice(5, 10) : s;
   }
 
+  // 分钟时间归一：A 股 "0930" -> "09:30"，外盘 "2026-10-26 05:00" -> "05:00"
+  function fmtTime(t) {
+    var s = String(t || '');
+    var m = s.match(/(\d{2}):?(\d{2})$/);
+    return m ? m[1] + ':' + m[2] : s;
+  }
+
+  /* ---------------- 十字光标数值提示 ---------------- */
+
+  var tipCtx = null;   // 当前图的数据/坐标上下文，由 render 末尾赋值
+  var tip = document.createElement('div');
+  tip.id = 'f-tip';
+  document.body.appendChild(tip);
+
+  // 十字线骨架：render 时预置进 SVG（默认隐藏），mousemove 只改坐标
+  function crosshairSvg(g) {
+    return '<g id="f-cross" opacity="0" pointer-events="none">' +
+      '<line class="cx" x1="0" y1="0" x2="0" y2="0" stroke="#8b94a3" stroke-width="1" stroke-dasharray="3 3"/>' +
+      '<line class="cy" x1="0" y1="0" x2="0" y2="0" stroke="#8b94a3" stroke-width="1" stroke-dasharray="3 3"/>' +
+      '</g>';
+  }
+
+  function hideTip() {
+    tip.style.display = 'none';
+    var cross = chartEl.querySelector('#f-cross');
+    if (cross) cross.setAttribute('opacity', '0');
+  }
+
+  function showTip(info, mx, my) {
+    var c = tipCtx;
+    if (!c) return;
+    var cross = chartEl.querySelector('#f-cross');
+    if (cross) {
+      cross.setAttribute('opacity', '1');
+      var lx = cross.querySelector('.cx');
+      var ly = cross.querySelector('.cy');
+      lx.setAttribute('x1', info.x.toFixed(1));
+      lx.setAttribute('x2', info.x.toFixed(1));
+      lx.setAttribute('y1', c.g.priceTop.toFixed(1));
+      lx.setAttribute('y2', c.g.volBot.toFixed(1));
+      ly.setAttribute('x1', c.g.padL.toFixed(1));
+      ly.setAttribute('x2', (c.g.padL + c.g.plotW).toFixed(1));
+      ly.setAttribute('y1', info.y.toFixed(1));
+      ly.setAttribute('y2', info.y.toFixed(1));
+    }
+    tip.innerHTML = info.lines.join('<br/>');
+    tip.style.display = 'block';
+    // 悬浮框跟鼠标走，贴右侧放不下就翻到左侧；fixed 定位用视口坐标
+    var tw = tip.offsetWidth;
+    var x = mx + 14;
+    if (x + tw > window.innerWidth - 8) x = mx - tw - 14;
+    tip.style.left = Math.max(4, x) + 'px';
+    tip.style.top = Math.max(4, my - tip.offsetHeight / 2) + 'px';
+  }
+
+  // 分时/5日：按 x 找最近数据点
+  function tipMinute(c, sx, sy) {
+    if (sx < c.g.padL || sx > c.g.padL + c.g.plotW) return null;
+    if (sy < c.g.priceTop || sy > c.g.volBot) return null;
+    var i = Math.round((sx - c.g.padL) / c.g.plotW * (c.total - 1));
+    i = Math.max(0, Math.min(c.pts.length - 1, i));
+    var best = c.pts[0];
+    for (var k = 0; k < c.pts.length; k++) {
+      if (Math.abs(c.pts[k].x - i) < Math.abs(best.x - i)) best = c.pts[k];
+    }
+    var dIdx = Math.floor(best.x / c.session);
+    var t = fmtTime(best.t || '');
+    var date = c.days[dIdx] ? shortDate(c.days[dIdx].date) : '';
+    var head = c.days.length > 1 ? (date + ' ' + t) : t;
+    var chg = (isNum(c.prec) && c.prec > 0) ? (best.p - c.prec) / c.prec * 100 : NaN;
+    return {
+      lines: [
+        head,
+        '价 ' + fPrice(best.p),
+        '涨跌 ' + fChg(best.p - c.prec) + '  ' + fPct(chg),
+        '量 ' + fVol(best.v)
+      ],
+      x: c.X(best.x),
+      y: c.Y(best.p)
+    };
+  }
+
+  // 日K：按 x 命中所在 K 线
+  function tipDay(c, sx, sy) {
+    if (sx < c.g.padL || sx > c.g.padL + c.g.plotW) return null;
+    var n = c.rows.length;
+    var i = Math.floor((sx - c.g.padL) / c.step);
+    i = Math.max(0, Math.min(n - 1, i));
+    var r = c.rows[i];
+    var chg = r.o > 0 ? (r.c - r.o) / r.o * 100 : NaN;
+    return {
+      lines: [
+        String(r.d || ''),
+        '开 ' + fPrice(r.o) + '   收 ' + fPrice(r.c),
+        '高 ' + fPrice(r.h) + '   低 ' + fPrice(r.l),
+        '涨跌 ' + fChg(r.c - r.o) + '  ' + fPct(chg),
+        '量 ' + fVol(r.v)
+      ],
+      x: c.Xc(i),
+      y: c.Y(r.h)
+    };
+  }
+
   // 均线：简单移动平均，前 n-1 个点没有值
   function ma(arr, n) {
     var out = [], sum = 0;
@@ -153,7 +256,8 @@
           v: arr[i].vol,
           a: arr[i].avg,
           prec: prec,
-          first: i === 0
+          first: i === 0,
+          t: arr[i].t || ''
         });
       }
     }
@@ -253,8 +357,10 @@
       }
     }
 
+    s.push(crosshairSvg(g));
     s.push('</svg>');
     chartEl.innerHTML = s.join('');
+    tipCtx = { type: 'minute', g: g, X: X, Y: Y, pts: pts, days: days, session: session, total: total, prec: p.prevClose };
   }
 
   /* ---------------- 日K（K线 + 均线 + 成交量 + MACD） ---------------- */
@@ -395,8 +501,10 @@
       s.push(txt(Xc(idx), g.axisY, shortDate(rows[idx].d), 'middle', T.sub));
     }
 
+    s.push(crosshairSvg(g));
     s.push('</svg>');
     chartEl.innerHTML = s.join('');
+    tipCtx = { type: 'day', g: g, Xc: Xc, Y: Y, rows: rows, step: step, n: n };
   }
 
   /* ---------------- 头部与行高亮 ---------------- */
@@ -429,6 +537,7 @@
 
   function render() {
     if (!state.on || !payload) return;
+    hideTip();
     if (payload.tab === 'day') renderDay(payload);
     else renderMinute(payload);
   }
@@ -489,6 +598,8 @@
     if (!state.on) {
       stop();
       payload = null;
+      tipCtx = null;
+      hideTip();
       chartEl.innerHTML = '';
       return;
     }
@@ -511,6 +622,20 @@
     e.stopPropagation();
     window.ticker.focusTab(b.getAttribute('data-tab'));
   });
+
+  // 十字光标：鼠标在图上移动显示当时数据，移出图隐藏
+  chartEl.addEventListener('mousemove', function (e) {
+    if (!state.on || !tipCtx || !payload) return;
+    var svg = chartEl.querySelector('svg');
+    if (!svg) return;
+    var rect = svg.getBoundingClientRect();
+    var sx = e.clientX - rect.left;
+    var sy = e.clientY - rect.top;
+    var info = tipCtx.type === 'minute' ? tipMinute(tipCtx, sx, sy) : tipDay(tipCtx, sx, sy);
+    if (!info) { hideTip(); return; }
+    showTip(info, e.clientX, e.clientY);
+  });
+  chartEl.addEventListener('mouseleave', hideTip);
 
   document.addEventListener('keydown', function (e) {
     if (!state.on) return;

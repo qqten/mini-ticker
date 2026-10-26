@@ -441,3 +441,21 @@ body[data-text="dark"] #chart svg {
 }
 
 body.stale #chart { opacity: .45; }
+
+/* 十字光标悬浮数值框（fixed 相对视口，不随滚动跑） */
+#f-tip {
+  position: fixed;
+  z-index: 99;
+  display: none;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: rgba(15, 18, 24, .88);
+  border: 1px solid rgba(255, 255, 255, .16);
+  color: #e6e9ef;
+  font-size: 11.5px;
+  line-height: 1.7;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  pointer-events: none;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, .35);
+}
