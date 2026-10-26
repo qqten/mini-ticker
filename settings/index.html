@@ -59,13 +59,9 @@
       </div>
       <p class="hint" id="exit-hint"></p>
       <div class="field">
-        <label class="check"><span>自动启动</span></label>
-        <select id="autoStartMode">
-          <option value="off">不自动启动</option>
-          <option value="login">开机自启（非交易时段自动退出）</option>
-          <option value="schedule">工作日定时启动</option>
-        </select>
+        <label class="check"><input type="checkbox" id="autoStartOn" /><span>开盘自动启动</span></label>
         <input type="time" id="autoStartTime" value="09:25" />
+        <span class="note">工作日，写入计划任务</span>
       </div>
       <p class="hint" id="task-hint"></p>
     </section>

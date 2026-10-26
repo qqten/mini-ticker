@@ -14,7 +14,7 @@
 - **可伸缩**：鼠标移到浮窗任意一边拖动改宽/改高，松手记住；右键菜单只有设置和退出，其余都在设置面板里
 - **按名字搜**：中文名、拼音首字母、代码都能搜，不用背代码
 - **尾盘提醒**：到点弹通知 + 任务栏闪烁
-- **收盘自动退出 / 自动启动**：收盘定时退出；启动可以选开机自启（非交易时段自己退）或工作日定时，节假日都会跳过
+- **收盘自动退出 / 自动启动**：收盘定时退出；自动启动走 Windows 计划任务，工作日定点拉起，节假日会跳过
 - **单实例**：重复启动只会激活已有窗口
 
 ![自动适配背景](preview/auto-adaptive.png)
@@ -54,7 +54,7 @@ npm run pack:dir # 只出 dist/win-unpacked 目录，调试打包问题时用
 ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-binaries/ npm run dist
 ```
 
-> 目前主要在 Windows 上验证。macOS / Linux 可以用 `npm start` 跑起来，但自动启动（注册表 / 计划任务）那套不适用。
+> 目前主要在 Windows 上验证。macOS / Linux 可以用 `npm start` 跑起来，但自动启动（Windows 计划任务）那套不适用。
 
 ## 用法
 
@@ -126,7 +126,7 @@ ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-
 | `interval` | 刷新间隔（毫秒） |
 | `alert` | 尾盘提醒开关与时间 |
 | `autoExit` | 收盘自动退出时间，默认 `15:05`（留几分钟让收盘数据落定） |
-| `autoStart` | 自动启动：`mode` 为 `off` / `login`（开机自启）/ `schedule`（工作日定时，`time` 生效） |
+| `autoStart` | 自动启动：`enabled` 开启后按 `time`（默认 09:25）写 Windows 计划任务，工作日定点拉起 |
 | `width` | 浮窗宽度，拖动边缘会自动写回 |
 | `height` | 浮窗高度，`0` = 跟随内容自动撑开；手动拖过高就记住具体值 |
 

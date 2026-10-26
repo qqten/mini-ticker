@@ -32,7 +32,7 @@
     "time": "15:05"
   },
   "autoStart": {
-    "mode": "off",
+    "enabled": false,
     "time": "09:25"
   },
   "textMode": "auto",

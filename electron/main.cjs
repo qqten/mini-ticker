@@ -93,8 +93,8 @@ const DEFAULT_CONFIG = {
   alert: { enabled: true, time: '14:30' },
   // 收盘后自动退出：默认 15:05（留几分钟让收盘数据落定）
   autoExit: { enabled: true, time: '15:05' },
-  // 开盘自动启动：off 关闭 / login 开机自启 / schedule 工作日定时（计划任务）
-  autoStart: { mode: 'off', time: '09:25' },
+  // 开盘自动启动：靠 Windows 计划任务，工作日定点拉起
+  autoStart: { enabled: false, time: '09:25' },
   textMode: 'auto',
   backdrop: false,
   backdropOpacity: 40,
@@ -147,11 +147,12 @@ function loadConfig() {
   cfg.autoExit = Object.assign({}, DEFAULT_CONFIG.autoExit, raw.autoExit || {});
   if (!/^\d{2}:\d{2}$/.test(cfg.autoExit.time)) cfg.autoExit.time = DEFAULT_CONFIG.autoExit.time;
   cfg.autoStart = Object.assign({}, DEFAULT_CONFIG.autoStart, raw.autoStart || {});
-  // 老配置只有 enabled:true/false，迁移成 mode
-  if (cfg.autoStart.mode === undefined && raw.autoStart) {
-    cfg.autoStart.mode = raw.autoStart.enabled ? 'schedule' : 'off';
+  // 兼容中间版本写过的 mode 字段：mode=schedule 等同于 enabled
+  if (raw.autoStart && typeof raw.autoStart.mode === 'string') {
+    cfg.autoStart.enabled = raw.autoStart.mode === 'schedule' || raw.autoStart.mode === 'login';
+    delete cfg.autoStart.mode;
   }
-  if (['off', 'login', 'schedule'].indexOf(cfg.autoStart.mode) < 0) cfg.autoStart.mode = 'off';
+  cfg.autoStart.enabled = !!cfg.autoStart.enabled;
   if (!/^\d{2}:\d{2}$/.test(cfg.autoStart.time)) cfg.autoStart.time = DEFAULT_CONFIG.autoStart.time;
   return cfg;
 }
@@ -1240,7 +1241,8 @@ function createWindow() {
           }
         }
         const img = await target.webContents.capturePage();
-        const dir = path.join(ROOT, '.dev');
+        // 打包后 ROOT 在只读的 app.asar 里，截图得落到可写的 DATA_DIR
+        const dir = path.join(DATA_DIR, '.dev');
         try { fs.mkdirSync(dir, { recursive: true }); } catch (e) {}
         const file = which === 'settings' ? 'settings.png' : which === 'focus' ? 'focus.png' : 'self.png';
         fs.writeFileSync(path.join(dir, file), img.toPNG());
@@ -2070,8 +2072,6 @@ function startAlertTimer() {
 const TASK_NAME = 'MiniTicker_AutoOpen';
 // 计划任务启动时会带上 --scheduled，用来区分「定时拉起」和「用户手动打开」
 const SCHEDULED_LAUNCH = process.argv.indexOf('--scheduled') >= 0 || process.env.TICKER_SCHEDULED === '1';
-// 开机自启（注册表 Run 项）拉起时会带上 --login
-const LOGIN_LAUNCH = process.argv.indexOf('--login') >= 0;
 
 let autoExitTimer = null;
 let closingForDay = false;
@@ -2130,7 +2130,7 @@ function startAutoExitTimer() {
   }, 30000);
 }
 
-/* ---- 自动启动：开机自启（注册表 Run 项） 或 工作日定时（Windows 计划任务） ---- */
+/* ---- 自动启动：Windows 计划任务，工作日定点拉起 ---- */
 
 // 打包后 ps1 在 resources/scripts 下（electron-builder extraResources 带的）
 const AUTOSTART_PS = app.isPackaged
@@ -2196,40 +2196,21 @@ function removeAutoStart(cb) {
   runAutostartPs(['-Mode', 'remove', '-TaskName', TASK_NAME], function () { cb(true); });
 }
 
-/* 开机自启：写 Windows 注册表 Run 项（免安装也能用） */
-function setLoginStart(on) {
-  const self = selfLaunch();
+// 装了任务就装上、关了就把任务删掉
+function applyAutoStart(enabled, time, cb) {
+  if (enabled) installAutoStart(time, cb);
+  else removeAutoStart(function () { cb(true, ''); });
+}
+
+// 之前版本提供过「开机自启」，会在注册表 Run 项留一条。
+// 现在统一走计划任务，启动时顺手清掉，免得老用户每次开机被多拉一次。
+function cleanLoginItem() {
   try {
-    app.setLoginItemSettings({
-      openAtLogin: !!on,
-      // 关掉的时候不带 path，让 Electron 按打包信息清理，避免残留
-      path: process.execPath,
-      args: on ? self.args.concat(['--login']) : []
-    });
-    logLine('[autostart]', '开机自启 ' + (on ? '已开启' : '已关闭'));
-    return true;
-  } catch (e) {
-    logLine('[autostart]', '写开机自启失败：' + e.message);
-    return false;
-  }
-}
-
-// 开机自启状态：以配置为准。
-// Electron 的 getLoginItemSettings 在部分版本/未打包场景下读不回自己刚写的值
-// （值名是 electron.app.xxx，path 匹配不上），查它反而会出现「已开启却显示未生效」。
-function loginStartOn() {
-  return !!(config.autoStart && config.autoStart.mode === 'login');
-}
-
-// 两套机制互斥：切到哪套就装哪套，另一套顺手拆掉，免得同一天被拉起两次
-function applyAutoStart(mode, time, cb) {
-  const m = mode === 'login' || mode === 'schedule' ? mode : 'off';
-  const loginOk = setLoginStart(m === 'login');
-  if (m === 'schedule') {
-    installAutoStart(time, function (ok, msg) { cb(ok && loginOk, msg); });
-  } else {
-    removeAutoStart(function () { cb(loginOk, ''); });
-  }
+    if (app.getLoginItemSettings({ path: process.execPath }).openAtLogin) {
+      app.setLoginItemSettings({ openAtLogin: false, path: process.execPath, args: [] });
+      logLine('[autostart]', '已清理历史遗留的开机启动项');
+    }
+  } catch (e) {}
 }
 
 // 计划任务拉起时，非交易日（法定假日/调休放假）自动关掉，避免空转
@@ -2260,27 +2241,6 @@ function startScheduledTradingCheck() {
 
   // 先让窗口显示出来，再开始检测
   setTimeout(check, 40000);
-}
-
-// 开机自启拉起：非交易日 / 太早 / 已收盘 都直接退出，别在后台空转一天
-function startLoginTradingCheck() {
-  if (!LOGIN_LAUNCH) return;
-
-  setTimeout(function () {
-    const now = nowMinutes();
-    if (now < 8 * 60 + 40 || now > 15 * 60 + 5) {
-      logLine('[autostart]', '开机启动：当前不在交易时段，退出');
-      app.quit();
-      return;
-    }
-    isTradingToday().then(function (ok) {
-      if (ok) return;
-      logLine('[autostart]', '开机启动：今天不是交易日，退出');
-      app.quit();
-    }).catch(function () {
-      // 接口挂了就别乱关，按交易日处理
-    });
-  }, 30000);
 }
 
 
@@ -2328,8 +2288,7 @@ ipcMain.handle('settings-get', async function () {
     alert: Object.assign({}, config.alert),
     autoExit: Object.assign({}, config.autoExit),
     autoStart: Object.assign({}, config.autoStart),
-    taskInstalled: installed,
-    loginInstalled: loginStartOn()
+    taskInstalled: installed
   };
 });
 
@@ -2408,9 +2367,8 @@ ipcMain.handle('settings-save', async function (e, patch) {
     time: (patch.autoExit && /^\d{2}:\d{2}$/.test(patch.autoExit.time)) ? patch.autoExit.time : config.autoExit.time
   };
 
-  const askMode = patch.autoStart && patch.autoStart.mode;
   const autoStartCfg = {
-    mode: ['off', 'login', 'schedule'].indexOf(askMode) >= 0 ? askMode : 'off',
+    enabled: !!(patch.autoStart && patch.autoStart.enabled),
     time: (patch.autoStart && /^\d{2}:\d{2}$/.test(patch.autoStart.time)) ? patch.autoStart.time : config.autoStart.time
   };
 
@@ -2436,13 +2394,13 @@ ipcMain.handle('settings-save', async function (e, patch) {
   // 轮询间隔改了，重启定时器让新值立即生效
   startBackgroundProbe();
 
-  // 自启跟着保存动作同步：切到哪套就装哪套，另一套顺手拆掉
+  // 自启跟着保存动作同步：开了就装/更新计划任务，关了就把任务删掉
   let taskMsg = '';
   const taskOk = await new Promise(function (res) {
-    applyAutoStart(autoStartCfg.mode, autoStartCfg.time, res);
+    applyAutoStart(autoStartCfg.enabled, autoStartCfg.time, res);
   });
-  if (!taskOk) taskMsg = '，但写入自动启动失败（可尝试用管理员身份运行一次）';
-  taskInstalledCache = autoStartCfg.mode === 'schedule' && taskOk;
+  if (!taskOk) taskMsg = '，但写入计划任务失败（可尝试用管理员身份运行一次）';
+  taskInstalledCache = autoStartCfg.enabled && taskOk;
 
   // 收盘退出时间/开关改了，定时器要按新配置重算
   sessionDay = todayKey();
@@ -2583,7 +2541,7 @@ if (!gotTheLock) {
     startBackgroundProbe();
     startAutoExitTimer();
     startScheduledTradingCheck();
-    startLoginTradingCheck();
+    cleanLoginItem();
     refreshTaskInstalledCache();
     app.on('activate', function () {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();

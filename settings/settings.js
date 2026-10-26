@@ -215,27 +215,19 @@
     }
   }
 
-  /* ---- 自动启动状态提示 ---- */
+  /* ---- 计划任务状态提示 ---- */
   var taskInstalled = false;
-  var loginInstalled = false;
 
-  function refreshTaskHint() {
+  function refreshTaskHint(installed) {
+    if (typeof installed === 'boolean') taskInstalled = installed;
     var el = $('task-hint');
-    var mode = $('autoStartMode').value;
     var at = $('autoStartTime').value || '09:25';
-    $('autoStartTime').disabled = mode !== 'schedule';
-    if (mode === 'login') {
-      el.textContent = loginInstalled
-        ? '已写入开机启动项：登录后自动开浮窗，非交易日或已收盘会自动退出。'
-        : '开机启动项尚未写入，点「保存并应用」后生效。';
-    } else if (mode === 'schedule') {
+    if ($('autoStartOn').checked) {
       el.textContent = taskInstalled
         ? '计划任务已生效：工作日 ' + at + ' 自动开浮窗，节假日会自己跳过。'
         : '计划任务尚未写入，点「保存并应用」后生效。';
     } else {
-      el.textContent = (taskInstalled || loginInstalled)
-        ? '当前还留着自动启动项，点「保存并应用」会把它清掉。'
-        : '';
+      el.textContent = taskInstalled ? '计划任务仍存在，点「保存并应用」会把它删掉。' : '';
     }
   }
 
@@ -287,7 +279,7 @@
         time: $('autoExitTime').value || '15:05'
       },
       autoStart: {
-        mode: $('autoStartMode').value || 'off',
+        enabled: $('autoStartOn').checked,
         time: $('autoStartTime').value || '09:25'
       }
     };
@@ -299,13 +291,10 @@
       if (r && r.ok) {
         if (r.msg) {
           setFoot('已保存' + r.msg, 'err');
-          refreshTaskHint();
+          refreshTaskHint(false);
         } else {
-          var m = $('autoStartMode').value;
-          taskInstalled = m === 'schedule';
-          loginInstalled = m === 'login';
           setFoot('已保存并应用', 'ok');
-          refreshTaskHint();
+          refreshTaskHint($('autoStartOn').checked);
         }
       } else {
         setFoot((r && r.msg) || '保存失败', 'err');
@@ -360,10 +349,9 @@
     $('autoExitTime').value = (d.autoExit && d.autoExit.time) || '15:05';
     refreshExitHint();
 
-    $('autoStartMode').value = (d.autoStart && d.autoStart.mode) || 'off';
+    $('autoStartOn').checked = !!(d.autoStart && d.autoStart.enabled);
     $('autoStartTime').value = (d.autoStart && d.autoStart.time) || '09:25';
     taskInstalled = !!d.taskInstalled;
-    loginInstalled = !!d.loginInstalled;
     refreshTaskHint();
 
     renderList();
@@ -447,7 +435,7 @@
     window.ticker.testAlert();
     setFoot('已发出测试提醒', 'ok');
   });
-  $('autoStartMode').addEventListener('change', function () { refreshTaskHint(); });
+  $('autoStartOn').addEventListener('change', function () { refreshTaskHint(); });
   $('autoStartTime').addEventListener('change', function () { refreshTaskHint(); });
   $('autoExitOn').addEventListener('change', function () { refreshExitHint(); });
   $('autoExitTime').addEventListener('change', function () { refreshExitHint(); });
