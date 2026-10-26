@@ -228,13 +228,17 @@
     var cs = getComputedStyle(row);
     var gap = parseFloat(cs.columnGap || cs.gap) || 6;
     others += gap * Math.max(0, kids.length - 1);
-    // 名称至少留 46px，剩下的才给折线
-    return Math.max(30, Math.round(row.clientWidth - others - 46));
+    // 名称至少留 46px，剩下的才给折线；再窄也保底 22px，
+    // 让「图永远在」，不因为窗口拖窄就整块消失
+    return Math.max(22, Math.round(row.clientWidth - others - 46));
   }
 
   function applySpark(w) {
     sparkWant = Math.max(30, Math.min(400, Math.round(w || sparkWant)));
     var real = Math.min(sparkWant, sparkMax());
+    // 极窄的时候折线只占一条迷你带（34px），把宽度让给名称，
+    // 否则要么没图、要么名称被截成两个字，两种都不能要
+    if (document.body.classList.contains('tight')) real = Math.min(real, 34);
     document.body.style.setProperty('--spark-w', real + 'px');
     return real;
   }

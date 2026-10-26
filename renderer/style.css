@@ -279,12 +279,14 @@ body.compact .row { gap: 4px; }
 body.compact .chg { font-size: 11px; }
 body.compact .pct { flex: 0 0 46px; font-size: 10.5px; }
 
-/* 二级（<240）：数值再小一号，迷你折线收起，宽度全给名称 */
+/* 二级（<240）：数值再小一号，折线压到最窄但不消失 */
+/* 折线一旦整块藏掉，用户（包括刚下载的人）会以为图表坏了，
+   所以这里只把它压到 22px 迷你条，宽度不足的部分由 label 截断吸收。 */
 body.tight .row { gap: 3px; }
-body.tight .spark { display: none; }
 body.tight .name { font-size: 10.5px; }
 body.tight .chg { font-size: 10.5px; }
 body.tight .pct { flex: 0 0 42px; font-size: 10px; }
+body.tight .spark { min-width: 22px; }
 
 body.noname .name { display: none; }
 
