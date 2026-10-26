@@ -2528,7 +2528,9 @@ ipcMain.on('settings-close', function () {
 // 便携版的 exe 只是个自解压包：每次双击解压到随机的临时目录，运行的其实是那份副本。
 // electron-updater 要原地替换安装目录里的文件，便携版没有稳定目录，官方不支持。
 const IS_PORTABLE = !!process.env.PORTABLE_EXECUTABLE_FILE;
-const UPDATER_ON = app.isPackaged && !IS_PORTABLE;
+// TICKER_UPDATE_TEST 让开发模式也能跑更新流程（打包前验证用，正常不会设）
+const UPDATER_ON = (app.isPackaged || !!process.env.TICKER_UPDATE_TEST) && !IS_PORTABLE;
+const TEST_MODE = !app.isPackaged && !!process.env.TICKER_UPDATE_TEST;
 
 let autoUpdater = null;
 // status: idle / checking / current / available / downloading / ready / error
@@ -2536,8 +2538,17 @@ const updateState = { status: 'idle', available: '', progress: 0, message: '' };
 
 function pushUpdate(patch) {
   Object.assign(updateState, patch);
-  logLine('[update]', JSON.stringify(updateState));
+  logLine('[update]', [updateState.status, updateState.available,
+    updateState.progress ? updateState.progress + '%' : '', updateState.message]
+    .filter(Boolean).join(' · '));
   if (win && !win.isDestroyed()) win.webContents.send('update-state', Object.assign({}, updateState));
+}
+
+// 网络错误的 message 里带着整段 HTTP 响应头，动辄好几 KB，
+// 日志和状态里只留第一行、限 180 字符，够定位问题又不刷屏
+function shortErr(e) {
+  var m = String((e && e.message) || e).split('\n')[0].trim();
+  return m.length > 180 ? m.slice(0, 180) + '…' : m;
 }
 
 function initUpdater() {
@@ -2553,8 +2564,16 @@ function initUpdater() {
   }
 
   autoUpdater.autoDownload = true;
-  // 下好就等下次正常退出时静默装上，不打断盯盘，也不会突然重启窗口
-  autoUpdater.autoInstallOnAppQuit = true;
+  // 下好就等下次正常退出时静默装上，不打断盯盘，也不会突然重启窗口。
+  // 本地 feed 测试时不自动装，免得测一次就把本机重装一遍。
+  autoUpdater.autoInstallOnAppQuit = !TEST_MODE && !process.env.TICKER_UPDATE_FEED;
+  // 开发模式（未打包）默认跳过更新检查，测试时强制打开
+  if (TEST_MODE) autoUpdater.forceDevUpdateConfig = true;
+  // 调试时可以指到本地静态目录，省得为了试一次就发版
+  if (process.env.TICKER_UPDATE_FEED) {
+    autoUpdater.setFeedURL({ provider: 'generic', url: process.env.TICKER_UPDATE_FEED });
+    logLine('[update]', '测试 feed: ' + process.env.TICKER_UPDATE_FEED);
+  }
 
   autoUpdater.on('checking-for-update', function () {
     pushUpdate({ status: 'checking', message: '' });
@@ -2587,7 +2606,7 @@ function initUpdater() {
   });
   autoUpdater.on('error', function (e) {
     // 连不上 GitHub 是常态（代理抖动），不弹通知打扰，只落日志
-    pushUpdate({ status: 'error', message: String((e && e.message) || e) });
+    pushUpdate({ status: 'error', message: shortErr(e) });
   });
 
   // 晚一点再查：先把窗口和第一屏行情拉出来，别和启动抢带宽
@@ -2612,7 +2631,7 @@ function checkForUpdates(manual) {
   }
   pushUpdate({ status: 'checking', message: manual ? '正在检查…' : '' });
   autoUpdater.checkForUpdates().catch(function (e) {
-    pushUpdate({ status: 'error', message: String((e && e.message) || e) });
+    pushUpdate({ status: 'error', message: shortErr(e) });
   });
 }
 
