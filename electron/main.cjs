@@ -11,11 +11,83 @@ app.commandLine.appendSwitch('disable-gpu-compositing');
 
 // 资源目录（只读）：renderer / settings / scripts 都从这里读
 const RES_DIR = path.join(__dirname, '..');
-// 打包成 exe 后程序目录是只读的（asar），配置 / 日志 / 缓存必须落到用户目录，
-// 否则 saveConfig 直接抛错、窗口位置和自选全丢。开发时仍在项目目录里，方便看。
-const DATA_DIR = app.isPackaged ? app.getPath('userData') : RES_DIR;
+// 数据目录（可写）：配置 / 日志 / 缓存统一放用户目录（%APPDATA%\mini-ticker）。
+// 两种形态共用同一份，避免「npm start 和 exe 各存一套、自选对不上」。
+// 打包后程序目录在只读的 asar 里，本来也写不进去。
+const DATA_DIR = app.getPath('userData');
 const ROOT = DATA_DIR;
 const CONFIG_PATH = path.join(DATA_DIR, 'config.json');
+
+/* ---------------- 首次启动：把老位置的配置接过来 ---------------- */
+
+// 打包成 exe 后配置落到用户目录（%APPDATA%\mini-ticker\），第一次跑时那里是空的，
+// 直接拿默认值会显得「自选被刷回初始状态」。所以读配置前先看 exe 旁边 / 上一级
+// （exe 放在 dist/ 里时就是项目目录）有没有现成的 config.json，有就接过来。
+const CONFIG_MIGRATED = path.join(DATA_DIR, '.config-migrated');
+
+function sameList(a, b) {
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+  for (var i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
+// 一份配置是不是「原封不动的默认值」：是的话说明没被用户动过，可以让位给老配置
+function isFreshDefault(cfg) {
+  return sameList(cfg.symbols, DEFAULT_CONFIG.symbols) &&
+    sameList(cfg.watchlist, DEFAULT_CONFIG.watchlist);
+}
+
+function candidateConfigPaths() {
+  var out = [];
+  function push(p) { if (p && out.indexOf(p) < 0) out.push(p); }
+  var dir = process.env.PORTABLE_EXECUTABLE_DIR || path.dirname(process.execPath);
+  push(path.join(dir, 'config.json'));
+  push(path.join(dir, '..', 'config.json'));
+  push(path.join(RES_DIR, 'config.json'));
+  return out;
+}
+
+function pickConfigFrom(candidates) {
+  for (var i = 0; i < candidates.length; i++) {
+    var p = candidates[i];
+    if (path.resolve(p) === path.resolve(CONFIG_PATH)) continue;
+    try {
+      if (!fs.existsSync(p)) continue;
+      var raw = JSON.parse(fs.readFileSync(p, 'utf8'));
+      if (!raw || typeof raw !== 'object') continue;
+      if (!Array.isArray(raw.symbols) || !raw.symbols.length) continue;
+      return { path: p, data: raw };
+    } catch (e) {}
+  }
+  return null;
+}
+
+function migrateConfig() {
+  if (fs.existsSync(CONFIG_MIGRATED)) return;
+  try {
+    var src = pickConfigFrom(candidateConfigPaths());
+    var take = false;
+    if (src) {
+      if (!fs.existsSync(CONFIG_PATH)) {
+        take = true;
+      } else {
+        // 本地已有配置，但内容还停在原始默认值 → 是打包后新生成的，让位给老配置
+        try {
+          var cur = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
+          take = isFreshDefault(Object.assign({}, DEFAULT_CONFIG, cur));
+        } catch (e) { take = true; }
+      }
+    }
+    if (take) {
+      fs.mkdirSync(path.dirname(CONFIG_PATH), { recursive: true });
+      fs.copyFileSync(src.path, CONFIG_PATH);
+      logLine('[config]', '已继承本地配置：' + src.path);
+    }
+    fs.writeFileSync(CONFIG_MIGRATED, (src ? src.path : '') + '\n', 'utf8');
+  } catch (e) {
+    logLine('[config]', '配置迁移失败：' + e.message);
+  }
+}
 
 /* ---------------- 运行日志（闪退排查用） ---------------- */
 
@@ -122,7 +194,9 @@ let seriesCache = { at: 0, map: {}, period: null };
 // 取数失败只记一次日志，避免每 3 秒刷屏
 let seriesFailLogged = {};
 
+migrateConfig();
 let config = loadConfig();
+logLine('[config]', '配置文件：' + CONFIG_PATH);
 let win = null;
 // 渲染层最近一次算出的"内容自然高度"，用来区分用户手动拖高还是内容撑开
 let autoFitHeight = 0;

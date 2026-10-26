@@ -23,7 +23,7 @@
 
 ### 直接用现成的 exe
 
-不用装 Node，下载 `MiniTicker-x.y.z.exe` 双击即可（单文件，首次启动会先解压到临时目录，慢 1~2 秒）。配置和日志写在 `%APPDATA%\MiniTicker\`，卸载就是删掉这个 exe 和那个目录。
+不用装 Node，下载 `MiniTicker-x.y.z.exe` 双击即可（单文件，首次启动会先解压到临时目录，慢 1~2 秒）。配置和日志写在 `%APPDATA%\mini-ticker\`，卸载就是删掉这个 exe 和那个目录。
 
 > 没有代码签名，Windows 首次运行会提示「未知发布者」，点「更多信息 → 仍要运行」。
 
@@ -114,9 +114,17 @@ ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-
 
 ## 配置文件
 
-`config.json` 自动生成在项目根目录，也可以完全用设置面板改。首次运行会从默认值创建。
+`config.json` 放在用户目录，不在项目里：
 
-字段说明见 `config.example.json`。几个值得注意的：
+- Windows：`%APPDATA%\mini-ticker\config.json`
+- macOS：`~/Library/Application Support/mini-ticker/config.json`
+- Linux：`~/.config/mini-ticker/config.json`
+
+`npm start` 和打包后的 exe **读的是同一份**，不会各存一套。日志和场外基金的分时累积也在同目录下的 `logs/` / `cache/`。
+
+首次启动如果那里还没有配置，会去看看项目根目录（或 exe 同目录 / 上一级）有没有现成的 `config.json`，有就继承过来——所以从源码切到 exe 不会丢自选。想彻底重置就删掉这个目录里的 `config.json` 和 `.config-migrated`。
+
+也可以完全用设置面板改。字段说明见 `config.example.json`。几个值得注意的：
 
 | 字段 | 说明 |
 | --- | --- |
