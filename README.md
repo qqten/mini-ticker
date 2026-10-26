@@ -2,6 +2,8 @@
 
 背景全透明的桌面行情浮窗。没有边框、没有面板、没有按钮堆叠，只有红绿折线和几个数字，贴在桌面任意角落，不挡视线。
 
+**[⬇ 下载最新版 MiniTicker.exe](https://github.com/qqten/mini-ticker/releases/latest)** — 单文件，不用装 Node，双击就能用。
+
 ![深色壁纸上的效果](preview/dark-wallpaper.png)
 
 ## 特性
@@ -23,7 +25,7 @@
 
 ### 直接用现成的 exe
 
-不用装 Node，下载 `MiniTicker-x.y.z.exe` 双击即可（单文件，首次启动会先解压到临时目录，慢 1~2 秒）。配置和日志写在 `%APPDATA%\mini-ticker\`，卸载就是删掉这个 exe 和那个目录。
+去 [Releases](https://github.com/qqten/mini-ticker/releases/latest) 下载 `MiniTicker-x.y.z.exe`，双击即可 —— 单文件，不用装 Node，首次启动会先解压到临时目录，慢 1~2 秒。配置和日志写在 `%APPDATA%\mini-ticker\`，卸载就是删掉这个 exe 和那个目录。
 
 > 没有代码签名，Windows 首次运行会提示「未知发布者」，点「更多信息 → 仍要运行」。
 
