@@ -14,12 +14,20 @@
 - **可伸缩**：鼠标移到浮窗任意一边拖动改宽/改高，松手记住；右键菜单只有设置和退出，其余都在设置面板里
 - **按名字搜**：中文名、拼音首字母、代码都能搜，不用背代码
 - **尾盘提醒**：到点弹通知 + 任务栏闪烁
-- **收盘自动退出 / 开盘自动启动**：工作日定时，节假日自己跳过
+- **收盘自动退出 / 自动启动**：收盘定时退出；启动可以选开机自启（非交易时段自己退）或工作日定时，节假日都会跳过
 - **单实例**：重复启动只会激活已有窗口
 
 ![自动适配背景](preview/auto-adaptive.png)
 
 ## 快速开始
+
+### 直接用现成的 exe
+
+不用装 Node，下载 `MiniTicker-x.y.z.exe` 双击即可（单文件，首次启动会先解压到临时目录，慢 1~2 秒）。配置和日志写在 `%APPDATA%\MiniTicker\`，卸载就是删掉这个 exe 和那个目录。
+
+> 没有代码签名，Windows 首次运行会提示「未知发布者」，点「更多信息 → 仍要运行」。
+
+### 从源码跑
 
 需要 Node.js 18 及以上。
 
@@ -32,7 +40,21 @@ npm start
 
 Windows 用户装好依赖后，直接双击 `start.cmd` 也行。
 
-> 目前主要在 Windows 上验证。macOS / Linux 可以用 `npm start` 跑起来，但开盘自启（Windows 计划任务）那套不适用。
+### 自己打包成 exe
+
+```bash
+npm install
+npm run dist     # 出 dist/MiniTicker-1.0.0.exe（便携单文件）
+npm run pack:dir # 只出 dist/win-unpacked 目录，调试打包问题时用
+```
+
+打包用 electron-builder：`electronDist` 指向本地已装好的 Electron，省去重复下载；图标是 `build/icon.ico`。国内网络下载 NSIS 资源慢的话，加镜像：
+
+```bash
+ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-binaries/ npm run dist
+```
+
+> 目前主要在 Windows 上验证。macOS / Linux 可以用 `npm start` 跑起来，但自动启动（注册表 / 计划任务）那套不适用。
 
 ## 用法
 
@@ -104,7 +126,7 @@ Windows 用户装好依赖后，直接双击 `start.cmd` 也行。
 | `interval` | 刷新间隔（毫秒） |
 | `alert` | 尾盘提醒开关与时间 |
 | `autoExit` | 收盘自动退出时间，默认 `15:05`（留几分钟让收盘数据落定） |
-| `autoStart` | 开盘自动启动时间，靠 Windows 计划任务实现 |
+| `autoStart` | 自动启动：`mode` 为 `off` / `login`（开机自启）/ `schedule`（工作日定时，`time` 生效） |
 | `width` | 浮窗宽度，拖动边缘会自动写回 |
 | `height` | 浮窗高度，`0` = 跟随内容自动撑开；手动拖过高就记住具体值 |
 

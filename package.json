@@ -4,7 +4,9 @@
   "description": "背景透明的极简桌面盯盘浮窗：只有红绿折线和数值",
   "main": "electron/main.cjs",
   "scripts": {
-    "start": "node scripts/launch.js"
+    "start": "node scripts/launch.js",
+    "dist": "electron-builder --win portable",
+    "pack:dir": "electron-builder --win --dir"
   },
   "keywords": [
     "electron",
@@ -19,6 +21,42 @@
     "node": ">=18"
   },
   "devDependencies": {
-    "electron": "^30.0.9"
+    "electron": "^30.0.9",
+    "electron-builder": "^26.18.0"
+  },
+  "build": {
+    "appId": "com.miniticker.watch",
+    "productName": "MiniTicker",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "electron/**/*",
+      "renderer/**/*",
+      "settings/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "scripts/autostart.ps1",
+        "to": "scripts/autostart.ps1"
+      }
+    ],
+    "asar": true,
+    "electronDist": "node_modules/electron/dist",
+    "win": {
+      "target": [
+        {
+          "target": "portable",
+          "arch": ["x64"]
+        }
+      ],
+      "icon": "build/icon.ico"
+    },
+    "portable": {
+      "artifactName": "MiniTicker-${version}.exe",
+      "requestExecutionLevel": "user"
+    }
   }
 }

@@ -304,6 +304,10 @@ select {
 
 select:focus { border-color: var(--accent); }
 
+/* 下拉框没被选中时，旁边的时间输入框是禁用的（比如选了「开机自启」用不到时间） */
+input:disabled,
+select:disabled { opacity: .4; cursor: default; }
+
 .field { display: flex; align-items: center; gap: 12px; margin-top: 10px; }
 .field .fl { color: var(--sub); }
 .field .note { color: #626b7a; font-size: 11.5px; }
