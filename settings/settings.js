@@ -340,6 +340,65 @@
     });
   }
 
+  /* ---- 更新状态 ---- */
+  var updState = { status: 'idle', available: '', progress: 0, message: '' };
+
+  function renderUpdate() {
+    var btn = $('updBtn');
+    var stateEl = $('updState');
+    var hintEl = $('updHint');
+    var st = updState.status;
+
+    if (state.updaterOn === false) {
+      stateEl.textContent = state.isPortable ? '便携版不支持自动更新' : '开发模式不检查更新';
+      btn.style.display = 'none';
+      hintEl.textContent = state.isPortable ? '请到 GitHub Releases 下载新版安装包' : '';
+      return;
+    }
+    btn.style.display = '';
+
+    var labels = {
+      idle: '未检查', checking: '正在检查…', current: '已是最新版本',
+      available: '发现新版 v' + updState.available, downloading: '下载中 ' + (updState.progress || 0) + '%',
+      ready: 'v' + updState.available + ' 已下载', error: '检查失败'
+    };
+    stateEl.textContent = labels[st] || st;
+    btn.disabled = (st === 'checking' || st === 'downloading');
+
+    if (st === 'ready') {
+      btn.textContent = '重启更新';
+      hintEl.textContent = '点击立即重启并安装 v' + updState.available;
+    } else if (st === 'error') {
+      btn.textContent = '重试';
+      hintEl.textContent = (updState.message || '').slice(0, 120) + '（可在日志查看详情）';
+    } else {
+      btn.textContent = st === 'current' ? '重新检查' : '检查更新';
+      hintEl.textContent = st === 'current' ? '当前 v' + state.version + '，点击重新检查' : '';
+    }
+  }
+
+  function bindUpdate() {
+    $('updBtn').addEventListener('click', function () {
+      if (updState.status === 'ready') {
+        window.ticker.installUpdate();
+      } else {
+        window.ticker.checkUpdate();
+      }
+    });
+    window.ticker.onUpdateState(function (u) {
+      if (u) { updState = u; renderUpdate(); }
+    });
+  }
+
+  function initUpdate(d) {
+    state.version = d.version;
+    state.updaterOn = d.updaterOn;
+    state.isPortable = d.isPortable;
+    $('curVersion').textContent = d.version || '-';
+    if (d.update) updState = d.update;
+    renderUpdate();
+  }
+
   function save() {
     var periodEl = document.querySelector('input[name="period"]:checked');
 
@@ -444,6 +503,8 @@
     refreshTaskHint();
 
     initShortcuts(d);
+    initUpdate(d);
+    bindUpdate();
     renderList();
 
     // 打开时把焦点放到输入框，方便直接敲代码；列表回滚到顶部

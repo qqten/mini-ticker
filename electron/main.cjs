@@ -2434,7 +2434,11 @@ ipcMain.handle('settings-get', async function () {
     autoExit: Object.assign({}, config.autoExit),
     autoStart: Object.assign({}, config.autoStart),
     shortcuts: normalizeShortcuts(config.shortcuts),
-    taskInstalled: installed
+    taskInstalled: installed,
+    update: Object.assign({}, updateState),
+    updaterOn: UPDATER_ON,
+    isPortable: IS_PORTABLE,
+    version: app.getVersion()
   };
 });
 
@@ -2622,7 +2626,9 @@ function pushUpdate(patch) {
   logLine('[update]', [updateState.status, updateState.available,
     updateState.progress ? updateState.progress + '%' : '', updateState.message]
     .filter(Boolean).join(' · '));
-  if (win && !win.isDestroyed()) win.webContents.send('update-state', Object.assign({}, updateState));
+  const payload = Object.assign({}, updateState);
+  if (win && !win.isDestroyed()) win.webContents.send('update-state', payload);
+  if (settingsWin && !settingsWin.isDestroyed()) settingsWin.webContents.send('update-state', payload);
 }
 
 // 网络错误的 message 里带着整段 HTTP 响应头，动辄好几 KB，
@@ -2728,6 +2734,18 @@ function buildMainMenu() {
 ipcMain.on('open-menu', function () {
   if (!win) return;
   buildMainMenu().popup({ window: win });
+});
+
+// 设置面板触发：手动检查更新 / 下载完成后立即重启安装
+ipcMain.on('check-update', function () { checkForUpdates(true); });
+ipcMain.on('install-update', function () {
+  if (!autoUpdater) return;
+  logLine('[update]', '用户点击重启安装');
+  try {
+    autoUpdater.quitAndInstall(false, true);
+  } catch (e) {
+    logLine('[update]', 'quitAndInstall 失败：' + shortErr(e));
+  }
 });
 
 ipcMain.on('test-alert', function () { fireAlert(false); });

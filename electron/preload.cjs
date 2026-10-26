@@ -36,5 +36,10 @@ contextBridge.exposeInMainWorld('ticker', {
   closeSettings: function () { ipcRenderer.send('settings-close'); },
   previewWidth: function (w) { ipcRenderer.send('preview-width', w); },
   setPinned: function (on) { ipcRenderer.send('set-pinned', on); },
-  setPinZone: function (on) { ipcRenderer.send('set-pin-zone', on); }
+  setPinZone: function (on) { ipcRenderer.send('set-pin-zone', on); },
+
+  // 更新
+  checkUpdate: function () { ipcRenderer.send('check-update'); },
+  installUpdate: function () { ipcRenderer.send('install-update'); },
+  onUpdateState: function (fn) { ipcRenderer.on('update-state', function (e, s) { fn(s); }); }
 });
