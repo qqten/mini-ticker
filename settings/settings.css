@@ -309,10 +309,30 @@ input:disabled,
 select:disabled { opacity: .4; cursor: default; }
 
 .field { display: flex; align-items: center; gap: 12px; margin-top: 10px; }
-.field .fl { color: var(--sub); }
+.field .fl { color: var(--sub); width: 72px; flex: 0 0 auto; }
 .field .note { color: #626b7a; font-size: 11.5px; }
 .field .check { width: 104px; flex: 0 0 auto; }
 .field:first-of-type { margin-top: 0; }
+
+.sc-field { margin-top: 8px; }
+.sc-field .sc {
+  width: 168px;
+  height: 30px;
+  padding: 0 10px;
+  border-radius: 7px;
+  border: 1px solid var(--line);
+  background: var(--card);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12.5px;
+  outline: none;
+  cursor: pointer;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: .4px;
+}
+.sc-field .sc:hover { border-color: var(--accent); }
+.sc-field .sc.editing { border-color: var(--accent); background: #eef4ff; color: var(--accent); }
+.sc-field .sc.clash { border-color: #e5484d; background: #fdebec; color: #e5484d; }
 
 .inline-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 

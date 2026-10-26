@@ -254,6 +254,7 @@
     document.body.classList.toggle('noname', s.showName === false);
     showBaseline = s.baseline !== false;
     if (s.period) currentPeriod = s.period;
+    if (s.shortcuts) rebuildShortcuts(s.shortcuts);
     updatePeriodLabel();
   }
 
@@ -424,17 +425,56 @@
     window.ticker.openMenu();
   });
 
-  // 快捷键：Ctrl+1~4 切周期，Ctrl+R 立即刷新
-  var PERIOD_KEYS = { '1': 'minute', '2': 'day', '3': 'month', '4': 'year' };
+  // 快捷键：Ctrl+1~4 切周期，Ctrl+R 立即刷新（可在设置里改）
+  var SHORTCUT_DEFAULTS = {
+    periodMinute: 'Ctrl+1', periodDay: 'Ctrl+2', periodMonth: 'Ctrl+3', periodYear: 'Ctrl+4',
+    refresh: 'Ctrl+R', focus: 'Ctrl+Alt+F'
+  };
+  var shortcuts = Object.assign({}, SHORTCUT_DEFAULTS);
+
+  // 把 "Ctrl+Alt+F" 这类字符串转成匹配函数；不认识的格式返回 null
+  function shortcutMatcher(acc) {
+    if (!acc || typeof acc !== 'string') return null;
+    var parts = acc.trim().split('+');
+    if (parts.length < 2) return null;  // 必须至少一个修饰符 + 主键
+    var mods = { ctrl: false, alt: false, shift: false };
+    for (var i = 0; i < parts.length - 1; i++) {
+      var m = parts[i].trim().toLowerCase();
+      if (m === 'ctrl' || m === 'control') mods.ctrl = true;
+      else if (m === 'alt') mods.alt = true;
+      else if (m === 'shift') mods.shift = true;
+      else return null;
+    }
+    var key = parts[parts.length - 1].trim().toLowerCase();
+    if (!key) return null;
+    return function (e) {
+      return (e.ctrlKey || e.metaKey) === mods.ctrl &&
+        e.altKey === mods.alt &&
+        e.shiftKey === mods.shift &&
+        e.key.toLowerCase() === key;
+    };
+  }
+
+  var shortcutHandlers = [];
+  function rebuildShortcuts(sc) {
+    if (sc) shortcuts = Object.assign({}, SHORTCUT_DEFAULTS, sc);
+    shortcutHandlers = [
+      { m: shortcutMatcher(shortcuts.periodMinute), fn: function () { window.ticker.setPeriod('minute'); } },
+      { m: shortcutMatcher(shortcuts.periodDay), fn: function () { window.ticker.setPeriod('day'); } },
+      { m: shortcutMatcher(shortcuts.periodMonth), fn: function () { window.ticker.setPeriod('month'); } },
+      { m: shortcutMatcher(shortcuts.periodYear), fn: function () { window.ticker.setPeriod('year'); } },
+      { m: shortcutMatcher(shortcuts.refresh), fn: function () { refresh(); } }
+    ].filter(function (h) { return !!h.m; });
+  }
+
   document.addEventListener('keydown', function (e) {
-    if (!e.ctrlKey && !e.metaKey) return;
-    var p = PERIOD_KEYS[e.key];
-    if (p) {
-      e.preventDefault();
-      window.ticker.setPeriod(p);
-    } else if (e.key.toLowerCase() === 'r') {
-      e.preventDefault();
-      refresh();
+    // 设置窗口里的按键（如敲代码搜索）不影响浮窗；这里只处理浮窗本身
+    for (var i = 0; i < shortcutHandlers.length; i++) {
+      if (shortcutHandlers[i].m(e)) {
+        e.preventDefault();
+        shortcutHandlers[i].fn();
+        return;
+      }
     }
   });
 

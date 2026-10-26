@@ -178,7 +178,16 @@ const DEFAULT_CONFIG = {
   width: 320,
   // 高度：0 表示跟随内容自动撑开，>0 表示用户手动拖过、以这个值为准
   height: 0,
-  pos: null
+  pos: null,
+  // 快捷键：周期/刷新是窗口内快捷键，focus 是全局唤起聚焦图表
+  shortcuts: {
+    periodMinute: 'Ctrl+1',
+    periodDay: 'Ctrl+2',
+    periodMonth: 'Ctrl+3',
+    periodYear: 'Ctrl+4',
+    refresh: 'Ctrl+R',
+    focus: 'Ctrl+Alt+F'
+  }
 };
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36';
@@ -246,6 +255,34 @@ function num(v) {
   return isFinite(n) ? n : NaN;
 }
 
+// 快捷键格式校验：修饰符(Ctrl/Alt/Shift)+ 主键，如 Ctrl+1 / Ctrl+Alt+F / Ctrl+Shift+R
+const SHORTCUT_KEY_RE = /^(F\d{1,2}|[0-9]|[a-zA-Z]|Space|Enter|Escape|Tab|ArrowUp|ArrowDown|ArrowLeft|ArrowRight|Home|End|PageUp|PageDown|Backspace|Delete)$/;
+function validShortcut(s) {
+  if (typeof s !== 'string') return false;
+  const parts = s.trim().split('+');
+  if (parts.length < 2 || parts.length > 4) return false;  // 必须至少一个修饰符 + 主键
+  const mods = {};
+  for (let i = 0; i < parts.length - 1; i++) {
+    const m = parts[i].trim();
+    if (m === 'Ctrl' || m === 'Control') mods.ctrl = true;
+    else if (m === 'Alt') mods.alt = true;
+    else if (m === 'Shift') mods.shift = true;
+    else return false;
+  }
+  const key = parts[parts.length - 1].trim();
+  if (!SHORTCUT_KEY_RE.test(key)) return false;
+  return true;
+}
+
+function normalizeShortcuts(sc) {
+  const def = DEFAULT_CONFIG.shortcuts;
+  const out = {};
+  ['periodMinute', 'periodDay', 'periodMonth', 'periodYear', 'refresh', 'focus'].forEach(function (k) {
+    out[k] = validShortcut(sc && sc[k]) ? sc[k].trim() : def[k];
+  });
+  return out;
+}
+
 async function fetchGbk(url, headers) {
   const res = await fetch(url, { headers: headers || HEADERS });
   if (!res.ok) throw new Error('HTTP ' + res.status);
@@ -300,21 +337,22 @@ async function fetchSnapshots(codes) {
       const m = line.match(/v_([a-zA-Z0-9_]+)="([^"]*)"/);
       if (!m) return;
       const code = m[1];
-      const a = m[2].split('~');
       if (/^hf_/i.test(code)) {
-        // 外盘期货：现价,涨跌,...,最高,最低,时间,昨结,今开,...,日期,名称
+        // 外盘期货用逗号分隔（A股用波浪号）：现价,涨跌幅%,...,最高,最低,时间,昨结,今开,...,日期,名称
+        const a = m[2].split(',');
         const price = num(a[0]);
-        const change = num(a[1]);
+        const pctRaw = num(a[1]);
         const prev = num(a[7]);
         map[code] = {
           name: NAMES[code] || a[13] || code,
           price: price,
           prevClose: prev,
-          pct: (isFinite(price) && isFinite(prev) && prev) ? (change / prev) * 100 : NaN,
-          change: change,
+          pct: pctRaw,
+          change: (isFinite(price) && isFinite(prev)) ? price - prev : NaN,
           time: (a[12] || '') + ' ' + (a[6] || '')
         };
       } else {
+        const a = m[2].split('~');
         map[code] = {
           name: a[1] || code,
           price: num(a[3]),
@@ -631,6 +669,18 @@ async function fetchKlineRaw(code, interval, count) {
       const alt = await fetchSinaKline(code, interval, count);
       if (alt.length) return alt;
     } catch (e) {}
+  }
+  // 外盘期货：腾讯无 K 线，走新浪外盘日K；转成与腾讯一致的 [date,open,close,high,low,volume] 行格式
+  if (/^hf_/i.test(code)) {
+    const sym = code.slice(3).toUpperCase();
+    const url = 'https://stock2.finance.sina.com.cn/futures/api/openapi.php/GlobalFuturesService.getGlobalFuturesDailyKLine?symbol=' + sym;
+    const j = await fetchJson(url);
+    const rows = (j && j.result && j.result.data) || [];
+    return rows.map(function (r) {
+      return [String(r.date || r.day || ''), num(r.open), num(r.close), num(r.high), num(r.low), num(r.volume)];
+    }).filter(function (x) {
+      return isFinite(x[1]) && isFinite(x[2]) && isFinite(x[3]) && isFinite(x[4]);
+    }).slice(-count);
   }
   try {
     const ep = code.slice(0, 2).toLowerCase() === 'us' ? 'usfqkline' : 'fqkline';
@@ -1413,6 +1463,7 @@ const FOCUS_TABS = ['minute', 'five', 'day'];
 const FOCUS_SESSION_A = 242;   // A 股一个交易日：09:30-11:30 + 13:00-15:00，含首尾共 242 个分钟点
 const FOCUS_SESSION_HK = 332;  // 港股：09:30-12:00 + 13:00-16:00
 const FOCUS_SESSION_US = 392;  // 美股：09:30-16:00（东部时间）
+const FOCUS_SESSION_HF = 1440; // 外盘期货/美元指数：近乎 24 小时连续交易（实际约 1380 分钟），留足余量
 const FOCUS_TTL = { minute: 15000, five: 60000, day: 60000 };
 
 // 聚焦不是另开窗口：直接把浮窗本身加宽加高，上面照旧是自选列表，下面挂图表。
@@ -1427,6 +1478,7 @@ let focusLeftW = 320;         // 展开时左侧列表占的宽度 = 展开前�
 let skipResizeUntil = 0;      // 程序化改尺寸期间，别当成用户拖动落盘
 
 function sessionMinutes(code) {
+  if (/^hf_/i.test(code) || /^usDXY$/i.test(code)) return FOCUS_SESSION_HF;
   if (/^hk/i.test(code)) return FOCUS_SESSION_HK;
   if (/^us/i.test(code)) return FOCUS_SESSION_US;
   return FOCUS_SESSION_A;
@@ -1497,21 +1549,38 @@ async function buildFocusPayload(code, tab) {
       change = price - prevClose;
     }
   } else {
-    const j = await fetchTencentJson('/appstock/app/minute/query?code=' + encodeURIComponent(code));
-    const block = j && j.data && j.data[code];
-    const lines = (block && block.data && block.data.data) || [];
-    const qt = (block && block.qt && block.qt[code]) || [];
-    const pts = parseMinuteLines(lines);
-    if (pts.length > 1) {
-      days = [{ date: String((block.data && block.data.date) || ''), prec: num(qt[4]), points: pts }];
-      const lastPt = pts[pts.length - 1];
-      price = lastPt.price;
-      prevClose = num(qt[4]);
-      pct = num(qt[32]);
-      change = num(qt[31]);
-      if (qt[1]) name = qt[1];
-      if (!isFinite(prevClose) || !prevClose) prevClose = pts[0].price;
-      if (!isFinite(pct)) pct = ((price - prevClose) / prevClose) * 100;
+    // 外盘期货 / 美元指数：腾讯没有分时，走东财 trends2（与主浮窗一致）
+    const emSecid = EM_SECID[code] || HF_EM_SECID[code];
+    if (emSecid) {
+      const url = 'https://push2.eastmoney.com/api/qt/stock/trends2/get?secid=' + emSecid +
+        '&fields1=f1,f2,f3,f4,f5,f6,f7,f8&fields2=f51,f52,f53,f54,f55&iscr=0&ndays=1';
+      const j = await fetchJson(url);
+      const trends = (j && j.data && j.data.trends) || [];
+      const pts = trends.map(function (t) { return { t: String(t).split(',')[0], price: num(String(t).split(',')[1]) }; })
+        .filter(function (x) { return isFinite(x.price); });
+      if (pts.length > 1) {
+        days = [{ date: String((j.data && j.data.date) || ''), prec: NaN, points: pts }];
+        const lastPt = pts[pts.length - 1];
+        price = lastPt.price;
+        // trends2 里没有昨收列，prevClose/pct/change 交给下方 snap 快照填充
+      }
+    } else {
+      const j = await fetchTencentJson('/appstock/app/minute/query?code=' + encodeURIComponent(code));
+      const block = j && j.data && j.data[code];
+      const lines = (block && block.data && block.data.data) || [];
+      const qt = (block && block.qt && block.qt[code]) || [];
+      const pts = parseMinuteLines(lines);
+      if (pts.length > 1) {
+        days = [{ date: String((block.data && block.data.date) || ''), prec: num(qt[4]), points: pts }];
+        const lastPt = pts[pts.length - 1];
+        price = lastPt.price;
+        prevClose = num(qt[4]);
+        pct = num(qt[32]);
+        change = num(qt[31]);
+        if (qt[1]) name = qt[1];
+        if (!isFinite(prevClose) || !prevClose) prevClose = pts[0].price;
+        if (!isFinite(pct)) pct = ((price - prevClose) / prevClose) * 100;
+      }
     }
   }
 
@@ -1692,7 +1761,8 @@ function focusSetTab(tab) {
 function toggleFocus() { setFocus(!focusOn); }
 
 function registerFocusHotkey() {
-  const acc = config.focusHotkey || 'CommandOrControl+Alt+F';
+  // 优先用新 shortcuts.focus，兼容旧 focusHotkey 字段
+  const acc = (config.shortcuts && config.shortcuts.focus) || config.focusHotkey || 'Ctrl+Alt+F';
   try { if (focusHotkeyAcc) globalShortcut.unregister(focusHotkeyAcc); } catch (e) {}
   let ok = false;
   try { ok = globalShortcut.register(acc, function () { logLine('[hotkey]', '触发 ' + acc); toggleFocus(); }); } catch (e) {}
@@ -1979,7 +2049,8 @@ ipcMain.handle('get-state', function () {
     interval: config.interval,
     symbols: config.symbols,
     locked: !!config.locked,
-    alwaysOnTop: !!config.alwaysOnTop
+    alwaysOnTop: !!config.alwaysOnTop,
+    shortcuts: normalizeShortcuts(config.shortcuts)
   };
 });
 
@@ -2362,6 +2433,7 @@ ipcMain.handle('settings-get', async function () {
     alert: Object.assign({}, config.alert),
     autoExit: Object.assign({}, config.autoExit),
     autoStart: Object.assign({}, config.autoStart),
+    shortcuts: normalizeShortcuts(config.shortcuts),
     taskInstalled: installed
   };
 });
@@ -2446,6 +2518,14 @@ ipcMain.handle('settings-save', async function (e, patch) {
     time: (patch.autoStart && /^\d{2}:\d{2}$/.test(patch.autoStart.time)) ? patch.autoStart.time : config.autoStart.time
   };
 
+  const shortcuts = normalizeShortcuts(patch.shortcuts);
+  // 聚焦图表快捷键变了，重新注册全局快捷键（可能在保存时注册失败，日志可见）
+  if (shortcuts.focus !== (config.shortcuts || {}).focus) {
+    config.shortcuts = config.shortcuts || {};
+    config.shortcuts.focus = shortcuts.focus;
+    registerFocusHotkey();
+  }
+
   setAndBroadcast({
     symbols: symbols,
     watchlist: watchlist,
@@ -2462,7 +2542,8 @@ ipcMain.handle('settings-save', async function (e, patch) {
     width: width,
     alert: alertCfg,
     autoExit: autoExitCfg,
-    autoStart: autoStartCfg
+    autoStart: autoStartCfg,
+    shortcuts: shortcuts
   }, true);
 
   // 轮询间隔改了，重启定时器让新值立即生效

@@ -252,6 +252,94 @@
     }
   }
 
+  /* ---- 快捷键录入 ---- */
+  var SC_KEYS = ['periodMinute', 'periodDay', 'periodMonth', 'periodYear', 'refresh', 'focus'];
+  var SC_DEFAULTS = {
+    periodMinute: 'Ctrl+1', periodDay: 'Ctrl+2', periodMonth: 'Ctrl+3', periodYear: 'Ctrl+4',
+    refresh: 'Ctrl+R', focus: 'Ctrl+Alt+F'
+  };
+  var SC_KEY_NAMES = { ' ': 'Space', 'ArrowUp': 'ArrowUp', 'ArrowDown': 'ArrowDown', 'ArrowLeft': 'ArrowLeft', 'ArrowRight': 'ArrowRight' };
+
+  function scKeyName(k) {
+    if (SC_KEY_NAMES[k]) return SC_KEY_NAMES[k];
+    if (/^[a-zA-Z0-9]$/.test(k)) return k.toUpperCase();
+    if (/^F\d{1,2}$/i.test(k)) return k.toUpperCase();
+    if (k === 'Enter') return 'Enter';
+    if (k === 'Escape') return 'Escape';
+    if (k === 'Tab') return 'Tab';
+    if (k === 'Home') return 'Home';
+    if (k === 'End') return 'End';
+    if (k === 'PageUp') return 'PageUp';
+    if (k === 'PageDown') return 'PageDown';
+    if (k === 'Backspace') return 'Backspace';
+    if (k === 'Delete') return 'Delete';
+    return null;
+  }
+
+  function scFromEvent(e) {
+    var key = scKeyName(e.key);
+    if (!key) return null;
+    // 纯修饰键（Ctrl/Alt/Shift/Meta 单独按下）不构成快捷键
+    if (e.key === 'Control' || e.key === 'Alt' || e.key === 'Shift' || e.key === 'Meta') return null;
+    var parts = [];
+    if (e.ctrlKey || e.metaKey) parts.push('Ctrl');
+    if (e.altKey) parts.push('Alt');
+    if (e.shiftKey) parts.push('Shift');
+    if (!parts.length) return null;  // 必须带修饰符，避免裸按键误触发
+    parts.push(key);
+    return parts.join('+');
+  }
+
+  function bindShortcutInput(id) {
+    var el = $(id);
+    var key = id.replace('sc-', '');
+    el.addEventListener('focus', function () {
+      el.dataset.editing = '1';
+      el.value = '按组合键…';
+      el.classList.add('editing');
+    });
+    el.addEventListener('blur', function () {
+      delete el.dataset.editing;
+      el.classList.remove('editing');
+      el.value = state.shortcuts[key] || SC_DEFAULTS[key];
+    });
+    el.addEventListener('keydown', function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.key === 'Escape') {
+        el.value = SC_DEFAULTS[key];
+        state.shortcuts[key] = SC_DEFAULTS[key];
+        el.blur();
+        return;
+      }
+      var acc = scFromEvent(e);
+      if (!acc) return;
+      // 冲突检查：同一个组合键不能给两个动作用
+      var clash = null;
+      for (var i = 0; i < SC_KEYS.length; i++) {
+        if (SC_KEYS[i] !== key && state.shortcuts[SC_KEYS[i]] === acc) { clash = SC_KEYS[i]; break; }
+      }
+      if (clash) {
+        el.value = '与「' + $('sc-' + clash).value + '」重复';
+        el.classList.add('clash');
+        setTimeout(function () { el.classList.remove('clash'); }, 1200);
+        return;
+      }
+      el.value = acc;
+      state.shortcuts[key] = acc;
+      el.blur();
+    });
+  }
+
+  function initShortcuts(d) {
+    state.shortcuts = {};
+    SC_KEYS.forEach(function (k) {
+      state.shortcuts[k] = (d.shortcuts && d.shortcuts[k]) || SC_DEFAULTS[k];
+      $('sc-' + k).value = state.shortcuts[k];
+      bindShortcutInput('sc-' + k);
+    });
+  }
+
   function save() {
     var periodEl = document.querySelector('input[name="period"]:checked');
 
@@ -270,6 +358,7 @@
       alwaysOnTop: $('alwaysOnTop').checked,
       locked: $('locked').checked,
       width: parseInt($('width').value, 10),
+      shortcuts: state.shortcuts,
       alert: {
         enabled: $('alertOn').checked,
         time: $('alertTime').value || '14:30'
@@ -354,6 +443,7 @@
     taskInstalled = !!d.taskInstalled;
     refreshTaskHint();
 
+    initShortcuts(d);
     renderList();
 
     // 打开时把焦点放到输入框，方便直接敲代码；列表回滚到顶部
@@ -441,6 +531,9 @@
   $('autoExitTime').addEventListener('change', function () { refreshExitHint(); });
 
   document.addEventListener('keydown', function (e) {
+    // 正在录入快捷键时不触发全局快捷键
+    var editing = document.querySelector('.sc.editing');
+    if (editing) return;
     if (e.key === 'Escape') window.ticker.closeSettings();
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { e.preventDefault(); save(); }
   });
