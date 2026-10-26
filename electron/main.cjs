@@ -2523,9 +2523,103 @@ ipcMain.on('settings-close', function () {
 });
 
 // 右键菜单只有两项：其余操作（周期、刷新、高度、聚焦）都有快捷键或在设置面板里
+/* ---------------- 自动更新（仅安装版） ---------------- */
+
+// 便携版的 exe 只是个自解压包：每次双击解压到随机的临时目录，运行的其实是那份副本。
+// electron-updater 要原地替换安装目录里的文件，便携版没有稳定目录，官方不支持。
+const IS_PORTABLE = !!process.env.PORTABLE_EXECUTABLE_FILE;
+const UPDATER_ON = app.isPackaged && !IS_PORTABLE;
+
+let autoUpdater = null;
+// status: idle / checking / current / available / downloading / ready / error
+const updateState = { status: 'idle', available: '', progress: 0, message: '' };
+
+function pushUpdate(patch) {
+  Object.assign(updateState, patch);
+  logLine('[update]', JSON.stringify(updateState));
+  if (win && !win.isDestroyed()) win.webContents.send('update-state', Object.assign({}, updateState));
+}
+
+function initUpdater() {
+  if (!UPDATER_ON) {
+    logLine('[update]', IS_PORTABLE ? '便携版，跳过自动更新' : '开发模式，跳过自动更新');
+    return;
+  }
+  try {
+    autoUpdater = require('electron-updater').autoUpdater;
+  } catch (e) {
+    logLine('[update]', 'electron-updater 加载失败：' + e.message);
+    return;
+  }
+
+  autoUpdater.autoDownload = true;
+  // 下好就等下次正常退出时静默装上，不打断盯盘，也不会突然重启窗口
+  autoUpdater.autoInstallOnAppQuit = true;
+
+  autoUpdater.on('checking-for-update', function () {
+    pushUpdate({ status: 'checking', message: '' });
+  });
+  autoUpdater.on('update-available', function (info) {
+    pushUpdate({
+      status: 'available',
+      available: info.version,
+      message: '发现 v' + info.version + '，正在后台下载'
+    });
+  });
+  autoUpdater.on('update-not-available', function () {
+    pushUpdate({ status: 'current', message: '' });
+  });
+  autoUpdater.on('download-progress', function (p) {
+    pushUpdate({ status: 'downloading', progress: Math.round(p.percent || 0) });
+  });
+  autoUpdater.on('update-downloaded', function (info) {
+    pushUpdate({
+      status: 'ready',
+      available: info.version,
+      message: 'v' + info.version + ' 已下载，下次启动生效'
+    });
+    try {
+      new Notification({
+        title: 'Mini Ticker 有新版本',
+        body: 'v' + info.version + ' 已下载完成，关闭浮窗后自动安装'
+      }).show();
+    } catch (e) {}
+  });
+  autoUpdater.on('error', function (e) {
+    // 连不上 GitHub 是常态（代理抖动），不弹通知打扰，只落日志
+    pushUpdate({ status: 'error', message: String((e && e.message) || e) });
+  });
+
+  // 晚一点再查：先把窗口和第一屏行情拉出来，别和启动抢带宽
+  setTimeout(function () {
+    checkForUpdates(false);
+  }, 25000);
+}
+
+function checkForUpdates(manual) {
+  if (!autoUpdater) {
+    if (manual) {
+      try {
+        new Notification({
+          title: '当前版本不支持自动更新',
+          body: IS_PORTABLE
+            ? '便携版没有固定安装目录，请到 GitHub Releases 下载新版'
+            : '开发模式下不检查更新'
+        }).show();
+      } catch (e) {}
+    }
+    return;
+  }
+  pushUpdate({ status: 'checking', message: manual ? '正在检查…' : '' });
+  autoUpdater.checkForUpdates().catch(function (e) {
+    pushUpdate({ status: 'error', message: String((e && e.message) || e) });
+  });
+}
+
 function buildMainMenu() {
   return Menu.buildFromTemplate([
     { label: '设置…', accelerator: 'CmdOrCtrl+,', click: function () { openSettings(); } },
+    { label: '检查更新…', click: function () { checkForUpdates(true); } },
     { type: 'separator' },
     { label: '退出', click: function () { app.quit(); } }
   ]);
@@ -2617,6 +2711,7 @@ if (!gotTheLock) {
     startScheduledTradingCheck();
     cleanLoginItem();
     refreshTaskInstalledCache();
+    initUpdater();
     app.on('activate', function () {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();
     });
