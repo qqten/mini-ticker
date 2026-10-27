@@ -175,6 +175,8 @@ const DEFAULT_CONFIG = {
   baseline: true,
   // 列表排序：off 按自选顺序 / pct-desc 涨幅从高到低 / pct-asc 从低到高
   sortMode: 'off',
+  // 上次更新成功的源（gitee / ghfast / github），下次优先用它
+  updateFeed: '',
   alwaysOnTop: true,
   locked: false,
   width: 320,
@@ -2774,6 +2776,23 @@ let autoUpdater = null;
 // status: idle / checking / current / available / downloading / ready / error
 const updateState = { status: 'idle', available: '', progress: 0, message: '' };
 
+// 更新源，按顺序轮着试。国内直连 GitHub 下载实测只有 18KB/s，76MB 的包要一个多小时，
+// 等于永远更新不上。所以默认走 Gitee（实测 2MB/s，35 秒下完），
+// 它挂了退到公益加速站，最后才轮到 GitHub —— 留一手总比全挂强。
+// Gitee 没有 GitHub 那种 releases/latest/download 固定别名，路径必须带 tag，
+// 所以它的 latest.yml 当普通文件放在仓库 update/ 下，yml 里的下载地址写绝对路径。
+let UPDATE_FEEDS = [
+  { key: 'gitee', url: 'https://gitee.com/qqten/mini-ticker/raw/main/update' },
+  { key: 'ghfast', url: 'https://ghfast.top/https://github.com/qqten/mini-ticker/releases/latest/download' },
+  { key: 'github', url: 'https://github.com/qqten/mini-ticker/releases/latest/download' }
+];
+let feedOrder = UPDATE_FEEDS.slice();
+let feedIndex = 0;
+let feedRetryTimer = null;
+// 用于识别「同一次失败重复上报」的陈旧 error 事件
+let lastErrMsg = '';
+let lastErrAt = 0;
+
 function pushUpdate(patch) {
   Object.assign(updateState, patch);
   logLine('[update]', [updateState.status, updateState.available,
@@ -2789,6 +2808,52 @@ function pushUpdate(patch) {
 function shortErr(e) {
   var m = String((e && e.message) || e).split('\n')[0].trim();
   return m.length > 180 ? m.slice(0, 180) + '…' : m;
+}
+
+// 上次成功的源排最前：网络环境不会每次都变，没必要每轮都从失败的那个开始试
+function buildFeedOrder() {
+  var last = config.updateFeed;
+  var first = UPDATE_FEEDS.filter(function (f) { return f.key === last; })[0];
+  feedOrder = first
+    ? [first].concat(UPDATE_FEEDS.filter(function (f) { return f.key !== last; }))
+    : UPDATE_FEEDS.slice();
+  feedIndex = 0;
+}
+
+function applyFeed() {
+  var f = feedOrder[feedIndex];
+  if (!f) return null;
+  autoUpdater.setFeedURL({ provider: 'generic', url: f.url });
+  logLine('[update]', '源 ' + (feedIndex + 1) + '/' + feedOrder.length + '：' + f.key + ' → ' + f.url);
+  return f;
+}
+
+// 换下一个源。全都试完返回 false，让调用方收手，别死循环
+function rotateFeed() {
+  if (feedIndex >= feedOrder.length - 1) return false;
+  feedIndex += 1;
+  applyFeed();
+  return true;
+}
+
+function rememberFeed() {
+  var f = feedOrder[feedIndex];
+  if (f && config.updateFeed !== f.key) {
+    config.updateFeed = f.key;
+    saveConfig();
+  }
+}
+
+// 同一次失败会从两个地方上报（'error' 事件 + checkForUpdates 的 promise 拒绝），
+// 不去重就会拿旧错误覆盖刚换源后的新状态。返回 true 表示这是一条新错误。
+function reportUpdateError(e) {
+  var msg = shortErr(e);
+  var now = Date.now();
+  if (msg === lastErrMsg && now - lastErrAt < 2000) return false;
+  lastErrMsg = msg;
+  lastErrAt = now;
+  pushUpdate({ status: 'error', message: msg });
+  return true;
 }
 
 // 本次运行已经问过的版本号：同一个版本只弹一次，选「稍后」就别再烦他
@@ -2855,19 +2920,30 @@ function initUpdater() {
   autoUpdater.autoDownload = true;
   // 下好就等下次正常退出时静默装上，不打断盯盘，也不会突然重启窗口。
   // 本地 feed 测试时不自动装，免得测一次就把本机重装一遍。
-  autoUpdater.autoInstallOnAppQuit = !TEST_MODE && !process.env.TICKER_UPDATE_FEED;
+  autoUpdater.autoInstallOnAppQuit =
+    !TEST_MODE && !process.env.TICKER_UPDATE_FEED && !process.env.TICKER_UPDATE_FEEDS;
   // 开发模式（未打包）默认跳过更新检查，测试时强制打开
   if (TEST_MODE) autoUpdater.forceDevUpdateConfig = true;
   // 调试时可以指到本地静态目录，省得为了试一次就发版
-  if (process.env.TICKER_UPDATE_FEED) {
-    autoUpdater.setFeedURL({ provider: 'generic', url: process.env.TICKER_UPDATE_FEED });
-    logLine('[update]', '测试 feed: ' + process.env.TICKER_UPDATE_FEED);
+  const TEST_FEED = process.env.TICKER_UPDATE_FEED;
+  if (TEST_FEED) {
+    autoUpdater.setFeedURL({ provider: 'generic', url: TEST_FEED });
+    logLine('[update]', '测试 feed: ' + TEST_FEED);
+  }
+  // 调试：TICKER_UPDATE_FEEDS="url1,url2" 覆盖源列表，用来验证轮换
+  const TEST_FEEDS = process.env.TICKER_UPDATE_FEEDS;
+  if (TEST_FEEDS) {
+    UPDATE_FEEDS = TEST_FEEDS.split(',')
+      .map(function (u, i) { return { key: 'test' + (i + 1), url: u.trim() }; })
+      .filter(function (f) { return f.url; });
+    logLine('[update]', '测试源列表：' + UPDATE_FEEDS.map(function (f) { return f.url; }).join(' | '));
   }
 
   autoUpdater.on('checking-for-update', function () {
     pushUpdate({ status: 'checking', message: '' });
   });
   autoUpdater.on('update-available', function (info) {
+    rememberFeed();
     pushUpdate({
       status: 'available',
       available: info.version,
@@ -2875,6 +2951,7 @@ function initUpdater() {
     });
   });
   autoUpdater.on('update-not-available', function () {
+    rememberFeed();
     pushUpdate({ status: 'current', message: '' });
   });
   autoUpdater.on('download-progress', function (p) {
@@ -2891,8 +2968,23 @@ function initUpdater() {
     askRestart(info.version);
   });
   autoUpdater.on('error', function (e) {
-    // 连不上 GitHub 是常态（代理抖动），不弹通知打扰，只落日志
-    pushUpdate({ status: 'error', message: shortErr(e) });
+    var cur = feedOrder[feedIndex];
+    var fresh = reportUpdateError(e);
+    logLine('[update]', '源 ' + (cur ? cur.key : '?') + (fresh ? ' 失败：' : ' 重复报错，忽略：') + shortErr(e));
+    if (!fresh) return;
+    // 国内连 GitHub 连不上是常态，所以失败不等于结束：换下一个源接着试
+    if (TEST_FEED) return;
+    // 只排一个重试，免得同一时间打好几个请求
+    if (feedRetryTimer) return;
+    if (!rotateFeed()) {
+      logLine('[update]', '所有更新源都试过了，本轮放弃');
+      return;
+    }
+    feedRetryTimer = setTimeout(function () {
+      feedRetryTimer = null;
+      pushUpdate({ status: 'checking', message: '换个源再试…' });
+      autoUpdater.checkForUpdates().catch(function () {});
+    }, 1200);
   });
 
   // 晚一点再查：先把窗口和第一屏行情拉出来，别和启动抢带宽
@@ -2921,9 +3013,15 @@ function checkForUpdates(manual) {
     askRestart(updateState.available);
     return;
   }
+  // 新的一轮：从上次成功的源重新排起，别接着上一轮的失败位置往下走
+  if (!process.env.TICKER_UPDATE_FEED) {
+    buildFeedOrder();
+    applyFeed();
+  }
   pushUpdate({ status: 'checking', message: manual ? '正在检查…' : '' });
   autoUpdater.checkForUpdates().catch(function (e) {
-    pushUpdate({ status: 'error', message: shortErr(e) });
+    // 只上报状态，换源的事交给 'error' 事件处理，避免两边都动手
+    reportUpdateError(e);
   });
 }
 

@@ -1,0 +1,8 @@
+version: 1.0.6
+files:
+  - url: https://gitee.com/qqten/mini-ticker/releases/download/v1.0.6/MiniTicker-Setup-1.0.6.exe
+    sha512: gbb0H2KSp6+66DqbSvMnIFcrkpD9BQd8WomorEFs8fubL0vZS/wiBcdlnw+zr3HRfHn7Fa72EGoTkr4E7JvSPg==
+    size: 76371649
+path: MiniTicker-Setup-1.0.6.exe
+sha512: gbb0H2KSp6+66DqbSvMnIFcrkpD9BQd8WomorEFs8fubL0vZS/wiBcdlnw+zr3HRfHn7Fa72EGoTkr4E7JvSPg==
+releaseDate: '2026-10-27T08:32:36.435Z'

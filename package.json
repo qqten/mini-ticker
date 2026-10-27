@@ -66,9 +66,8 @@
     },
     "publish": [
       {
-        "provider": "github",
-        "owner": "qqten",
-        "repo": "mini-ticker"
+        "provider": "generic",
+        "url": "https://gitee.com/qqten/mini-ticker/raw/main/update"
       }
     ],
     "afterPack": "scripts/afterPack.cjs"

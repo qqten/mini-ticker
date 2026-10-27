@@ -2,7 +2,7 @@
 
 背景全透明的桌面行情浮窗。没有边框、没有面板、没有按钮堆叠，只有红绿折线和几个数字，贴在桌面任意角落，不挡视线。
 
-**[⬇ 下载最新版](https://github.com/qqten/mini-ticker/releases/latest)** —— 一个安装包，装完就能自动更新，不用再手动下新版。
+**[⬇ 下载最新版](https://gitee.com/qqten/mini-ticker/releases/latest)**（国内直连，推荐）｜ [GitHub Releases](https://github.com/qqten/mini-ticker/releases/latest) —— 一个安装包，装完就能自动更新，不用再手动下新版。
 
 ![浮窗叠在深色背景上的效果](preview/dark-wallpaper.png)
 
@@ -34,7 +34,12 @@
 | --- | --- |
 | `MiniTicker-Setup-x.y.z.exe` | 装到用户目录（不需要管理员权限），带开始菜单快捷方式和自动更新 |
 
-在 [Releases](https://github.com/qqten/mini-ticker/releases/latest) 里。配置和日志写在 `%APPDATA%\mini-ticker\`，装新版会沿用，卸载就是删掉程序目录和这个目录。
+两个下载入口，包是同一个（校验一致，随便点哪个）：
+
+- **[Gitee Releases](https://gitee.com/qqten/mini-ticker/releases/latest)** —— 国内直连，实测 2MB/s，不用任何工具
+- **[GitHub Releases](https://github.com/qqten/mini-ticker/releases/latest)** —— 海外用户，或者前面那个打不开时的备选
+
+配置和日志写在 `%APPDATA%\mini-ticker\`，装新版会沿用，卸载就是删掉程序目录和这个目录。
 
 > 早先发过便携版（`MiniTicker-x.y.z-portable.exe`），但便携版每次自解压到临时目录，没有固定安装目录，**没法自动更新**，还得手动下新版覆盖，所以从 v1.0.5 起不再提供。
 
@@ -51,7 +56,7 @@
 - 下好之后按钮变成「重启更新」，点了立刻重启装上
 - 检查失败会显示原因，可以重试
 
-连不上 GitHub（国内常见）就一直停在「检查失败」，这时去 Releases 手动下新版覆盖安装即可，`%APPDATA%` 里的自选和设置不会丢。
+连不上就自动换源，不用你管：**Gitee → 公益加速站 → GitHub** 按顺序试，上次成功的源会记住，下次直接从它开始。三个都不通才会停在「检查失败」，这时去 Releases 手动下新版覆盖安装即可，`%APPDATA%` 里的自选和设置不会丢。
 
 ### 从源码跑
 
