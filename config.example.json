@@ -23,6 +23,7 @@
   ],
   "period": "minute",
   "interval": 3000,
+  "probeIntervalMs": 4000,
   "alert": {
     "enabled": true,
     "time": "14:45"
@@ -37,13 +38,22 @@
   },
   "textMode": "auto",
   "backdrop": false,
+  "backdropOpacity": 40,
+  "sparkWidth": 120,
   "showName": true,
   "baseline": true,
   "alwaysOnTop": true,
   "locked": false,
-  "focusHotkey": "CommandOrControl+Alt+F",
-  "focusChartWidth": 620,
   "width": 320,
   "height": 0,
-  "pos": null
+  "pos": null,
+  "shortcuts": {
+    "periodMinute": "Ctrl+1",
+    "periodDay": "Ctrl+2",
+    "periodMonth": "Ctrl+3",
+    "periodYear": "Ctrl+4",
+    "refresh": "Ctrl+R",
+    "focus": "Ctrl+Alt+F"
+  },
+  "focusChartWidth": 620
 }
