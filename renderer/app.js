@@ -173,9 +173,13 @@
   }
 
   var ROW_H = 32;   // 每行基准高度，窗口拉高时行会被均分拉伸，所以只能按基准值算
+  // 「高度跟随内容」最多撑到这么多行，再多的标的靠滚动看。
+  // 不封顶的话自选一加到十几个，窗口就长到半个屏幕高，反而更挡视线。
+  var MAX_ROWS = 12;
 
   function naturalHeight() {
-    return Math.ceil(app.children.length * ROW_H + 12 + (head ? head.offsetHeight : 0));
+    var rows = Math.min(app.children.length, MAX_ROWS);
+    return Math.ceil(rows * ROW_H + 12 + (head ? head.offsetHeight : 0));
   }
 
   function syncHeight() {

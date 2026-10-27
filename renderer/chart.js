@@ -19,6 +19,8 @@
   var elPos = document.getElementById('f-pos');
   var tabsEl = document.getElementById('f-tabs');
   var appEl = document.getElementById('app');
+  // 上一次点亮的是哪一行：用来判断「换标的了」，只在这时把行滚进视野
+  var lastActive = '';
 
   /* ---------------- 小工具 ---------------- */
 
@@ -530,9 +532,19 @@
   function paintActiveRow(code) {
     if (!appEl) return;
     var rows = appEl.children;
+    var hit = null;
     for (var i = 0; i < rows.length; i++) {
-      rows[i].classList.toggle('active', rows[i].dataset.code === code);
+      var on = rows[i].dataset.code === code;
+      rows[i].classList.toggle('active', on);
+      if (on) hit = rows[i];
     }
+    // 列表能滚动以后：键盘 ↑↓ 切到窗口外那行时，得把它带进视野。
+    // 只在「换了标的」时滚，否则每轮刷新都会抢滚动条
+    if (hit && code !== lastActive) {
+      lastActive = code;
+      if (hit.scrollIntoView) hit.scrollIntoView({ block: 'nearest' });
+    }
+    if (!hit) lastActive = '';
   }
 
   function render() {

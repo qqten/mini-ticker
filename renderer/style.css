@@ -167,12 +167,32 @@ body.pinned #pin-btn { opacity: 1; fill: var(--up); }
   /* 占满 head 之外的全部高度，行按数量均分，窗口拉高时折线也跟着长高 */
   flex: 1 1 auto;
   min-height: 0;
+  /* 行数超过窗口高度就上下滚（够长时不会出现滚动条） */
+  overflow-y: auto;
+  overflow-x: hidden;
+  /* 滚到头别把整个窗口一起带着滚 */
+  overscroll-behavior: contain;
 }
+
+/* ---- 滚动条：透明浮窗里系统那条太扎眼，收成 4px、无轨道 ---- */
+#app::-webkit-scrollbar { width: 4px; }
+#app::-webkit-scrollbar-track { background: transparent; }
+#app::-webkit-scrollbar-thumb {
+  background: rgba(140, 152, 170, .3);
+  border-radius: 2px;
+}
+#app:hover::-webkit-scrollbar-thumb { background: rgba(140, 152, 170, .55); }
+
+/* 浅色桌面上字变深，滚动条也跟着变深 */
+body[data-text="dark"] #app::-webkit-scrollbar-thumb { background: rgba(24, 32, 44, .28); }
+body[data-text="dark"] #app:hover::-webkit-scrollbar-thumb { background: rgba(24, 32, 44, .5); }
 
 .row {
   display: flex;
   align-items: center;
-  flex: 1 1 0;
+  /* grow 1 / shrink 0：有空间就均分拉伸（窗口拉高，折线跟着长高），
+     没空间也不许压到 32px 以下 —— 压不下的部分交给 #app 滚动 */
+  flex: 1 0 0;
   min-height: 32px;
   gap: 6px;
   transition: opacity .2s ease;

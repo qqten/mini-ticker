@@ -1184,6 +1184,26 @@ function createWindow() {
     win.webContents.once('did-finish-load', function () {
       const which = process.env.TICKER_SHOT;
 
+      // 调试：TICKER_SHOT_BG=#14161b 给截图垫一层底色。
+      // 窗口本身是透明的，直接截图是透明底 + 跟随背景的浅色字，
+      // 贴到白底页面上字就看不见了。
+      if (process.env.TICKER_SHOT_BG) {
+        win.webContents.insertCSS(
+          'html,body{background:' + process.env.TICKER_SHOT_BG + '!important;}'
+        ).catch(function () {});
+      }
+      // 调试：TICKER_SHOT_TEXT=dark 强制深色字（配合浅色 BG 假装窗口在亮背景上），
+      // 自动配色采样的是真实屏幕，截图环境里没法真的把窗口挪到白底上
+      if (process.env.TICKER_SHOT_TEXT) {
+        const m = process.env.TICKER_SHOT_TEXT === 'dark' ? 'dark' : 'light';
+        setTimeout(function () {
+          if (!win || win.isDestroyed()) return;
+          win.webContents.executeJavaScript(
+            "document.body.setAttribute('data-text','" + m + "');'ok'"
+          ).catch(function () {});
+        }, 3600);
+      }
+
       if (which === 'alert') {
         setTimeout(function () {
           fireAlert(false).then(function () {
@@ -1280,6 +1300,56 @@ function createWindow() {
         }
       }
 
+      // 调试：TICKER_SHOT_CROSS=0.55 在聚焦图表里模拟悬停，截十字光标 + 数值提示
+      // 0~1 是横向位置比例，纵向固定落在价格区（成交量/MACD 区不弹提示）
+      if (process.env.TICKER_SHOT_CROSS) {
+        setTimeout(async function () {
+          if (!win || win.isDestroyed()) return;
+          let box = null;
+          try {
+            box = await win.webContents.executeJavaScript(
+              "(function(){var c=document.getElementById('chart');if(!c)return null;" +
+              "var b=c.getBoundingClientRect();" +
+              "return {x:b.x,y:b.y,w:b.width,h:b.height};})()"
+            );
+          } catch (e) { logLine('[shot]', '取图表位置失败 ' + e.message); return; }
+          if (!box || !box.w) { logLine('[shot]', '没有图表区，跳过悬停'); return; }
+          const fx = Math.min(0.9, Math.max(0.1, Number(process.env.TICKER_SHOT_CROSS) || 0.55));
+          const x = Math.round(box.x + box.w * fx);
+          const y = Math.round(box.y + box.h * 0.3);
+          win.webContents.sendInputEvent({ type: 'mouseMove', x: x, y: y });
+          logLine('[shot]', '悬停图表 ' + x + ',' + y);
+        }, 5600);
+      }
+
+      // 调试：TICKER_SHOT_SCROLL=3 在列表里滚几下滚轮，截图验证「列表能滚」
+      if (process.env.TICKER_SHOT_SCROLL) {
+        setTimeout(async function () {
+          if (!win || win.isDestroyed()) return;
+          let box = null;
+          try {
+            box = await win.webContents.executeJavaScript(
+              "(function(){var a=document.getElementById('app');if(!a)return null;" +
+              "var b=a.getBoundingClientRect();return {x:b.x,y:b.y,w:b.width,h:b.height};})()"
+            );
+          } catch (e) { logLine('[shot]', '取列表位置失败 ' + e.message); return; }
+          if (!box || !box.h) return;
+          const x = Math.round(box.x + box.w / 2);
+          const y = Math.round(box.y + box.h / 2);
+          const times = Math.max(1, Math.min(30, parseInt(process.env.TICKER_SHOT_SCROLL, 10) || 3));
+          win.webContents.sendInputEvent({ type: 'mouseMove', x: x, y: y });
+          for (let i = 0; i < times; i++) {
+            win.webContents.sendInputEvent({
+              type: 'mouseWheel', x: x, y: y, deltaX: 0, deltaY: -120, canScroll: true
+            });
+          }
+          const top = await win.webContents.executeJavaScript(
+            "document.getElementById('app').scrollTop"
+          );
+          logLine('[shot]', '滚轮 ' + times + ' 次 → scrollTop=' + top);
+        }, 4300);
+      }
+
       // 调试：TICKER_SHOT_MENU=1 打出右键菜单项，验证只剩设置 / 退出
       if (process.env.TICKER_SHOT_MENU) {
         setTimeout(function () {
@@ -1355,6 +1425,7 @@ function createWindow() {
               "var row=document.querySelector('.row');var rb=row?row.getBoundingClientRect():null;" +
               "return JSON.stringify({win:[innerWidth,innerHeight],left:r('left'),app:r('app'),focus:r('focus'),chart:r('chart')," +
               "splitter:r('splitter')," +
+              "scroll:(function(){var a=document.getElementById('app');return a?[a.scrollHeight,a.clientHeight]:null;})()," +
               "row:rb?[Math.round(rb.width),Math.round(rb.height)]:null,lw:getComputedStyle(document.body).getPropertyValue('--left-w')," +
               "active:(function(){var a=document.querySelector('.row.active');return a?a.dataset.code:null;})()," +
               "cls:document.body.className});})()"
