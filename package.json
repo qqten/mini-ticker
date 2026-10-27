@@ -70,7 +70,8 @@
         "owner": "qqten",
         "repo": "mini-ticker"
       }
-    ]
+    ],
+    "afterPack": "scripts/afterPack.cjs"
   },
   "dependencies": {
     "electron-updater": "^6.8.11"
