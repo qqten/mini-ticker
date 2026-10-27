@@ -1,6 +1,6 @@
 {
   "name": "mini-ticker",
-  "version": "1.0.6",
+  "version": "1.0.5",
   "description": "背景透明的极简桌面盯盘浮窗：只有红绿折线和数值",
   "main": "electron/main.cjs",
   "scripts": {
