@@ -3,8 +3,9 @@
 
   var app = document.getElementById('app');
   var head = document.getElementById('head');
-  head.innerHTML = '<span id="period-label"></span><svg id="pin-btn" width="10" height="12" viewBox="0 0 10 12" title="固定窗口（点击穿透，不可拖动）"><path d="M5 0C2.8 0 1 1.8 1 4c0 1.5.8 2.8 2 3.5V11l2-1.5V7.5c1.2-.7 2-2 2-3.5 0-2.2-1.8-4-2-4z"/></svg>';
+  head.innerHTML = '<button id="sort-btn" type="button" title="按涨跌幅排序：点一下 涨幅从高到低，再点从低到高，第三下恢复自选顺序">涨幅</button><span id="period-label"></span><svg id="pin-btn" width="10" height="12" viewBox="0 0 10 12" title="固定窗口（点击穿透，不可拖动）"><path d="M5 0C2.8 0 1 1.8 1 4c0 1.5.8 2.8 2 3.5V11l2-1.5V7.5c1.2-.7 2-2 2-3.5 0-2.2-1.8-4-2-4z"/></svg>';
   var periodLabel = document.getElementById('period-label');
+  var sortBtn = document.getElementById('sort-btn');
   var rowMap = {};
   var PERIOD_LABEL = { minute: '分时', day: '日线', month: '月线', year: '年线' };
   var timer = null;
@@ -14,6 +15,10 @@
   var dragging = false;
   var suppressClick = false;
   var lastList = [];
+  // 列表排序：off 自选顺序 / pct-desc 涨幅从高到低 / pct-asc 从低到高
+  var SORT_ORDER = ['off', 'pct-desc', 'pct-asc'];
+  var SORT_LABEL = { off: '涨幅', 'pct-desc': '涨幅▼', 'pct-asc': '涨幅▲' };
+  var sortMode = 'off';
 
   // 右端那条 short line 是宽度抓手：画在 SVG 里，天然贴着折线右边缘，不参与布局也就不会错位
   var SPARK_SVG =
@@ -259,8 +264,36 @@
     showBaseline = s.baseline !== false;
     if (s.period) currentPeriod = s.period;
     if (s.shortcuts) rebuildShortcuts(s.shortcuts);
+    if (s.sortMode && SORT_ORDER.indexOf(s.sortMode) >= 0 && s.sortMode !== sortMode) {
+      sortMode = s.sortMode;
+      paintSort();
+    }
     updatePeriodLabel();
   }
+
+  /* ---- 涨跌幅排序：右上角一个小按钮，点一下切一档 ---- */
+  function paintSort() {
+    if (!sortBtn) return;
+    sortBtn.textContent = SORT_LABEL[sortMode] || '涨幅';
+    sortBtn.classList.toggle('on', sortMode !== 'off');
+    sortBtn.title = sortMode === 'pct-desc'
+      ? '涨幅从高到低，再点一次改成从低到高'
+      : sortMode === 'pct-asc'
+        ? '涨幅从低到高，再点一次恢复自选顺序'
+        : '按涨跌幅排序：点一下 涨幅从高到低，再点从低到高，第三下恢复自选顺序';
+  }
+
+  if (sortBtn) {
+    sortBtn.addEventListener('click', function (e) {
+      e.stopPropagation();
+      sortMode = SORT_ORDER[(SORT_ORDER.indexOf(sortMode) + 1) % SORT_ORDER.length];
+      paintSort();
+      window.ticker.save({ sortMode: sortMode });
+      // 排序由主进程做，立刻拉一轮，不用等下一次轮询
+      refresh();
+    });
+  }
+  paintSort();
 
   var pinned = false;
   var pinBtn = document.getElementById('pin-btn');
@@ -283,7 +316,7 @@
   document.addEventListener('pointerdown', function (e) {
     if (e.button !== 0) return;
     if (pinned) return; // 固定模式不响应拖动
-    if (e.target === pinBtn) return;
+    if (e.target === pinBtn || e.target === sortBtn) return;
     // 图表区（含周期按钮）要能交互，别被当成拖窗口；拖窗口从左列拖
     if (e.target.closest && e.target.closest('#focus')) return;
     if (e.target === splitter) return;   // 分界线有自己的一套拖动
@@ -385,7 +418,7 @@
     var t = e.target;
     if (suppressClick) { suppressClick = false; return; }
     if (t.closest && (t.closest('#focus') || t.closest('#splitter'))) return;
-    if (t === pinBtn) return;
+    if (t === pinBtn || t === sortBtn) return;
     // 拖着窗口跑（起点和落点差得多）不算点击，别顺手展开 / 换标的
     if (downAt && (Math.abs(e.screenX - downAt.sx) > 3 || Math.abs(e.screenY - downAt.sy) > 3 ||
       Math.abs(e.clientX - downAt.x) > 4 || Math.abs(e.clientY - downAt.y) > 4)) return;
@@ -408,13 +441,13 @@
     applySpark(sparkWant);
   }).observe(leftEl);
 
-  // 固定模式下：平时鼠标穿透到下层应用，鼠标移到右上角图钉按钮区域时临时恢复点击
+  // 固定模式下：平时鼠标穿透到下层应用，鼠标移到右上角这一条（排序按钮 / 图钉）时临时恢复点击
   var pinZoneActive = false;
   document.addEventListener('mousemove', function (e) {
     if (!pinned) return;
-    var rect = pinBtn.getBoundingClientRect();
-    var near = e.clientX >= rect.left - 10 && e.clientX <= rect.right + 10 &&
-               e.clientY >= rect.top - 4 && e.clientY <= rect.bottom + 10;
+    var r = head.getBoundingClientRect();
+    var near = e.clientX >= r.left - 6 && e.clientX <= r.right + 6 &&
+               e.clientY >= r.top - 4 && e.clientY <= r.bottom + 8;
     if (near && !pinZoneActive) {
       pinZoneActive = true;
       window.ticker.setPinZone(true);

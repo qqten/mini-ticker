@@ -173,6 +173,8 @@ const DEFAULT_CONFIG = {
   sparkWidth: 120,
   showName: true,
   baseline: true,
+  // 列表排序：off 按自选顺序 / pct-desc 涨幅从高到低 / pct-asc 从低到高
+  sortMode: 'off',
   alwaysOnTop: true,
   locked: false,
   width: 320,
@@ -1048,6 +1050,29 @@ function buildItem(code, snap, points) {
   return out;
 }
 
+// 屏幕上实际的显示顺序。开了涨跌幅排序后跟 config.symbols 不一样，
+// 聚焦图表的序号和 ↑↓ 切换要照着这个走，否则高亮会乱跳。
+let displayCodes = [];
+
+// 按涨跌幅排：取数失败 / 没有涨跌幅的永远沉到最后，不跟着升序降序翻转
+function sortItems(items) {
+  const mode = config.sortMode;
+  if (mode !== 'pct-asc' && mode !== 'pct-desc') return items;
+  const dir = mode === 'pct-asc' ? 1 : -1;
+  return items
+    .map(function (it, i) {
+      return { it: it, i: i, v: (it && isFinite(it.pct)) ? it.pct : null };
+    })
+    .sort(function (a, b) {
+      if (a.v === null && b.v === null) return a.i - b.i;
+      if (a.v === null) return 1;
+      if (b.v === null) return -1;
+      if (a.v === b.v) return a.i - b.i;
+      return (a.v - b.v) * dir;
+    })
+    .map(function (s) { return s.it; });
+}
+
 async function fetchAll() {
   const all = config.symbols.slice();
   const period = config.period || 'minute';
@@ -1118,10 +1143,13 @@ async function fetchAll() {
     });
   }
 
-  return all.map(function (code) {
+  const items = all.map(function (code) {
     if (isFundCode(code)) return buildFundItem(code, funds[code], fundNav[code]);
     return buildItem(code, snap[code], seriesCache.map[code] || []);
   });
+  const sorted = sortItems(items);
+  displayCodes = sorted.map(function (it) { return it.code; });
+  return sorted;
 }
 
 /* ---------------- 窗口 ---------------- */
@@ -1354,6 +1382,29 @@ function createWindow() {
         }, 4300);
       }
 
+      // 调试：TICKER_SHOT_SORT=1 点几下排序按钮，验证排序真的生效
+      if (process.env.TICKER_SHOT_SORT) {
+        setTimeout(async function () {
+          if (!win || win.isDestroyed()) return;
+          const times = Math.max(1, Math.min(3, parseInt(process.env.TICKER_SHOT_SORT, 10) || 1));
+          const js =
+            "(async function(){" +
+            "var b=document.getElementById('sort-btn');if(!b)return 'no-btn';" +
+            "for(var i=0;i<" + times + ";i++){b.click();await new Promise(function(r){setTimeout(r,350);});}" +
+            "await new Promise(function(r){setTimeout(r,900);});" +
+            "var rows=document.querySelectorAll('#app .row');" +
+            "var out=[];for(var j=0;j<rows.length;j++){" +
+            "out.push(rows[j].dataset.code+' '+rows[j].querySelector('.pct').textContent);}" +
+            "return 'btn='+b.textContent+' on='+b.classList.contains('on')+' | '+out.join(' , ');" +
+            "})()";
+          try {
+            const ret = await win.webContents.executeJavaScript(js);
+            logLine('[shot]', '排序 cnt=' + times + ' → ' + ret);
+            logLine('[shot]', 'config.sortMode=' + config.sortMode);
+          } catch (e) { logLine('[shot]', '排序调试失败 ' + e.message); }
+        }, 1200);
+      }
+
       // 调试：TICKER_SHOT_MENU=1 打出右键菜单项，验证只剩设置 / 退出
       if (process.env.TICKER_SHOT_MENU) {
         setTimeout(function () {
@@ -1432,6 +1483,8 @@ function createWindow() {
               "scroll:(function(){var a=document.getElementById('app');return a?[a.scrollHeight,a.clientHeight]:null;})()," +
               "row:rb?[Math.round(rb.width),Math.round(rb.height)]:null,lw:getComputedStyle(document.body).getPropertyValue('--left-w')," +
               "active:(function(){var a=document.querySelector('.row.active');return a?a.dataset.code:null;})()," +
+              "sort:(function(){var b=document.getElementById('sort-btn');if(!b)return null;" +
+              "return [b.textContent,b.className,Math.round(b.getBoundingClientRect().width),Math.round(b.getBoundingClientRect().height)];})()," +
               "cls:document.body.className});})()"
             );
             logLine('[layout]', String(txt));
@@ -1700,9 +1753,16 @@ async function focusPayload(code, tab) {
 // 而不是背后更长的 watchlist —— 否则高亮行会跟着跑到看不见的地方
 function focusList() {
   const shown = (config.symbols || []).filter(Boolean);
-  if (shown.length) return shown.slice();
-  const wl = (config.watchlist && config.watchlist.length) ? config.watchlist : [];
-  return wl.slice();
+  const base = shown.length
+    ? shown.slice()
+    : ((config.watchlist && config.watchlist.length) ? config.watchlist.slice() : []);
+  // 开了涨跌幅排序时，↑↓ 和「第几个/共几个」要跟着屏幕上的顺序走。
+  // 只在两份清单是同一批标的时才替换，避免刚改完自选、行情还没刷新时错位。
+  if (displayCodes.length === base.length &&
+      displayCodes.every(function (c) { return base.indexOf(c) >= 0; })) {
+    return displayCodes.slice();
+  }
+  return base;
 }
 
 function focusMeta() {
@@ -2131,11 +2191,15 @@ ipcMain.handle('get-state', function () {
     textMode: config.textMode,
     effectiveTextMode: effectiveTextMode(),
     backdrop: !!config.backdrop,
+    backdropOpacity: config.backdropOpacity,
     showName: config.showName !== false,
     baseline: config.baseline !== false,
     period: config.period,
     interval: config.interval,
     symbols: config.symbols,
+    // 这三个以前漏了：冷启动时浮窗拿不到，只能退回默认值
+    sparkWidth: config.sparkWidth,
+    sortMode: config.sortMode,
     locked: !!config.locked,
     alwaysOnTop: !!config.alwaysOnTop,
     shortcuts: normalizeShortcuts(config.shortcuts)

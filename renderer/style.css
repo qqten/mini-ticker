@@ -145,6 +145,33 @@ body[data-text="dark"].backdrop {
   transition: color .38s ease;
 }
 
+/* 涨跌幅排序：跟右上角图钉同一行的小按钮。
+   默认极淡（表示没排序），点开后带一点底色，一眼看出当前是升序还是降序 */
+#sort-btn {
+  margin-right: 7px;
+  padding: 0 4px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  font-family: inherit;
+  font-size: 10px;
+  line-height: 12px;
+  letter-spacing: .2px;
+  color: var(--sub);
+  text-shadow: var(--shadow);
+  opacity: .4;
+  cursor: pointer;
+  transition: opacity .15s ease, color .15s ease, background .15s ease;
+}
+
+#sort-btn:hover { opacity: .9; color: var(--text); }
+
+#sort-btn.on {
+  opacity: 1;
+  color: var(--text);
+  background: rgba(128, 140, 160, .2);
+}
+
 #pin-btn {
   margin-left: 8px;
   cursor: pointer;

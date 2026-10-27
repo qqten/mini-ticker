@@ -42,6 +42,7 @@
   "sparkWidth": 120,
   "showName": true,
   "baseline": true,
+  "sortMode": "off",
   "alwaysOnTop": true,
   "locked": false,
   "width": 320,
