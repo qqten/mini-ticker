@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, Menu, screen, shell, Notification, desktopCapturer, nativeImage, globalShortcut } = require('electron');
+const { app, BrowserWindow, ipcMain, Menu, screen, shell, Notification, dialog, desktopCapturer, nativeImage, globalShortcut } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { execFile } = require('child_process');
@@ -1343,9 +1343,13 @@ function createWindow() {
               type: 'mouseWheel', x: x, y: y, deltaX: 0, deltaY: -120, canScroll: true
             });
           }
-          const top = await win.webContents.executeJavaScript(
-            "document.getElementById('app').scrollTop"
-          );
+          const top = await new Promise(function (resolve) {
+            // 滚轮是平滑动画，立刻读 scrollTop 会读到 0/半截，等动画走完再读
+            setTimeout(function () {
+              win.webContents.executeJavaScript("document.getElementById('app').scrollTop")
+                .then(resolve).catch(function () { resolve(-1); });
+            }, 400);
+          });
           logLine('[shot]', '滚轮 ' + times + ' 次 → scrollTop=' + top);
         }, 4300);
       }
@@ -2723,6 +2727,55 @@ function shortErr(e) {
   return m.length > 180 ? m.slice(0, 180) + '…' : m;
 }
 
+// 本次运行已经问过的版本号：同一个版本只弹一次，选「稍后」就别再烦他
+let restartAsked = '';
+
+// 静默装完 + 自动拉起浮窗。isSilent=true 不弹安装界面，
+// isForceRunAfter=true 让新版装完自己起来，不用用户再去点图标
+function quietInstall() {
+  if (!autoUpdater) return;
+  try {
+    autoUpdater.quitAndInstall(true, true);
+  } catch (e) {
+    logLine('[update]', 'quitAndInstall 失败：' + shortErr(e));
+  }
+}
+
+// 「是否现在就更新」弹窗：点「立即重启」= 静默装完自动拉起
+function askRestart(version) {
+  if (!version || restartAsked === version) return;
+  restartAsked = version;
+  const opts = {
+    type: 'question',
+    buttons: ['立即重启', '稍后'],
+    defaultId: 0,
+    cancelId: 1,
+    noLink: true,
+    title: 'Mini Ticker 有新版本',
+    message: 'v' + version + ' 已下载完成',
+    detail: '现在重启就能用上新版本，大约 2 秒，自选和设置都会保留。\n' +
+      '选「稍后」则等你下次退出浮窗时自动装好，下次打开就是新版。'
+  };
+  let p;
+  try {
+    p = (win && !win.isDestroyed()) ? dialog.showMessageBox(win, opts) : dialog.showMessageBox(opts);
+  } catch (e) {
+    logLine('[update]', '弹窗失败 ' + shortErr(e));
+    return;
+  }
+  p.then(function (r) {
+    if (r.response !== 0) {
+      logLine('[update]', '用户选择稍后更新');
+      return;
+    }
+    logLine('[update]', '用户选择立即重启更新');
+    // 让弹窗先关掉再退出，否则窗口会残留半帧
+    setTimeout(quietInstall, 80);
+  }).catch(function (e) {
+    logLine('[update]', '弹窗失败 ' + shortErr(e));
+  });
+}
+
 function initUpdater() {
   if (!UPDATER_ON) {
     logLine('[update]', IS_PORTABLE ? '便携版，跳过自动更新' : '开发模式，跳过自动更新');
@@ -2767,14 +2820,11 @@ function initUpdater() {
     pushUpdate({
       status: 'ready',
       available: info.version,
-      message: 'v' + info.version + ' 已下载，下次启动生效'
+      message: 'v' + info.version + ' 已下载，等待重启生效'
     });
-    try {
-      new Notification({
-        title: 'Mini Ticker 有新版本',
-        body: 'v' + info.version + ' 已下载完成，关闭浮窗后自动安装'
-      }).show();
-    } catch (e) {}
+    // 下载完就直接问一句要不要现在换：以前只在退出时装，
+    // 等于每次更新都得用户自己关掉浮窗、再点一次图标
+    askRestart(info.version);
   });
   autoUpdater.on('error', function (e) {
     // 连不上 GitHub 是常态（代理抖动），不弹通知打扰，只落日志
@@ -2801,6 +2851,12 @@ function checkForUpdates(manual) {
     }
     return;
   }
+  // 已经下好了：再点「检查更新」就是想现在换上，直接弹窗问，别再查一遍
+  if (manual && updateState.status === 'ready' && updateState.available) {
+    restartAsked = '';
+    askRestart(updateState.available);
+    return;
+  }
   pushUpdate({ status: 'checking', message: manual ? '正在检查…' : '' });
   autoUpdater.checkForUpdates().catch(function (e) {
     pushUpdate({ status: 'error', message: shortErr(e) });
@@ -2825,12 +2881,8 @@ ipcMain.on('open-menu', function () {
 ipcMain.on('check-update', function () { checkForUpdates(true); });
 ipcMain.on('install-update', function () {
   if (!autoUpdater) return;
-  logLine('[update]', '用户点击重启安装');
-  try {
-    autoUpdater.quitAndInstall(false, true);
-  } catch (e) {
-    logLine('[update]', 'quitAndInstall 失败：' + shortErr(e));
-  }
+  logLine('[update]', '设置面板点击重启安装');
+  quietInstall();
 });
 
 ipcMain.on('test-alert', function () { fireAlert(false); });
