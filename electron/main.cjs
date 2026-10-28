@@ -168,6 +168,8 @@ const DEFAULT_CONFIG = {
   // 开盘自动启动：靠 Windows 计划任务，工作日定点拉起
   autoStart: { enabled: false, time: '09:25' },
   textMode: 'auto',
+  // 上一次自动判定出来的配色：冷启动时先按它画，避免「先亮色字、1 秒后才纠正」
+  lastEffectiveTextMode: 'light',
   backdrop: false,
   backdropOpacity: 40,
   sparkWidth: 120,
@@ -222,13 +224,20 @@ let dragBase = null;
 
 function loadConfig() {
   let raw = {};
-  try { raw = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')); } catch (e) {}
+  try {
+    // 去掉可能的 UTF-8 BOM：用记事本之类改过配置就会带上，
+    // 而 JSON.parse 会因此直接失败 → 静默退回默认值，用户的自选/配色全"丢"了
+    const text = fs.readFileSync(CONFIG_PATH, 'utf8').replace(/^\uFEFF/, '');
+    raw = JSON.parse(text);
+  } catch (e) {}
   const cfg = Object.assign({}, DEFAULT_CONFIG, raw);
   if (!Array.isArray(cfg.symbols) || cfg.symbols.length === 0) cfg.symbols = DEFAULT_CONFIG.symbols.slice();
   if (!Array.isArray(cfg.watchlist) || cfg.watchlist.length === 0) cfg.watchlist = DEFAULT_WATCHLIST.slice();
   if (PERIODS.indexOf(cfg.period) < 0) cfg.period = 'minute';
-  // 配色固定跟随背景，不再提供手动切换
-  cfg.textMode = 'auto';
+  // 配色：auto 跟随背景；light / dark 是用户手动指定的退路。
+  // 自动判定在个别机器上会失灵（截屏拿不到画面、纯黑桌面等），必须留手动口子。
+  if (TEXT_MODES.indexOf(cfg.textMode) < 0) cfg.textMode = 'auto';
+  if (cfg.lastEffectiveTextMode !== 'dark') cfg.lastEffectiveTextMode = 'light';
   cfg.alert = Object.assign({}, DEFAULT_CONFIG.alert, raw.alert || {});
   if (!/^\d{2}:\d{2}$/.test(cfg.alert.time)) cfg.alert.time = DEFAULT_CONFIG.alert.time;
   cfg.autoExit = Object.assign({}, DEFAULT_CONFIG.autoExit, raw.autoExit || {});
@@ -1191,8 +1200,18 @@ function createWindow() {
 
   win = new BrowserWindow(opts);
   win.setAlwaysOnTop(!!config.alwaysOnTop);
-  win.loadFile(path.join(RES_DIR, 'renderer', 'index.html'));
-  logLine('[window]', 'BrowserWindow 已创建 pos=' + JSON.stringify(config.pos));
+  // 把配色通过 query 传进去：页面里 boot.js 在首帧之前就按它写好 data-text，
+  // 否则透明窗口会先用 CSS 默认的亮色字画一帧（白底桌面上就是一片空白），
+  // 等 get-state 回来才纠正。
+  win.loadFile(path.join(RES_DIR, 'renderer', 'index.html'), {
+    query: {
+      text: effectiveTextMode(),
+      bd: config.backdrop ? '1' : '0',
+      bop: String(config.backdropOpacity == null ? 40 : config.backdropOpacity)
+    }
+  });
+  logLine('[window]', 'BrowserWindow 已创建 pos=' + JSON.stringify(config.pos) +
+    ' text=' + effectiveTextMode());
 
   win.once('ready-to-show', function () {
     logLine('[window]', 'ready-to-show');
@@ -1529,9 +1548,13 @@ function createWindow() {
     if (!win) return;
     const pos = win.getPosition();
     config.pos = { x: pos[0], y: pos[1] };
-    // 拖到别处后背景可能完全变了，松手就重采一次，不用干等下一个 4 秒周期
+    // 拖到别处后背景可能完全变了，落定重采一次（和 drag-end 共用同一套去抖，
+    // 以前两边各发一次，一次拖动结束会连截两张图）
     if (probeMoveTimer) clearTimeout(probeMoveTimer);
-    probeMoveTimer = setTimeout(function () { probeBackground(true); }, 260);
+    probeMoveTimer = setTimeout(function () {
+      // 不重置 autoSettled：迟滞状态保持连续，按当前配色的衬底阈值重判一次
+      scheduleProbe(0);
+    }, 260);
   });
 
   // 四边都能拖：宽 220-640、高 56-900，min/max 已在窗口选项里限死。
@@ -1941,16 +1964,14 @@ function registerFocusHotkey() {
 
 /* ---------------- 背景明暗自动检测 ---------------- */
 // 直接截屏采样"窗口背后"那块区域 —— 桌面壁纸、浏览器、编辑器、视频画面都算在内，
-// 取亮度中位数决定文字该配亮色还是暗色。窗口自己的文字和折线在采样区里占比很小，
-// 中位数天然会把它们忽略掉，所以不需要隐藏窗口，也就不会闪烁。
+// 用亮度统计量决定文字该配亮色还是暗色。窗口自己的文字和折线在采样区里占比很小，
+// 统计时天然会被忽略，所以不需要隐藏窗口，也就不会闪烁。
 
-const LUMA_TO_DARK = 0.62;   // 背景亮到这个程度 → 换暗色文字
-const LUMA_TO_LIGHT = 0.42;  // 背景暗到这个程度 → 换亮色文字
 const PROBE_INTERVAL_DEFAULT = 4000;  // 默认轮询间隔（4 秒），可在设置里调
 const SCREEN_RETRY_EVERY = 8;  // 截屏失败后隔这么多个周期重试一次（约 30 秒）
 
-let autoTextMode = 'light';
-let autoSettled = false;   // 是否已完成首次判定（首次直接用 0.5 分界，之后才走迟滞）
+let autoTextMode = config.lastEffectiveTextMode === 'dark' ? 'dark' : 'light';
+let autoSettled = false;   // 是否已完成首次判定
 let probeTimer = null;
 let probeBusy = false;
 let probeFails = 0;
@@ -1966,43 +1987,99 @@ function statePayload() {
   return Object.assign({}, config, { effectiveTextMode: effectiveTextMode() });
 }
 
-// toBitmap 的通道顺序随平台而异，取三通道均值判断明暗不受影响
-function medianLuma(img) {
-  if (!img || img.isEmpty()) return null;
-  const buf = img.toBitmap();
-  if (!buf || buf.length < 4) return null;
-  const vals = [];
-  for (let i = 0; i + 3 < buf.length; i += 4) {
-    vals.push((buf[i] + buf[i + 1] + buf[i + 2]) / 765);
-  }
-  if (!vals.length) return null;
-  vals.sort(function (a, b) { return a - b; });
-  return vals[vals.length >> 1];
+// 只跟"配色"有关的那几个字段
+function themePayload() {
+  return {
+    effectiveTextMode: effectiveTextMode(),
+    backdrop: !!config.backdrop,
+    backdropOpacity: config.backdropOpacity
+  };
 }
 
-// 锁屏 / 远程桌面 / 部分显卡驱动下，desktopCapturer 会"成功"返回一张纯黑图，
-// 既不报错也没缩略图缺失。这时亮度恒为 0，文字会永远停在亮色，
-// 用户看到的就是"不再跟着背景切换了"。这里识别出来当作失败处理。
-// 注意：真正的暗背景（深色编辑器、黑壁纸）虽然平均亮度也很低，但有文字/图标/
-// 渐变细节，不是全黑；只有像素几乎全 0 的图才是截屏失败。
-function isBlankShot(img) {
-  if (!img || img.isEmpty()) return true;
-  const buf = img.toBitmap();
-  if (!buf || buf.length < 4) return true;
-  let n = 0, lit = 0;
-  for (let i = 0; i + 3 < buf.length; i += 4) {
-    // 单通道超过 12（约 0.05）就算"有内容"，真正的黑屏失败图全是 0
-    if (buf[i] > 12 || buf[i + 1] > 12 || buf[i + 2] > 12) lit++;
-    n++;
-  }
-  // 少于 1% 的像素有内容，认为是黑屏失败
-  return n === 0 || (lit / n) < 0.01;
+// 单个像素的感知亮度。toBitmap 的通道顺序随平台而异（Windows 是 BGRA，
+// macOS 是 RGBA），但两种排布里通道 1 都是绿色，红蓝互换。
+// 所以绿色按真实权重给足、红蓝各取一半权重，既不吃通道顺序的亏，
+// 又比原来的等权平均准得多：等权平均会把纯绿（0,255,0）算成 0.33 判成"暗"，
+// 结果在亮绿底上强上浅色字，根本看不清。
+function pixelLuma(buf, i) {
+  return (0.1424 * buf[i] + 0.7152 * buf[i + 1] + 0.1424 * buf[i + 2]) / 255;
 }
 
-// 截当前屏幕，裁出窗口所在的矩形
+// 统计量优先用「众数」：采样区里大面积的是同一种背景（单一亮度、形成主峰），
+// 浮窗自己的文字/数字/折线只是小面积分散像素，主峰天然落在背景值上。
+// 但主峰不可信时（渐变壁纸、半个屏幕白半个屏幕黑这类高对比画面，直方图是平的
+// 或者双峰）众数就是个随机数，会来回跳。这时退回中位数：中位数对"少数文字像素"
+// 和"大片渐变"都稳。主峰占比就是这个可信度指标。
+function lumaFromBins(bins, n) {
+  if (!n) return null;
+  const BINS = bins.length;
+  let peak = 0;
+  for (let k = 1; k < BINS; k++) if (bins[k] > bins[peak]) peak = k;
+
+  const lo = Math.max(0, peak - 2);
+  const hi = Math.min(BINS - 1, peak + 2);
+  let inPeak = 0;
+  for (let k = lo; k <= hi; k++) inPeak += bins[k];
+
+  // 主峰只占三成以下：画面没有明确主色，众数不可信，用直方图中位数兜底。
+  // 半黑半白这种双峰画面，中位数落在中间空档 → 落在迟滞带里 → 保持当前配色不乱切。
+  if (inPeak / n < 0.30) {
+    let acc2 = 0;
+    for (let k = 0; k < BINS; k++) {
+      acc2 += bins[k];
+      if (acc2 * 2 >= n) return (k + 0.5) / BINS;
+    }
+    return 0.5;
+  }
+
+  // 主峰 ±2 bin 邻域加权平均，平滑直方图量化误差
+  let acc = 0, cnt = 0;
+  for (let k = lo; k <= hi; k++) {
+    if (!bins[k]) continue;
+    acc += ((k + 0.5) / BINS) * bins[k];
+    cnt += bins[k];
+  }
+  return cnt ? acc / cnt : null;
+}
+
+// 把几张采样图并成一个直方图再统计：采样窗口外面一圈时是好几条边，
+// 分开统计再平均没有意义，合成一张直方图才等价于"整圈一起看"
+const LUMA_BINS = 128;
+function lumaFromImages(images) {
+  const bins = new Array(LUMA_BINS).fill(0);
+  let n = 0;
+  for (let j = 0; j < images.length; j++) {
+    const img = images[j];
+    if (!img || img.isEmpty()) continue;
+    const buf = img.toBitmap();
+    if (!buf || buf.length < 4) continue;
+    const cnt = Math.floor(buf.length / 4);
+    for (let i = 0; i < cnt; i++) {
+      bins[Math.min(LUMA_BINS - 1, Math.floor(pixelLuma(buf, i * 4) * LUMA_BINS))]++;
+      n++;
+    }
+  }
+  return lumaFromBins(bins, n);
+}
+
+// 给 getSources 这类"可以永远不返回"的调用加超时：
+// 锁屏、UAC 提示、远程桌面、显卡驱动异常时它都可能挂住，一旦挂住而没人打断，
+// probeBusy 就永远为 true，配色从此不再更新（而且日志里一个字都不留）。
+function withTimeout(promise, ms, tag) {
+  return Promise.race([
+    promise,
+    new Promise(function (_, reject) {
+      setTimeout(function () { reject(new Error(tag + ' 超时')); }, ms);
+    })
+  ]);
+}
+
+// 截当前屏幕，裁出要统计的那块画面。
 // 抓取时按 1/4 分辨率取样：全尺寸每帧要 400ms 上下，1/4 只要 10ms 左右，
-// 而判断明暗只需要几千个像素的中位数，缩了完全不影响结果。
-async function grabWindowRegion() {
+// 而判断明暗只需要几千个像素，缩了完全不影响结果。
+// 返回若干张小图（窗口里面一张，或窗口外面一圈四张）；返回 null 表示这次截屏失败。
+const PROBE_RING_DIP = 42;   // 采样环的宽度（DIP），够大才稳、又不会圈进太远的其它窗口
+async function grabProbeImages() {
   const bounds = win.getBounds();
   const disp = screen.getDisplayMatching(bounds);
   const sf = disp.scaleFactor || 1;
@@ -2011,18 +2088,19 @@ async function grabWindowRegion() {
   const thumbW = Math.max(320, Math.round(physW / 4));
   const thumbH = Math.max(180, Math.round(physH / 4));
 
-  const sources = await desktopCapturer.getSources({
+  const sources = await withTimeout(desktopCapturer.getSources({
     types: ['screen'],
     thumbnailSize: { width: thumbW, height: thumbH },
     fetchWindowIcons: false
-  });
+  }), 3500, 'getSources');
   if (!sources || !sources.length) return null;
 
   let src = null;
   for (let i = 0; i < sources.length; i++) {
     if (String(sources[i].display_id) === String(disp.id)) { src = sources[i]; break; }
   }
-  if (!src) src = sources[0];
+  // 多屏时如果认不出是哪块屏，宁可这次不采，也别拿另一块屏的亮度冒充
+  if (!src) return null;
   if (!src.thumbnail || src.thumbnail.isEmpty()) return null;
 
   const img = src.thumbnail;
@@ -2035,23 +2113,46 @@ async function grabWindowRegion() {
   const w = Math.round(bounds.width * sf * kx);
   const h = Math.round(bounds.height * sf * ky);
 
-  const cx = Math.max(0, Math.min(sz.width - 1, x));
-  const cy = Math.max(0, Math.min(sz.height - 1, y));
-  const cw = Math.max(1, Math.min(sz.width - cx, w));
-  const ch = Math.max(1, Math.min(sz.height - cy, h));
+  const out = [];
+  function push(rx, ry, rw, rh) {
+    const cx = Math.max(0, Math.min(sz.width - 1, Math.round(rx)));
+    const cy = Math.max(0, Math.min(sz.height - 1, Math.round(ry)));
+    const cw = Math.min(sz.width - cx, Math.round(rw));
+    const ch = Math.min(sz.height - cy, Math.round(rh));
+    if (cw < 4 || ch < 4) return;
+    try { out.push(img.crop({ x: cx, y: cy, width: cw, height: ch })); } catch (e) {}
+  }
 
-  const cropped = img.crop({ x: cx, y: cy, width: cw, height: ch })
-    .resize({ width: 30, height: 16, quality: 'good' });
-  if (isBlankShot(cropped)) return null;
-  return cropped;
+  if (!config.backdrop) {
+    // 没衬底：直接采窗口那块，看到的就是文字压着的背景，最准
+    push(x, y, w, h);
+    return out;
+  }
+
+  // 有衬底：只采窗口「外面」那一圈，绝不采窗口自身。
+  // 窗口里面被自己的衬底盖着，背景只透出 (1-α)，而文字/折线的像素噪声
+  // 一点都不会随 α 变小 —— 浓度 90% 时信号只剩一成、噪声照旧，
+  // 判定必然在高浓度下来回横跳（旧实现除以 1-α 还会把噪声放大 10 倍）。
+  // 采窗口外面一圈，背景亮度是直接量出来的，既不用反推、也没有自反馈。
+  const rw = Math.max(4, Math.round(PROBE_RING_DIP * sf * kx));
+  const lw = Math.min(rw, x);                       // 左边还剩多少余地
+  const rrw = Math.min(rw, sz.width - (x + w));
+  const th = Math.min(rw, y);
+  const bh = Math.min(rw, sz.height - (y + h));
+  if (lw >= 4) push(x - lw, y - rw, lw, h + rw * 2);
+  if (rrw >= 4) push(x + w, y - rw, rrw, h + rw * 2);
+  if (th >= 4) push(x, y - th, w, th);
+  if (bh >= 4) push(x, y + h, w, bh);
+  return out;
 }
 
-// 截屏不可用时（受限环境）退回读系统壁纸缓存
+// 截屏不可用时（受限环境）退回读系统壁纸缓存。
+// 壁纸图里本来就没有窗口自己，所以取窗口那块就是"真正的背景"。
 function grabWallpaperRegion() {
   try {
     const p = path.join(app.getPath('appData'), 'Microsoft', 'Windows', 'Themes', 'TranscodedWallpaper');
     const img = nativeImage.createFromPath(p);
-    if (!img || img.isEmpty()) return null;
+    if (!img || img.isEmpty()) return [];
 
     const bounds = win.getBounds();
     const disp = screen.getDisplayMatching(bounds);
@@ -2076,52 +2177,84 @@ function grabWallpaperRegion() {
     const ch = Math.max(1, Math.min(sz.height - cy, h));
 
     const cropped = img.crop({ x: cx, y: cy, width: cw, height: ch })
-      .resize({ width: 30, height: 16, quality: 'good' });
-    if (isBlankShot(cropped)) return null;
-    return cropped;
+      .resize({ width: 96, height: 54, quality: 'good' });
+    return cropped.isEmpty() ? [] : [cropped];
   } catch (e) {
-    return null;
+    return [];
   }
 }
 
-function applyLuma(luma, useWallpaper) {
-  let next;
+const LUMA_TO_DARK = 0.55;   // 背景亮到这个程度 → 换暗色文字（暖黄这类偏亮背景能正确触发）
+const LUMA_TO_LIGHT = 0.42;  // 背景暗到这个程度 → 换亮色文字
+let lastSwitchAt = 0;        // 切换冷却：刚切完短时间内不再切，防临界区来回
+let modeSaveTimer = null;
+
+// 冷却期内不用反复整份写盘，攒一下再落
+function saveEffectiveMode() {
+  if (modeSaveTimer) return;
+  modeSaveTimer = setTimeout(function () {
+    modeSaveTimer = null;
+    saveConfig();
+  }, 3000);
+}
+
+// luma 是「纯背景」的亮度：采样区选在窗口外面（有衬底时）或壁纸图里，
+// 从来不含窗口自己画的那层衬底，所以这里不需要任何反推/补偿，
+// 只有一条对称的迟滞：背景变亮到 0.55 转暗色字，暗到 0.42 转亮色字，
+// 中间 0.42~0.55 保持不动，避免在临界值附近来回跳。
+function applyLuma(luma, source) {
+  if (config.textMode !== 'auto') return;
+  const cur = effectiveTextMode();          // 屏幕上真正生效的配色
+
+  let next = cur;
   if (!autoSettled) {
-    // 首次判定没有历史状态可参考，直接按中点分界，避免灰底两边都不上不下
     next = luma >= 0.5 ? 'dark' : 'light';
     autoSettled = true;
-  } else {
-    // 之后用迟滞区间，防止背景在临界值附近晃动导致文字反复跳色
-    next = autoTextMode;
+  } else if (cur === 'light') {
     if (luma >= LUMA_TO_DARK) next = 'dark';
-    else if (luma <= LUMA_TO_LIGHT) next = 'light';
+  } else if (luma <= LUMA_TO_LIGHT) {
+    next = 'light';
   }
+
   if (next === autoTextMode) return;
+  // 切换冷却：刚切完 3 秒内不再切，即使采样有小误差也不会快速来回闪
+  const now = Date.now();
+  if (now - lastSwitchAt < 3000) return;
+  lastSwitchAt = now;
   autoTextMode = next;
+  config.lastEffectiveTextMode = next;      // 冷启动先按它画，别"先亮后暗"闪一下
+  saveEffectiveMode();
   logLine('[bg]', '文字切换为' + (next === 'dark' ? '暗色' : '亮色') +
-    '（背景亮度 ' + luma.toFixed(2) + (useWallpaper ? '，采样来源=壁纸兜底' : '') + '）');
-  if (config.textMode === 'auto') broadcast();
+    '（背景亮度 ' + luma.toFixed(3) + '，采样来源=' + (source || '?') + '）');
+  broadcastTheme();
 }
 
-async function probeBackground(force) {
-  if (probeBusy || !win || win.isDestroyed()) return;
+// 采样串行化：desktopCapturer 会抢渲染线程，同一时刻只允许一次在跑。
+// 另外它偶尔会卡住不返回，所以光靠 probeBusy 会导致配色永久冻结，加个超时硬复位。
+const PROBE_TIMEOUT_MS = 12000;
+let probeStartedAt = 0;
+
+async function probeBackground() {
+  if (!win || win.isDestroyed()) return;
+  // 手动指定了配色就不用白费力气截屏
+  if (config.textMode !== 'auto') return;
   // 拖动期间跳过采样：desktopCapturer 会抢渲染线程导致 setPosition 卡顿
   if (dragBase) return;
-  // 手动指定了配色就不用白费力气截屏
-  if (!force && config.textMode !== 'auto') return;
+  if (probeBusy) {
+    if (Date.now() - probeStartedAt < PROBE_TIMEOUT_MS) return;
+    logLine('[bg]', '上次采样超过 ' + Math.round(PROBE_TIMEOUT_MS / 1000) + ' 秒未返回，强制复位');
+  }
 
   probeBusy = true;
+  probeStartedAt = Date.now();
   probeTick++;
-  let useWallpaper = false;
+  let source = '窗口外';
   try {
-    let small = null;
-    // 连续失败 3 次先退回壁纸兜底，但每 SCREEN_RETRY_EVERY 个周期重试一次截屏。
-    // 否则启动瞬间若是锁屏 / 远程桌面 / 截屏受限，一次失败就会钉死成壁纸模式，
-    // 之后窗口挪到任何界面上文字都不再跟背景变——用户看到的就是"不自动切换了"。
+    let list = null;
     const tryScreen = probeFails < 3 || probeTick % SCREEN_RETRY_EVERY === 0;
     if (tryScreen) {
-      try { small = await grabWindowRegion(); } catch (e) { small = null; }
-      if (small) {
+      try { list = await grabProbeImages(); } catch (e) { list = null; }
+      if (list) {
         if (probeFails >= 3) {
           logLine('[bg]', '实时截屏已恢复（之前是壁纸兜底，共失败 ' + probeFails + ' 次）');
         }
@@ -2130,26 +2263,19 @@ async function probeBackground(force) {
         probeFails++;
       }
     }
-    if (!small) {
-      small = grabWallpaperRegion();
-      useWallpaper = true;
+    // 截不到（或窗口大到外面没剩地方采）就退回壁纸：壁纸图里本来就没有窗口自己
+    if (!list || !list.length) {
+      list = grabWallpaperRegion();
+      source = '壁纸兜底';
+    } else if (!config.backdrop) {
+      source = '窗口内';
     }
-    let luma = medianLuma(small);
-    // 开了衬底时，截图像素混了半透明底色，反推底下真实亮度，避免自反馈切不过去。
-    // 深色衬底 ≈ luma 0.04；浅色衬底 = luma 1.0；不透明度由用户设置控制（默认 0.4）
-    if (luma != null && config.backdrop && !useWallpaper) {
-      const alpha = Math.max(0, Math.min(0.95, (config.backdropOpacity || 40) / 100));
-      if (alpha > 0.02) {
-        if (autoTextMode === 'light') {
-          luma = (luma - alpha * 0.04) / (1 - alpha);
-        } else {
-          luma = (luma - alpha * 1.0) / (1 - alpha);
-        }
-      }
-    }
-    if (luma != null) applyLuma(luma, useWallpaper);
+    const luma = lumaFromImages(list || []);
+    if (luma != null) applyLuma(luma, source);
     if (process.env.TICKER_DEBUG_BG) {
-      console.log('[bg] luma=' + (luma == null ? 'null' : luma.toFixed(3)) + ' mode=' + autoTextMode + ' fails=' + probeFails);
+      console.log('[bg] luma=' + (luma == null ? 'null' : luma.toFixed(3)) +
+        ' src=' + source + ' px=' + list.length +
+        ' mode=' + effectiveTextMode() + ' auto=' + autoTextMode + ' fails=' + probeFails);
     }
   } catch (e) {
     // 探测失败保持当前配色，不影响主流程
@@ -2158,11 +2284,27 @@ async function probeBackground(force) {
   }
 }
 
+// 采样请求统一走这里去抖：拖动/改设置/切回自动几乎同时都会申请一次，
+// 以前是各发各的，一次操作能连截两三张图。
+let probeQueued = null;
+function scheduleProbe(delay) {
+  if (probeQueued) clearTimeout(probeQueued);
+  probeQueued = setTimeout(function () {
+    probeQueued = null;
+    probeBackground();
+  }, Math.max(0, delay || 0));
+}
+
 function startBackgroundProbe() {
+  // 周期轮询背景亮度，间隔默认 4 秒、可在设置里调；手动指定配色时 probeBackground 内部会直接跳过采样
   if (probeTimer) clearInterval(probeTimer);
-  const ms = Math.max(1000, Math.min(15000, config.probeIntervalMs || PROBE_INTERVAL_DEFAULT));
-  probeTimer = setInterval(function () { probeBackground(false); }, ms);
-  setTimeout(function () { probeBackground(false); }, 1500);
+  if (probeQueued) { clearTimeout(probeQueued); probeQueued = null; }
+  let ms = parseInt(config.probeIntervalMs, 10);
+  if (!isFinite(ms)) ms = PROBE_INTERVAL_DEFAULT;
+  ms = Math.max(1000, Math.min(15000, ms));
+  probeTimer = setInterval(function () { scheduleProbe(0); }, ms);
+  // 窗口画出来之后再测第一次：太早截到的是还没上屏的空窗口
+  scheduleProbe(500);
 }
 
 function stopDrag() {
@@ -2172,10 +2314,17 @@ function stopDrag() {
 }
 
 function broadcast() {
-  if (win) win.webContents.send('state-changed', statePayload());
+  if (win && !win.isDestroyed()) win.webContents.send('state-changed', statePayload());
+}
+
+// 配色单独一条通道：换色不该连带触发渲染层"重拉行情"，否则背景一亮一暗
+// 整个列表就淡到 30% 再弹回来，看着像重载。
+function broadcastTheme() {
+  if (win && !win.isDestroyed()) win.webContents.send('theme-changed', themePayload());
 }
 
 function setAndBroadcast(patch, clearCache) {
+  const prevTextMode = config.textMode;
   Object.assign(config, patch);
   if (patch.alwaysOnTop !== undefined && win) win.setAlwaysOnTop(!!patch.alwaysOnTop);
   // 聚焦展开时别改窗口宽度：宽度由列表+图表栏决定，宽度值先落 config，收起后自然生效
@@ -2185,11 +2334,24 @@ function setAndBroadcast(patch, clearCache) {
     win.setSize(w, h);
   }
   if (clearCache) seriesCache = { at: 0, map: {}, period: null };
-  // 刚从手动切回自动时立刻测一次，不用等下一个轮询周期
-  if (patch.textMode === 'auto') probeFails = 0;
+
+  // 从手动切回自动：先沿用刚才那个配色，等采样回来再修正，
+  // 免得「点了自动」先跳成历史配色再跳回来。
+  if (patch.textMode === 'auto' && prevTextMode !== 'auto') {
+    autoTextMode = prevTextMode === 'dark' ? 'dark' : 'light';
+    config.lastEffectiveTextMode = autoTextMode;
+  }
+  // 配色相关参数变了就立刻重测一次，不用干等下一个轮询周期。
+  // 采样区在窗口外面，不受衬底重绘影响，所以不用额外等
+  const themeTouched = patch.textMode !== undefined ||
+    patch.backdrop !== undefined || patch.backdropOpacity !== undefined;
+  if (themeTouched && config.textMode === 'auto') {
+    probeFails = 0;
+    scheduleProbe(0);
+  }
+
   saveConfig();
   broadcast();
-  if (patch.textMode === 'auto') probeBackground(true);
 }
 
 function setPeriod(p) {
@@ -2280,7 +2442,7 @@ ipcMain.on('drag-end', function () {
   stopDrag();
   saveConfig();
   // 拖动后落点换了，背后可能是完全不同的画面，稍等一下再测
-  setTimeout(function () { probeBackground(true); }, 400);
+  scheduleProbe(400);
 });
 
 // 图钉固定：开启后窗口不可拖动/拉伸，且鼠标穿透到下层应用
@@ -2600,6 +2762,8 @@ ipcMain.handle('settings-get', async function () {
     interval: config.interval,
     textMode: config.textMode,
     backdrop: !!config.backdrop,
+    backdropOpacity: config.backdropOpacity != null ? config.backdropOpacity : 40,
+    probeIntervalMs: config.probeIntervalMs != null ? config.probeIntervalMs : 4000,
     showName: config.showName !== false,
     baseline: config.baseline !== false,
     alwaysOnTop: !!config.alwaysOnTop,
@@ -2698,6 +2862,9 @@ ipcMain.handle('settings-save', async function (e, patch) {
   };
 
   const shortcuts = normalizeShortcuts(patch.shortcuts);
+  // 配色：auto 跟随背景；light / dark 是用户手动兜底。
+  // 自动判定失灵（截屏拿不到画面、纯黑桌面、远程桌面）时，这里是唯一的退路。
+  const textMode = TEXT_MODES.indexOf(patch.textMode) >= 0 ? patch.textMode : config.textMode;
   // 聚焦图表快捷键变了，重新注册全局快捷键（可能在保存时注册失败，日志可见）
   if (shortcuts.focus !== (config.shortcuts || {}).focus) {
     config.shortcuts = config.shortcuts || {};
@@ -2710,7 +2877,7 @@ ipcMain.handle('settings-save', async function (e, patch) {
     watchlist: watchlist,
     period: period,
     interval: interval,
-    textMode: 'auto',
+    textMode: textMode,
     backdrop: !!patch.backdrop,
     backdropOpacity: backdropOpacity,
     probeIntervalMs: probeIntervalMs,

@@ -14,6 +14,8 @@ contextBridge.exposeInMainWorld('ticker', {
   onForceRefresh: function (fn) { ipcRenderer.on('force-refresh', fn); },
   onRefitHeight: function (fn) { ipcRenderer.on('refit-height', function () { fn(); }); },
   onStateChanged: function (fn) { ipcRenderer.on('state-changed', function (e, cfg) { fn(cfg); }); },
+  // 自动配色变化：只换外观，不重拉行情（和 state-changed 分开，避免整表闪一下）
+  onTheme: function (fn) { ipcRenderer.on('theme-changed', function (e, t) { fn(t); }); },
 
   // 聚焦图表（在原窗口里展开，不另开窗口）
   focusOpen: function (code) { ipcRenderer.send('focus-open', code); },

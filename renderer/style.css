@@ -113,9 +113,12 @@ body[data-text="dark"] {
   --chart-halo: rgba(255, 255, 255, .9);
 }
 
-/* 自动配色切换时淡入，避免背景变化瞬间文字生硬跳色 */
-.name, .chg, .pct, .spark polyline, .spark .baseline {
-  transition: color .38s ease, stroke .38s ease, filter .38s ease;
+/* 自动配色切换时极短淡入，避免背景变化瞬间文字生硬跳色；
+   但不能太长——否则临界区来回切时会看到颜色慢慢渐变再反向渐变，反而更晃。
+   text-shadow 必须一起过渡：描边光晕是黑↔白反向变的，只淡颜色会让字在切换
+   的 120ms 里"糊"一下（深字配白晕）。 */
+.name, .chg, .pct, .spark polyline, .spark .baseline, #period-label, #sort-btn, #f-name {
+  transition: color .12s ease, text-shadow .12s ease, stroke .12s ease, filter .12s ease;
 }
 
 body.backdrop {

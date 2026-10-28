@@ -1,4 +1,4 @@
-﻿(function () {
+(function () {
   var VW = 240, VH = 100, PAD = 7;
 
   var app = document.getElementById('app');
@@ -252,13 +252,19 @@
     return real;
   }
 
+  // 只换外观：配色（亮/暗字 + 衬底）。和 refresh 完全分开，
+  // 自动换色不该把整个列表淡到 30% 再重拉一遍行情。
+  function applyTheme(t) {
+    if (!t) return;
+    document.body.setAttribute('data-text', t.effectiveTextMode === 'dark' ? 'dark' : 'light');
+    document.body.classList.toggle('backdrop', !!t.backdrop);
+    document.body.style.setProperty('--bd-op', ((t.backdropOpacity != null ? t.backdropOpacity : 40) / 100).toFixed(3));
+  }
+
   function applyState(s) {
     if (!s) return;
     // 自动模式下由主进程给出实际生效的配色
-    var mode = s.effectiveTextMode || s.textMode;
-    document.body.setAttribute('data-text', mode === 'dark' ? 'dark' : 'light');
-    document.body.classList.toggle('backdrop', !!s.backdrop);
-    document.body.style.setProperty('--bd-op', ((s.backdropOpacity != null ? s.backdropOpacity : 40) / 100).toFixed(3));
+    applyTheme(s);
     if (s.sparkWidth != null) applySpark(s.sparkWidth);
     document.body.classList.toggle('noname', s.showName === false);
     showBaseline = s.baseline !== false;
@@ -461,6 +467,9 @@
     e.preventDefault();
     window.ticker.openMenu();
   });
+
+  // 自动配色变化：主进程单独走一条通道，这里只换颜色，不碰数据
+  window.ticker.onTheme(applyTheme);
 
   // 快捷键：Ctrl+1~4 切周期，Ctrl+R 立即刷新（可在设置里改）
   var SHORTCUT_DEFAULTS = {

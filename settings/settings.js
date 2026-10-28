@@ -426,13 +426,14 @@
 
   function save() {
     var periodEl = document.querySelector('input[name="period"]:checked');
+    var textModeEl = document.querySelector('input[name="textMode"]:checked');
 
     var patch = {
       symbols: state.symbols,
       watchlist: state.watchlist,
       period: periodEl ? periodEl.value : 'minute',
       interval: parseInt($('interval').value, 10),
-      textMode: 'auto',
+      textMode: textModeEl ? textModeEl.value : 'auto',
       backdrop: $('backdrop').checked,
       backdropOpacity: parseInt($('backdropOpacity').value, 10),
       probeIntervalMs: parseInt($('probeIntervalSec').value, 10) * 1000,
@@ -475,6 +476,13 @@
     });
   }
 
+  // 选「自动」时采样间隔才有意义，选固定配色时把它置灰
+  function syncTextModeUi() {
+    var el = document.querySelector('input[name="textMode"]:checked');
+    var on = !el || el.value === 'auto';
+    $('probeIntervalSec').disabled = !on;
+  }
+
   /* ---- 初始化 ---- */
   window.ticker.getSettings().then(function (d) {
     state.symbols = d.symbols.slice();
@@ -502,6 +510,9 @@
     $('backdropOpacity').value = d.backdropOpacity != null ? d.backdropOpacity : 40;
     $('backdropOpacity-val').textContent = $('backdropOpacity').value;
     $('backdropOpacity').disabled = !$('backdrop').checked;
+    var tm = document.querySelector('input[name="textMode"][value="' + (d.textMode || 'auto') + '"]');
+    if (tm) tm.checked = true;
+    syncTextModeUi();
     const pis = Math.round((d.probeIntervalMs != null ? d.probeIntervalMs : 4000) / 1000);
     $('probeIntervalSec').value = pis;
     $('probeIntervalSec-val').textContent = pis;
@@ -609,6 +620,15 @@
     $('backdropOpacity').disabled = !this.checked;
     window.ticker.save({ backdrop: this.checked });
   });
+  // 配色三选一：点了立刻生效，不用等"保存并应用"
+  var textModeRadios = document.querySelectorAll('input[name="textMode"]');
+  for (var ti = 0; ti < textModeRadios.length; ti++) {
+    textModeRadios[ti].addEventListener('change', function () {
+      if (!this.checked) return;
+      syncTextModeUi();
+      window.ticker.save({ textMode: this.value });
+    });
+  }
   $('test-alert').addEventListener('click', function () {
     window.ticker.testAlert();
     setFoot('已发出测试提醒', 'ok');

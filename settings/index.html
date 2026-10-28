@@ -64,7 +64,16 @@
 
       <section data-cat="appearance">
         <h2>外观</h2>
-        <p class="hint">文字颜色实时跟随窗口背后的画面：背景亮自动转暗色字，背景暗自动转亮色字。</p>
+        <div class="field">
+          <span class="fl">文字配色</span>
+          <div class="seg">
+            <label><input type="radio" name="textMode" value="auto" /><span>自动</span></label>
+            <label><input type="radio" name="textMode" value="light" /><span>亮色字</span></label>
+            <label><input type="radio" name="textMode" value="dark" /><span>暗色字</span></label>
+          </div>
+        </div>
+        <p class="hint">自动：实时采样窗口背后的画面，背景亮转暗色字、背景暗转亮色字。<br />
+          如果自动判定在你这台机器上不对（比如多屏、远程桌面、纯黑壁纸），直接选亮色字或暗色字锁定。</p>
         <div class="checks">
           <label class="check"><input type="checkbox" id="backdrop" /><span>加一层淡衬底</span></label>
           <label class="check"><input type="checkbox" id="showName" /><span>显示名称</span></label>
@@ -80,7 +89,7 @@
           <input type="range" id="probeIntervalSec" min="1" max="10" step="1" />
           <b id="probeIntervalSec-val">4</b>
         </div>
-        <p class="hint">单位：秒。值越小切换越灵敏，但更耗资源；拖动浮窗时自动暂停采样。</p>
+        <p class="hint">单位：秒。值越小切换越灵敏，但更耗资源；拖动浮窗时自动暂停采样。选「自动」时这一项才生效。</p>
         <div class="field">
           <span class="fl">折线宽度</span>
           <input type="range" id="sparkWidth" min="40" max="300" step="10" />
