@@ -5,6 +5,10 @@
   "main": "electron/main.cjs",
   "scripts": {
     "start": "node scripts/launch.js",
+    "test": "node --test",
+    "check": "node scripts/check-syntax.cjs",
+    "smoke": "node scripts/smoke.cjs",
+    "ci": "npm run check && npm test",
     "dist": "electron-builder --win",
     "pack:dir": "electron-builder --win --dir"
   },

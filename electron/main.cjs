@@ -3,6 +3,22 @@ const path = require('path');
 const fs = require('fs');
 const { execFile } = require('child_process');
 
+const { NAMES, PERIODS } = require('./core/constants.cjs');
+const { pad2 } = require('./core/utils.cjs');
+const { isValidCode, isFundCode } = require('./core/symbols.cjs');
+const {
+  migrateConfig,
+  loadConfig,
+  saveConfig: writeConfigFile,
+  normalizeShortcuts
+} = require('./core/config.cjs');
+const { createHttp } = require('./data/http.cjs');
+const { createMarket } = require('./data/market.cjs');
+const { createFundMinuteStore } = require('./data/fund-minutes.cjs');
+const { createQuoteService } = require('./data/quote-service.cjs');
+const { createFocusService, FOCUS_TABS } = require('./data/focus.cjs');
+const { applySettingsPatch } = require('./core/settings.cjs');
+
 // 极简浮窗不需要 GPU 合成，禁用硬件加速可避免部分机器上 GPU 进程崩溃、并降低功耗
 app.disableHardwareAcceleration();
 app.commandLine.appendSwitch('enable-transparent-visuals');
@@ -17,77 +33,6 @@ const RES_DIR = path.join(__dirname, '..');
 const DATA_DIR = app.getPath('userData');
 const ROOT = DATA_DIR;
 const CONFIG_PATH = path.join(DATA_DIR, 'config.json');
-
-/* ---------------- 首次启动：把老位置的配置接过来 ---------------- */
-
-// 打包成 exe 后配置落到用户目录（%APPDATA%\mini-ticker\），第一次跑时那里是空的，
-// 直接拿默认值会显得「自选被刷回初始状态」。所以读配置前先看 exe 旁边 / 上一级
-// （exe 放在 dist/ 里时就是项目目录）有没有现成的 config.json，有就接过来。
-const CONFIG_MIGRATED = path.join(DATA_DIR, '.config-migrated');
-
-function sameList(a, b) {
-  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
-  for (var i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
-  return true;
-}
-
-// 一份配置是不是「原封不动的默认值」：是的话说明没被用户动过，可以让位给老配置
-function isFreshDefault(cfg) {
-  return sameList(cfg.symbols, DEFAULT_CONFIG.symbols) &&
-    sameList(cfg.watchlist, DEFAULT_CONFIG.watchlist);
-}
-
-function candidateConfigPaths() {
-  var out = [];
-  function push(p) { if (p && out.indexOf(p) < 0) out.push(p); }
-  var dir = process.env.PORTABLE_EXECUTABLE_DIR || path.dirname(process.execPath);
-  push(path.join(dir, 'config.json'));
-  push(path.join(dir, '..', 'config.json'));
-  push(path.join(RES_DIR, 'config.json'));
-  return out;
-}
-
-function pickConfigFrom(candidates) {
-  for (var i = 0; i < candidates.length; i++) {
-    var p = candidates[i];
-    if (path.resolve(p) === path.resolve(CONFIG_PATH)) continue;
-    try {
-      if (!fs.existsSync(p)) continue;
-      var raw = JSON.parse(fs.readFileSync(p, 'utf8'));
-      if (!raw || typeof raw !== 'object') continue;
-      if (!Array.isArray(raw.symbols) || !raw.symbols.length) continue;
-      return { path: p, data: raw };
-    } catch (e) {}
-  }
-  return null;
-}
-
-function migrateConfig() {
-  if (fs.existsSync(CONFIG_MIGRATED)) return;
-  try {
-    var src = pickConfigFrom(candidateConfigPaths());
-    var take = false;
-    if (src) {
-      if (!fs.existsSync(CONFIG_PATH)) {
-        take = true;
-      } else {
-        // 本地已有配置，但内容还停在原始默认值 → 是打包后新生成的，让位给老配置
-        try {
-          var cur = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
-          take = isFreshDefault(Object.assign({}, DEFAULT_CONFIG, cur));
-        } catch (e) { take = true; }
-      }
-    }
-    if (take) {
-      fs.mkdirSync(path.dirname(CONFIG_PATH), { recursive: true });
-      fs.copyFileSync(src.path, CONFIG_PATH);
-      logLine('[config]', '已继承本地配置：' + src.path);
-    }
-    fs.writeFileSync(CONFIG_MIGRATED, (src ? src.path : '') + '\n', 'utf8');
-  } catch (e) {
-    logLine('[config]', '配置迁移失败：' + e.message);
-  }
-}
 
 /* ---------------- 运行日志（闪退排查用） ---------------- */
 
@@ -110,108 +55,50 @@ function logLine(tag, msg) {
   } catch (e) {}
 }
 
-// 常用指数名称表（watchlist 里出现的代码会优先用这里的名字）
-const NAMES = {
-  sh000001: '上证指数',
-  sz399001: '深证成指',
-  sz399006: '创业板指',
-  sh000688: '科创50',
-  sh000300: '沪深300',
-  sh000016: '上证50',
-  sh000905: '中证500',
-  sh000852: '中证1000',
-  bj899050: '北证50',
-  hkHSI: '恒生指数',
-  hkHSTECH: '恒生科技',
-  hkHSCEI: '国企指数',
-  usDJI: '道琼斯',
-  usIXIC: '纳斯达克',
-  usINX: '标普500',
-  usNDX: '纳指100',
-  hf_GC: '纽约金',
-  hf_XAU: '伦敦金',
-  hf_SI: '纽约白银',
-  hf_XAG: '伦敦银',
-  hf_XPT: '纽约铂金',
-  hf_CL: 'WTI原油',
-  hf_OIL: '布伦特原油',
-  hf_HG: 'COMEX铜',
-  hf_NG: '美国天然气',
-  usDXY: '美元指数'
-};
+/* ---------------- 配置 ---------------- */
 
-// 东财特殊品种（非 hf_ 前缀）：美元指数等
-const EM_SECID = {
-  usDXY: '100.UDI'   // 美元指数
-};
-
-const DEFAULT_WATCHLIST = [
-  'sh000001', 'sz399001', 'sz399006', 'sh000688', 'sh000300', 'sh000016',
-  'sh000905', 'sh000852', 'bj899050', 'hkHSI', 'hkHSTECH', 'usDJI', 'usIXIC', 'usINX'
-];
-
-const PERIODS = ['minute', 'day', 'month', 'year'];
-const PERIOD_LABEL = { minute: '分时', day: '日线', month: '月线', year: '年线' };
-
-// 文字配色：light = 亮色文字（配深背景），dark = 暗色文字（配浅背景），auto = 跟随窗口背后的实际画面
-const TEXT_MODES = ['light', 'dark', 'auto'];
-
-const DEFAULT_CONFIG = {
-  symbols: ['sh000001', 'sz399001', 'sz399006', 'sh000688'],
-  watchlist: DEFAULT_WATCHLIST,
-  period: 'minute',
-  interval: 3000,
-  probeIntervalMs: 4000,
-  alert: { enabled: true, time: '14:30' },
-  // 收盘后自动退出：默认 15:05（留几分钟让收盘数据落定）
-  autoExit: { enabled: true, time: '15:05' },
-  // 开盘自动启动：靠 Windows 计划任务，工作日定点拉起
-  autoStart: { enabled: false, time: '09:25' },
-  textMode: 'auto',
-  // 上一次自动判定出来的配色：冷启动时先按它画，避免「先亮色字、1 秒后才纠正」
-  lastEffectiveTextMode: 'light',
-  backdrop: false,
-  backdropOpacity: 40,
-  sparkWidth: 120,
-  showName: true,
-  baseline: true,
-  // 列表排序：off 按自选顺序 / pct-desc 涨幅从高到低 / pct-asc 从低到高
-  sortMode: 'off',
-  // 上次更新成功的源（gitee / ghfast / github），下次优先用它
-  updateFeed: '',
-  alwaysOnTop: true,
-  locked: false,
-  width: 320,
-  // 高度：0 表示跟随内容自动撑开，>0 表示用户手动拖过、以这个值为准
-  height: 0,
-  pos: null,
-  // 快捷键：周期/刷新是窗口内快捷键，focus 是全局唤起聚焦图表
-  shortcuts: {
-    periodMinute: 'Ctrl+1',
-    periodDay: 'Ctrl+2',
-    periodMonth: 'Ctrl+3',
-    periodYear: 'Ctrl+4',
-    refresh: 'Ctrl+R',
-    focus: 'Ctrl+Alt+F'
-  }
-};
-
-const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36';
-
-const HEADERS = { 'User-Agent': UA, 'Referer': 'https://gu.qq.com/' };
-const SINA_HEADERS = { 'User-Agent': UA, 'Referer': 'https://finance.sina.com.cn/' };
-const FUND_HEADERS = { 'User-Agent': UA, 'Referer': 'https://fund.eastmoney.com/' };
-
-// 分时线 20s 一拉；K 线变化慢，60s 一拉
-const MINUTE_TTL = 20000;
-const KLINE_TTL = 60000;
-let seriesCache = { at: 0, map: {}, period: null };
-// 取数失败只记一次日志，避免每 3 秒刷屏
-let seriesFailLogged = {};
-
-migrateConfig();
-let config = loadConfig();
+// 首次启动：把 exe 旁边 / 项目目录里的老配置接到用户目录，只跑一次。
+migrateConfig({
+  resDir: RES_DIR,
+  dataDir: DATA_DIR,
+  configPath: CONFIG_PATH,
+  log: logLine
+});
+let config = loadConfig({ configPath: CONFIG_PATH, log: logLine });
 logLine('[config]', '配置文件：' + CONFIG_PATH);
+
+// 各处只关心「把当前 config 存盘」，路径和原子写入细节留在 core/config。
+function saveConfig() {
+  writeConfigFile({ configPath: CONFIG_PATH, config: config, log: logLine });
+}
+
+/* ---------------- 行情 / 数据服务 ---------------- */
+
+const http = createHttp();
+const market = createMarket({ http: http, log: logLine });
+const fundStore = createFundMinuteStore({
+  file: path.join(ROOT, 'cache', 'fund-minute.json'),
+  log: logLine
+});
+const quoteService = createQuoteService({
+  market: market,
+  http: http,
+  fundStore: fundStore,
+  log: logLine,
+  getConfig: function () { return config; }
+});
+const focusService = createFocusService({ market: market, http: http });
+
+// 窗口 / 聚焦图表直接用的几个取数入口，保留原有函数名，调用点不用跟着改。
+const fetchSnapshots = market.fetchSnapshots;
+const searchSymbols = market.searchSymbols;
+const fetchFundEstimates = market.fetchFundEstimates;
+const fetchFundNav = market.fetchFundNav;
+
+function fetchAll() {
+  return quoteService.fetchAll();
+}
+
 let win = null;
 // 渲染层最近一次算出的"内容自然高度"，用来区分用户手动拖高还是内容撑开
 let autoFitHeight = 0;
@@ -221,947 +108,6 @@ let settingsWin = null;
 let dragTimer = null;
 let dragProbeTimer = null;
 let dragBase = null;
-
-function loadConfig() {
-  let raw = {};
-  try {
-    // 去掉可能的 UTF-8 BOM：用记事本之类改过配置就会带上，
-    // 而 JSON.parse 会因此直接失败 → 静默退回默认值，用户的自选/配色全"丢"了
-    const text = fs.readFileSync(CONFIG_PATH, 'utf8').replace(/^\uFEFF/, '');
-    raw = JSON.parse(text);
-  } catch (e) {}
-  const cfg = Object.assign({}, DEFAULT_CONFIG, raw);
-  if (!Array.isArray(cfg.symbols) || cfg.symbols.length === 0) cfg.symbols = DEFAULT_CONFIG.symbols.slice();
-  if (!Array.isArray(cfg.watchlist) || cfg.watchlist.length === 0) cfg.watchlist = DEFAULT_WATCHLIST.slice();
-  if (PERIODS.indexOf(cfg.period) < 0) cfg.period = 'minute';
-  // 配色：auto 跟随背景；light / dark 是用户手动指定的退路。
-  // 自动判定在个别机器上会失灵（截屏拿不到画面、纯黑桌面等），必须留手动口子。
-  if (TEXT_MODES.indexOf(cfg.textMode) < 0) cfg.textMode = 'auto';
-  if (cfg.lastEffectiveTextMode !== 'dark') cfg.lastEffectiveTextMode = 'light';
-  cfg.alert = Object.assign({}, DEFAULT_CONFIG.alert, raw.alert || {});
-  if (!/^\d{2}:\d{2}$/.test(cfg.alert.time)) cfg.alert.time = DEFAULT_CONFIG.alert.time;
-  cfg.autoExit = Object.assign({}, DEFAULT_CONFIG.autoExit, raw.autoExit || {});
-  if (!/^\d{2}:\d{2}$/.test(cfg.autoExit.time)) cfg.autoExit.time = DEFAULT_CONFIG.autoExit.time;
-  cfg.autoStart = Object.assign({}, DEFAULT_CONFIG.autoStart, raw.autoStart || {});
-  // 兼容中间版本写过的 mode 字段：mode=schedule 等同于 enabled
-  if (raw.autoStart && typeof raw.autoStart.mode === 'string') {
-    cfg.autoStart.enabled = raw.autoStart.mode === 'schedule' || raw.autoStart.mode === 'login';
-    delete cfg.autoStart.mode;
-  }
-  cfg.autoStart.enabled = !!cfg.autoStart.enabled;
-  if (!/^\d{2}:\d{2}$/.test(cfg.autoStart.time)) cfg.autoStart.time = DEFAULT_CONFIG.autoStart.time;
-  return cfg;
-}
-
-function saveConfig() {
-  try {
-    fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), 'utf8');
-  } catch (e) {
-    console.error('[config] 保存失败:', e.message);
-  }
-}
-
-/* ---------------- 行情抓取 ---------------- */
-
-function num(v) {
-  const n = parseFloat(v);
-  return isFinite(n) ? n : NaN;
-}
-
-// 快捷键格式校验：修饰符(Ctrl/Alt/Shift)+ 主键，如 Ctrl+1 / Ctrl+Alt+F / Ctrl+Shift+R
-const SHORTCUT_KEY_RE = /^(F\d{1,2}|[0-9]|[a-zA-Z]|Space|Enter|Escape|Tab|ArrowUp|ArrowDown|ArrowLeft|ArrowRight|Home|End|PageUp|PageDown|Backspace|Delete)$/;
-function validShortcut(s) {
-  if (typeof s !== 'string') return false;
-  const parts = s.trim().split('+');
-  if (parts.length < 2 || parts.length > 4) return false;  // 必须至少一个修饰符 + 主键
-  const mods = {};
-  for (let i = 0; i < parts.length - 1; i++) {
-    const m = parts[i].trim();
-    if (m === 'Ctrl' || m === 'Control') mods.ctrl = true;
-    else if (m === 'Alt') mods.alt = true;
-    else if (m === 'Shift') mods.shift = true;
-    else return false;
-  }
-  const key = parts[parts.length - 1].trim();
-  if (!SHORTCUT_KEY_RE.test(key)) return false;
-  return true;
-}
-
-function normalizeShortcuts(sc) {
-  const def = DEFAULT_CONFIG.shortcuts;
-  const out = {};
-  ['periodMinute', 'periodDay', 'periodMonth', 'periodYear', 'refresh', 'focus'].forEach(function (k) {
-    out[k] = validShortcut(sc && sc[k]) ? sc[k].trim() : def[k];
-  });
-  return out;
-}
-
-async function fetchGbk(url, headers) {
-  const res = await fetch(url, { headers: headers || HEADERS });
-  if (!res.ok) throw new Error('HTTP ' + res.status);
-  const buf = Buffer.from(await res.arrayBuffer());
-  try {
-    return new TextDecoder('gbk').decode(buf);
-  } catch (e) {
-    return buf.toString('latin1');
-  }
-}
-
-// 实时快照（GBK），一次请求拿全部标的
-async function fetchSnapshots(codes) {
-  // 东财特殊品种（美元指数等）：腾讯不支持，单独走东财快照
-  const emCodes = codes.filter(function (c) { return EM_SECID[c]; });
-  const txCodes = codes.filter(function (c) { return !EM_SECID[c]; });
-  const out = {};
-  for (let i = 0; i < emCodes.length; i++) {
-    const code = emCodes[i];
-    const secid = EM_SECID[code];
-    try {
-      const j = await fetchJson('https://push2.eastmoney.com/api/qt/stock/get?secid=' + secid +
-        '&fields=f43,f44,f45,f46,f57,f58,f60,f170');
-      const d = j.data;
-      if (!d) continue;
-      // 东财价格放大了 100 倍（美元指数两位小数）
-      const price = (d.f43 || 0) / 100;
-      const prev = (d.f60 || 0) / 100;
-      out[code] = {
-        name: NAMES[code] || d.f58 || code,
-        price: price,
-        prevClose: prev,
-        pct: (d.f170 || 0) / 100,
-        change: price - prev,
-        time: ''
-      };
-    } catch (e) {}
-  }
-  if (!txCodes.length) return out;
-  codes = txCodes;
-  // 调试用：TICKER_FORCE_SINA=1 时优先走新浪，验证兜底链路是否可用
-  if (process.env.TICKER_FORCE_SINA) {
-    try {
-      const alt = await fetchSinaSnapshots(codes);
-      if (Object.keys(alt).length) return alt;
-    } catch (e) {}
-  }
-  try {
-    const text = await fetchGbk('https://qt.gtimg.cn/q=' + codes.join(','));
-    const map = {};
-    text.split(';').forEach(function (line) {
-      const m = line.match(/v_([a-zA-Z0-9_]+)="([^"]*)"/);
-      if (!m) return;
-      const code = m[1];
-      if (/^hf_/i.test(code)) {
-        // 外盘期货用逗号分隔（A股用波浪号）：现价,涨跌幅%,...,最高,最低,时间,昨结,今开,...,日期,名称
-        const a = m[2].split(',');
-        const price = num(a[0]);
-        const pctRaw = num(a[1]);
-        const prev = num(a[7]);
-        map[code] = {
-          name: NAMES[code] || a[13] || code,
-          price: price,
-          prevClose: prev,
-          pct: pctRaw,
-          change: (isFinite(price) && isFinite(prev)) ? price - prev : NaN,
-          time: (a[12] || '') + ' ' + (a[6] || '')
-        };
-      } else {
-        const a = m[2].split('~');
-        map[code] = {
-          name: a[1] || code,
-          price: num(a[3]),
-          prevClose: num(a[4]),
-          pct: num(a[32]),
-          change: num(a[31]),
-          time: a[30] || ''
-        };
-      }
-    });
-    if (Object.keys(map).length) {
-      // 合并东财特殊品种结果
-      Object.keys(out).forEach(function (k) { map[k] = out[k]; });
-      return map;
-    }
-    throw new Error('快照为空');
-  } catch (e) {
-    const alt = await fetchSinaSnapshots(codes);
-    if (Object.keys(alt).length) {
-      Object.keys(out).forEach(function (k) { alt[k] = out[k]; });
-      return alt;
-    }
-    throw e;
-  }
-}
-
-// 新浪快照兜底。新浪各家字段顺序不一样，按代码类型分开解析：
-//   int_ 美股指数：名称, 现价, 涨跌, 涨跌%
-//   hk   港股：    代码, 名称, 今开, 昨收, 最高, 最低, 现价, 涨跌, 涨跌%
-//   A股/指数：     名称, 今开, 昨收, 现价, 最高, 最低, ...
-const SINA_ALIAS = {
-  usDJI: 'int_dji',
-  usIXIC: 'int_nasdaq',
-  usINX: 'int_sp500'
-};
-
-function sinaSymbol(code) {
-  if (SINA_ALIAS[code]) return SINA_ALIAS[code];
-  if (/^(sh|sz|bj)/i.test(code)) return code.toLowerCase();
-  if (/^hk/i.test(code)) return code;                                // hkHSI 直接用
-  if (/^us/i.test(code)) return 'gb_' + code.slice(2).toLowerCase(); // 美股个股兜底
-  return null;
-}
-
-async function fetchSinaSnapshots(codes) {
-  const forward = {};
-  const backward = {};
-  codes.forEach(function (c) {
-    const s = sinaSymbol(c);
-    if (!s) return;
-    forward[c] = s;
-    backward[s] = c;
-  });
-  const syms = Object.keys(backward);
-  if (!syms.length) return {};
-
-  const text = await fetchGbk('https://hq.sinajs.cn/list=' + syms.join(','), SINA_HEADERS);
-  const map = {};
-  text.split(';').forEach(function (line) {
-    const m = /hq_str_([A-Za-z0-9_$]+)="([^"]*)"/.exec(line);
-    if (!m || !m[2]) return;
-    const code = backward[m[1]];
-    if (!code) return;
-
-    const a = m[2].split(',');
-    let name = a[0], price = NaN, prev = NaN, chg = NaN, pct = NaN;
-
-    if (/^int_/.test(m[1])) {
-      name = a[0];
-      price = num(a[1]);
-      chg = num(a[2]);
-      pct = num(a[3]);
-      prev = isFinite(price) && isFinite(chg) ? price - chg : NaN;
-    } else if (/^hk/i.test(m[1])) {
-      name = a[1] || m[1];
-      price = num(a[6]);
-      prev = num(a[3]);
-      chg = num(a[7]);
-      pct = num(a[8]);
-    } else {
-      name = a[0] || m[1];
-      price = num(a[3]);
-      prev = num(a[2]);
-      if (isFinite(price) && isFinite(prev)) {
-        chg = price - prev;
-        pct = prev ? (chg / prev) * 100 : NaN;
-      }
-    }
-
-    if (!isFinite(price) || price <= 0) return;
-    map[code] = { name: name, price: price, prevClose: prev, pct: pct, change: chg, time: '' };
-  });
-
-  if (Object.keys(map).length) noteSinaFallback();
-  return map;
-}
-
-async function fetchJson(url) {
-  const res = await fetch(url, { headers: HEADERS });
-  if (!res.ok) throw new Error('HTTP ' + res.status);
-  const text = await res.text();
-  const head = text.trim().slice(0, 1);
-  // 被 WAF 拦下时返回的是 HTML 挑战页（甚至 200 状态码），直接 res.json() 会抛 SyntaxError
-  if (head === '<') throw new Error('接口返回网页（疑似被拦截）');
-  return JSON.parse(text);
-}
-
-// 腾讯行情有两个等价入口：主域名被 WAF 拦就换备用域名，数据格式完全一致
-const QT_HOSTS = [
-  'https://ifzq.gtimg.cn',
-  'https://proxy.finance.qq.com/ifzqgtimg'
-];
-let qtHostIdx = 0;
-
-async function fetchTencentJson(pathAndQuery) {
-  let lastErr = null;
-  for (let i = 0; i < QT_HOSTS.length; i++) {
-    const idx = (qtHostIdx + i) % QT_HOSTS.length;
-    try {
-      const j = await fetchJson(QT_HOSTS[idx] + pathAndQuery);
-      if (idx !== qtHostIdx) {
-        qtHostIdx = idx;
-        logLine('[quote]', '已切换到备用行情入口 ' + QT_HOSTS[idx]);
-      }
-      return j;
-    } catch (e) {
-      lastErr = e;
-    }
-  }
-  throw lastErr || new Error('行情接口不可用');
-}
-
-/* ---------------- 标的搜索：名称 / 拼音 / 代码 ---------------- */
-
-// smartbox 返回的 name 是 \uXXXX 转义；个别情况直接是中文，两种都兼容
-function unescapeUnicode(s) {
-  return String(s).replace(/\\u([0-9a-fA-F]{4})/g, function (m, h) {
-    return String.fromCharCode(parseInt(h, 16));
-  });
-}
-
-const TYPE_LABEL = {
-  'GP-A': 'A股',
-  'GP-A-KCB': '科创板',
-  'GP-A-CYB': '创业板',
-  'GP-B': 'B股',
-  ZS: '指数',
-  ETF: 'ETF',
-  LOF: 'LOF',
-  FJ: '分级',
-  QZ: '权证',
-  KJ: '场外基金',
-  'GP-HK': '港股',
-  'GP-US': '美股'
-};
-
-async function searchSymbols(keyword) {
-  const q = String(keyword || '').trim();
-  if (!q) return [];
-
-  const out = [];
-  const seen = {};
-
-  // 用户直接输入代码（如 hf_GC、sh518880）时，即使搜索接口没有也直接返回
-  if (isValidCode(q)) {
-    out.push({ code: q, name: NAMES[q] || q, market: q.slice(0, 2).toLowerCase(), type: '', typeLabel: '' });
-    seen[q] = true;
-  }
-
-  // 外盘期货（hf_）和东财特殊品种（usDXY）搜索接口不覆盖，按名称本地匹配
-  const ql = q.toLowerCase();
-  Object.keys(NAMES).forEach(function (code) {
-    if (!/^hf_/i.test(code) && !EM_SECID[code]) return;
-    const name = NAMES[code];
-    if (seen[code]) return;
-    if (name.toLowerCase().indexOf(ql) >= 0 || code.toLowerCase().indexOf(ql) >= 0) {
-      out.push({ code: code, name: name, market: /^hf_/i.test(code) ? 'hf' : 'em', type: '', typeLabel: '外盘期货' });
-      seen[code] = true;
-    }
-  });
-
-  const text = await fetchGbk('https://smartbox.gtimg.cn/s3/?q=' + encodeURIComponent(q) + '&t=all&c=1');
-  const m = /v_hint="([^"]*)"/.exec(text);
-  if (m && m[1] && m[1] !== 'N') {
-    m[1].split('^').forEach(function (row) {
-      const a = row.split('~');
-      if (a.length < 5) return;
-
-      const market = String(a[0] || '').toLowerCase();
-      const raw = String(a[1] || '');
-      const name = unescapeUnicode(a[2] || '');
-      const type = a[4] || '';
-
-      // 场外基金在内部统一用 6 位纯数字（走新浪估值），其余是「市场前缀 + 代码」
-      const code = (market === 'jj' || market === 'of' || type === 'KJ') ? raw : market + raw;
-
-      if (!isValidCode(code) || seen[code]) return;
-      seen[code] = true;
-      out.push({
-        code: code,
-        name: name || code,
-        market: market,
-        type: type,
-        typeLabel: TYPE_LABEL[type] || ''
-      });
-    });
-  }
-
-  return out.slice(0, 12);
-}
-
-/* ---------------- 新浪财经：腾讯接口全挂时的兜底 ---------------- */
-// 新浪只认 sh / sz / bj 前缀，港股美股它的 K 线接口返回 null
-function sinaSupported(code) {
-  return /^(sh|sz|bj)/i.test(code);
-}
-
-let sinaFallbackLogged = false;
-function noteSinaFallback() {
-  if (sinaFallbackLogged) return;
-  sinaFallbackLogged = true;
-  logLine('[quote]', '腾讯行情不可用，已切到新浪财经兜底');
-}
-
-// 新浪的 K 线是 JSONP：/*<script>...*/ x=([{...}])，把数组抠出来
-function parseSinaJsonp(text) {
-  const a = text.indexOf('[');
-  const b = text.lastIndexOf(']');
-  if (a < 0 || b <= a) return [];
-  try { return JSON.parse(text.slice(a, b + 1)); } catch (e) { return []; }
-}
-
-async function fetchSinaText(url) {
-  const res = await fetch(url, { headers: SINA_HEADERS });
-  if (!res.ok) throw new Error('HTTP ' + res.status);
-  return res.text();
-}
-
-// 当日分时 → 价格序列
-async function fetchSinaMinute(code) {
-  const url = 'https://quotes.sina.cn/cn/api/openapi.php/CN_MinlineService.getMinlineData?symbol=' +
-    encodeURIComponent(code) + '&scale=1&dpc=1';
-  const j = JSON.parse(await fetchSinaText(url));
-  const arr = (j && j.result && j.result.data) || [];
-  const pts = [];
-  for (let i = 0; i < arr.length; i++) {
-    const p = num(arr[i] && arr[i].p);
-    if (isFinite(p)) pts.push(p);
-  }
-  return pts;
-}
-
-// 新浪 K 线周期：240=日 1200=周 7200=月
-const SINA_SCALE = { day: 240, week: 1200, month: 7200 };
-
-// 转成和腾讯一致的 [日期, 开, 收, 高, 低, 量]，这样 closeSeries 不用改
-async function fetchSinaKline(code, interval, count) {
-  const scale = SINA_SCALE[interval] || SINA_SCALE.day;
-  const url = 'https://quotes.sina.cn/cn/api/jsonp_v2.php/x=/CN_MarketDataService.getKLineData?symbol=' +
-    encodeURIComponent(code) + '&scale=' + scale + '&ma=no&datalen=' + count;
-  const arr = parseSinaJsonp(await fetchSinaText(url));
-  if (!Array.isArray(arr)) return [];
-  return arr.map(function (o) {
-    return [o.day, o.open, o.close, o.high, o.low, o.volume];
-  });
-}
-
-// 当日分时（一次只能查一个 code）
-async function fetchMinuteSeries(code) {
-  // 东财特殊品种（美元指数等）和外盘期货：腾讯不支持分时，走东财 trends2
-  if (EM_SECID[code] || HF_EM_SECID[code]) {
-    const secid = EM_SECID[code] || HF_EM_SECID[code];
-    const url = 'https://push2.eastmoney.com/api/qt/stock/trends2/get?secid=' + secid +
-      '&fields1=f1,f2,f3,f4,f5,f6,f7,f8&fields2=f51,f52,f53,f54,f55&iscr=0&ndays=1';
-    const j = await fetchJson(url);
-    const trends = (j && j.data && j.data.trends) || [];
-    return trends.map(function (t) { return num(String(t).split(',')[1]); }).filter(isFinite);
-  }
-  if (process.env.TICKER_FORCE_SINA && sinaSupported(code)) {
-    try {
-      const alt = await fetchSinaMinute(code);
-      if (alt.length >= 2) return alt;
-    } catch (e) {}
-  }
-  try {
-    const j = await fetchTencentJson('/appstock/app/minute/query?code=' + encodeURIComponent(code));
-    const block = j && j.data && j.data[code];
-    const raw = block && block.data && block.data.data;
-    const pts = [];
-    if (Array.isArray(raw)) {
-      for (let i = 0; i < raw.length; i++) {
-        const p = num(String(raw[i]).trim().split(/\s+/)[1]);
-        if (isFinite(p)) pts.push(p);
-      }
-    }
-    if (pts.length >= 2 || !sinaSupported(code)) return pts;
-    // 腾讯给回空数据，再用新浪试一次
-    const alt = await fetchSinaMinute(code);
-    if (alt.length >= 2) { noteSinaFallback(); return alt; }
-    return pts;
-  } catch (e) {
-    if (!sinaSupported(code)) throw e;
-    const alt = await fetchSinaMinute(code);
-    if (alt.length) { noteSinaFallback(); return alt; }
-    throw e;
-  }
-}
-
-// K 线原始行：[日期, 开, 收, 高, 低, 量]
-// 美股走 usfqkline，其余走 fqkline
-async function fetchKlineRaw(code, interval, count) {
-  if (process.env.TICKER_FORCE_SINA && sinaSupported(code)) {
-    try {
-      const alt = await fetchSinaKline(code, interval, count);
-      if (alt.length) return alt;
-    } catch (e) {}
-  }
-  // 外盘期货：腾讯无 K 线，走新浪外盘日K；转成与腾讯一致的 [date,open,close,high,low,volume] 行格式
-  if (/^hf_/i.test(code)) {
-    const sym = code.slice(3).toUpperCase();
-    const url = 'https://stock2.finance.sina.com.cn/futures/api/openapi.php/GlobalFuturesService.getGlobalFuturesDailyKLine?symbol=' + sym;
-    const j = await fetchJson(url);
-    const rows = (j && j.result && j.result.data) || [];
-    return rows.map(function (r) {
-      return [String(r.date || r.day || ''), num(r.open), num(r.close), num(r.high), num(r.low), num(r.volume)];
-    }).filter(function (x) {
-      return isFinite(x[1]) && isFinite(x[2]) && isFinite(x[3]) && isFinite(x[4]);
-    }).slice(-count);
-  }
-  try {
-    const ep = code.slice(0, 2).toLowerCase() === 'us' ? 'usfqkline' : 'fqkline';
-    const url = '/appstock/app/' + ep + '/get?param=' +
-      code + ',' + interval + ',,,' + count + ',qfq';
-    const j = await fetchTencentJson(url);
-    const block = j && j.data && j.data[code];
-    const arr = block ? (block['qfq' + interval] || block[interval] || []) : [];
-    if (Array.isArray(arr) && arr.length) return arr;
-    if (!sinaSupported(code)) return [];
-    const alt = await fetchSinaKline(code, interval, count);
-    if (alt.length) { noteSinaFallback(); return alt; }
-    return [];
-  } catch (e) {
-    if (!sinaSupported(code)) throw e;
-    const alt = await fetchSinaKline(code, interval, count);
-    if (alt.length) { noteSinaFallback(); return alt; }
-    throw e;
-  }
-}
-
-function closeSeries(rows) {
-  const out = [];
-  for (let i = 0; i < rows.length; i++) {
-    const c = num(rows[i][2]);
-    if (isFinite(c)) out.push(c);
-  }
-  return out;
-}
-
-// 月线聚合成年线：每年最后一个月收盘价
-function yearlySeries(rows) {
-  const order = [];
-  const byYear = {};
-  for (let i = 0; i < rows.length; i++) {
-    const y = String(rows[i][0]).slice(0, 4);
-    const c = num(rows[i][2]);
-    if (!isFinite(c) || !/^\d{4}$/.test(y)) continue;
-    if (!(y in byYear)) order.push(y);
-    byYear[y] = c;
-  }
-  return order.map(function (y) { return byYear[y]; });
-}
-
-// 外盘期货（hf_）→ 东方财富 secid 映射（腾讯不提供外盘分时/K线）
-const HF_EM_SECID = {
-  hf_XAU: '122.XAU',   // 伦敦金（现货黄金）
-  hf_XAG: '122.XAG',   // 伦敦银（现货白银）
-  hf_GC: '101.GC00Y',  // COMEX 黄金
-  hf_SI: '101.SI00Y',  // COMEX 白银
-  hf_CL: '102.CL00Y',  // NYMEX WTI 原油
-  hf_OIL: '112.B00Y',  // 布伦特原油
-  hf_HG: '101.HG00Y',  // COMEX 铜
-  hf_NG: '102.NG00Y',  // NYMEX 天然气
-  hf_XPT: '102.PL00Y'  // NYMEX 铂金
-};
-
-async function fetchSeries(code, period) {
-  // 东财特殊品种（美元指数等）：走东财分时
-  if (EM_SECID[code] && period === 'minute') {
-    const url = 'https://push2.eastmoney.com/api/qt/stock/trends2/get?secid=' + EM_SECID[code] +
-      '&fields1=f1,f2,f3,f4,f5,f6,f7,f8&fields2=f51,f52,f53,f54,f55&iscr=0&ndays=1';
-    const j = await fetchJson(url);
-    const trends = (j && j.data && j.data.trends) || [];
-    return trends.map(function (t) { return num(String(t).split(',')[1]); }).filter(isFinite);
-  }
-  // 外盘期货（hf_ 前缀）：腾讯不提供分时/K线，走东方财富
-  if (/^hf_/i.test(code)) {
-    const secid = HF_EM_SECID[code];
-    if (secid && period === 'minute') {
-      // 当天分时：东财 trends2 接口
-      const url = 'https://push2.eastmoney.com/api/qt/stock/trends2/get?secid=' + secid +
-        '&fields1=f1,f2,f3,f4,f5,f6,f7,f8&fields2=f51,f52,f53,f54,f55&iscr=0&ndays=1';
-      const j = await fetchJson(url);
-      const trends = (j && j.data && j.data.trends) || [];
-      return trends.map(function (t) { return num(String(t).split(',')[1]); }).filter(isFinite);
-    }
-    // 日K：新浪外盘期货日K，只取最近 30 个交易日
-    const sym = code.slice(3).toUpperCase();
-    const url = 'https://stock2.finance.sina.com.cn/futures/api/openapi.php/GlobalFuturesService.getGlobalFuturesDailyKLine?symbol=' + sym;
-    const j = await fetchJson(url);
-    const rows = (j && j.result && j.result.data) || [];
-    return rows.slice(-30).map(function (r) { return num(r.close); }).filter(isFinite);
-  }
-  if (period === 'day') return closeSeries(await fetchKlineRaw(code, 'day', 120));
-  if (period === 'month') return closeSeries(await fetchKlineRaw(code, 'month', 120));
-  if (period === 'year') return yearlySeries(await fetchKlineRaw(code, 'month', 240));
-  return [];
-}
-
-/* ---- 场外基金（6 位纯数字代码）---- */
-
-function isFundCode(code) {
-  return /^\d{6}$/.test(String(code || ''));
-}
-
-// 盘中估值：新浪 fu_ 批量接口；货币基金等没有盘中估值的会返回空串
-async function fetchFundEstimates(codes) {
-  if (!codes.length) return {};
-  const url = 'https://hq.sinajs.cn/list=' + codes.map(function (c) { return 'fu_' + c; }).join(',');
-  const text = await fetchGbk(url, SINA_HEADERS);
-  const map = {};
-  text.split('\n').forEach(function (line) {
-    const m = line.match(/hq_str_fu_(\d{6})="([^"]*)"/);
-    if (!m) return;
-    const a = m[2].split(',');
-    if (a.length < 8 || !a[0]) return;
-    map[m[1]] = {
-      name: a[0],
-      time: a[1],
-      price: num(a[2]),
-      prevClose: num(a[3]),
-      pct: num(a[6]),
-      date: a[7]
-    };
-  });
-  return map;
-}
-
-// 历史净值：pingzhongdata 一次拿到全量日频单位净值
-const NAV_TTL = 30 * 60 * 1000;
-const navCache = {};
-
-async function fetchFundNav(code) {
-  const hit = navCache[code];
-  if (hit && Date.now() - hit.at < NAV_TTL) return hit;
-
-  const res = await fetch('https://fund.eastmoney.com/pingzhongdata/' + code + '.js', { headers: FUND_HEADERS });
-  if (!res.ok) throw new Error('HTTP ' + res.status);
-  const text = await res.text();
-
-  const nameM = text.match(/var\s+fS_name\s*=\s*"([^"]*)"/);
-  const nwM = text.match(/var\s+Data_netWorthTrend\s*=\s*(\[[\s\S]*?\]);/);
-
-  let rows = [];
-  if (nwM) {
-    try {
-      const arr = JSON.parse(nwM[1]);
-      rows = arr.map(function (r) { return [r.x, num(r.y)]; }).filter(function (r) { return isFinite(r[1]); });
-    } catch (e) {}
-  }
-
-  const out = {
-    at: Date.now(),
-    name: nameM ? nameM[1] : code,
-    rows: rows,
-    last: rows.length ? rows[rows.length - 1][1] : NaN,
-    prev: rows.length > 1 ? rows[rows.length - 2][1] : NaN
-  };
-  navCache[code] = out;
-  return out;
-}
-
-/* ---- 场外基金没有分钟行情：把每轮拿到的盘中估值按交易时间攒成当日分时 ----
-   净值序列是日频的（一天一个点），套到 240 分钟轴上只会画出左边一小段就停住，
-   所以分时改成自己攒：15 秒一个点，落盘到 cache/fund-minute.json，重启能接着画。 */
-
-const FUND_MINUTE_PATH = path.join(ROOT, 'cache', 'fund-minute.json');
-const fundMinute = {};               // code -> { date:'2026-10-23', pts:{ '分钟': 价格 } }
-let fundMinuteReady = false;
-let fundMinuteDirty = false;
-let fundMinuteTimer = null;
-
-function localYmd(d) {
-  return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
-}
-
-// A 股一天 240 个交易分钟：09:30-11:30 + 13:00-15:00，午休不占宽度。
-// 分钟之内再按 15 秒细分，刚启动半分钟内也能看出趋势。
-function minuteIndexOf(d) {
-  const t = d.getHours() * 60 + d.getMinutes();
-  const AM = 9 * 60 + 30, AM_END = 11 * 60 + 30, PM = 13 * 60, PM_END = 15 * 60;
-  let idx;
-  if (t <= AM) idx = 0;
-  else if (t <= AM_END) idx = t - AM;
-  else if (t < PM) idx = 120;
-  else if (t <= PM_END) idx = 120 + (t - PM);
-  else idx = 239;
-  const sec = Math.floor(d.getSeconds() / 15) * 15;
-  return Math.min(239.9, idx + sec / 60);
-}
-
-function loadFundMinute() {
-  if (fundMinuteReady) return;
-  fundMinuteReady = true;
-  try {
-    const raw = JSON.parse(fs.readFileSync(FUND_MINUTE_PATH, 'utf8'));
-    const today = localYmd(new Date());
-    Object.keys(raw).forEach(function (code) {
-      const it = raw[code];
-      // 只认当天的，昨天攒的留着也没用
-      if (it && it.date === today && it.pts) fundMinute[code] = it;
-    });
-  } catch (e) {}
-}
-
-function flushFundMinute() {
-  if (!fundMinuteDirty) return;
-  fundMinuteDirty = false;
-  try {
-    fs.mkdirSync(path.dirname(FUND_MINUTE_PATH), { recursive: true });
-    fs.writeFileSync(FUND_MINUTE_PATH, JSON.stringify(fundMinute));
-  } catch (e) {}
-}
-
-// 一轮轮询可能连着改好几支基金，合并成一次写盘；退出前由 before-quit 强制 flush
-function saveFundMinute(force) {
-  fundMinuteDirty = true;
-  if (force) { flushFundMinute(); return; }
-  if (fundMinuteTimer) return;
-  fundMinuteTimer = setTimeout(function () {
-    fundMinuteTimer = null;
-    flushFundMinute();
-  }, 4000);
-}
-
-function recordFundMinute(code, est) {
-  if (!est || !(est.price > 0)) return;
-  loadFundMinute();
-  const date = est.date || localYmd(new Date());
-  const key = minuteIndexOf(new Date()).toFixed(2);
-  let slot = fundMinute[code];
-  if (!slot || slot.date !== date) {
-    slot = { date: date, pts: {} };
-    fundMinute[code] = slot;
-    saveFundMinute(true);   // 换天先落一次，别把新数据留在内存里
-  }
-  if (slot.pts[key] === est.price) return;
-  slot.pts[key] = est.price;
-  saveFundMinute();
-}
-
-// 当日累积 → { values:[价格], x:[分钟位置] }
-function fundMinuteSeries(code) {
-  loadFundMinute();
-  const slot = fundMinute[code];
-  if (!slot) return { values: [], x: [] };
-  // 键是 '118.25' 这种定位字符串，排序要按数值、取值必须用原字符串键
-  const keys = Object.keys(slot.pts).sort(function (a, b) { return Number(a) - Number(b); });
-  return { values: keys.map(function (k) { return slot.pts[k]; }), x: keys.map(Number) };
-}
-
-// 日频净值序列 → 目标周期
-function fundSeriesForPeriod(rows, period) {
-  if (!rows.length) return [];
-  if (period === 'day') return rows.slice(-120).map(function (r) { return r[1]; });
-
-  const buckets = new Map();
-  for (let i = 0; i < rows.length; i++) {
-    const d = new Date(rows[i][0]);
-    const key = period === 'month' ? (d.getFullYear() * 100 + (d.getMonth() + 1)) : d.getFullYear();
-    buckets.set(key, rows[i][1]);
-  }
-  const vals = Array.from(buckets.values());
-  return period === 'year' ? vals.slice(-25) : vals.slice(-120);
-}
-
-function buildFundItem(code, est, nav) {
-  const out = {
-    code: code,
-    name: (est && est.name) || (nav && nav.name) || code,
-    price: NaN, prevClose: NaN, pct: NaN, change: NaN,
-    points: [], fund: true, ok: false
-  };
-
-  if (est) {
-    out.price = est.price;
-    out.prevClose = est.prevClose;
-    out.pct = est.pct;
-    out.estTime = est.time;
-  }
-  const period0 = config.period || 'minute';
-  if (period0 === 'minute') {
-    // 分时用本地攒的当日估值曲线（带 x 位置，按时间轴摆），不是日净值
-    const s = fundMinuteSeries(code);
-    out.points = s.values;
-    out.xIndex = s.x;
-  } else if (nav) {
-    out.points = fundSeriesForPeriod(nav.rows, period0);
-  }
-  if (nav) {
-    if (nav.name && !est) out.name = nav.name;
-    if (!isFinite(out.prevClose)) out.prevClose = nav.prev;
-    if (!isFinite(out.price)) out.price = nav.last;
-  }
-
-  if (!isFinite(out.pct) && isFinite(out.price) && isFinite(out.prevClose) && out.prevClose) {
-    out.pct = ((out.price - out.prevClose) / out.prevClose) * 100;
-  }
-  if (isFinite(out.price) && isFinite(out.prevClose)) out.change = out.price - out.prevClose;
-  // 和行情类一致：日/月/年线按折线区间算涨跌
-  if (nav && config.period !== 'minute') {
-    const rc = rangeChange(out.points);
-    if (isFinite(rc)) {
-      out.pct = rc;
-      if (isFinite(out.price) && isFinite(out.points[0])) {
-        out.change = out.price - out.points[0];
-      }
-      out.range = true;
-    }
-  }
-  out.ok = isFinite(out.price);
-  return out;
-}
-
-async function runPool(items, limit, fn) {
-  let idx = 0;
-  const n = Math.min(limit, items.length);
-  const workers = [];
-  for (let i = 0; i < n; i++) {
-    workers.push((async function () {
-      while (idx < items.length) {
-        const cur = idx++;
-        await fn(items[cur], cur);
-      }
-    })());
-  }
-  await Promise.all(workers);
-}
-
-// 折线所展示这段区间的涨跌幅（首点 → 末点）。
-// 分时不用它：分时按昨收算「今日涨跌」才符合习惯。
-function rangeChange(points) {
-  if (!points || points.length < 2) return NaN;
-  const first = points[0];
-  const last = points[points.length - 1];
-  if (!isFinite(first) || !isFinite(last) || !first) return NaN;
-  return ((last - first) / first) * 100;
-}
-
-function buildItem(code, snap, points) {
-  // 场内 ETF/LOF 价格精度 3-4 位小数，和场外基金一样显示 4 位
-  const isEtf = /^sh5\d{5}$/i.test(code) || /^sz1[56]\d{4}$/i.test(code);
-  const out = {
-    code: code, name: (snap && snap.name) || NAMES[code] || code,
-    price: NaN, prevClose: NaN, pct: NaN, change: NaN,
-    points: points || [], ok: false, fund: isEtf
-  };  if (snap) {
-    out.price = snap.price;
-    out.prevClose = snap.prevClose;
-    out.pct = snap.pct;
-    out.change = snap.change;
-  }
-  if (!isFinite(out.price) && out.points.length) out.price = out.points[out.points.length - 1];
-  if ((!isFinite(out.prevClose) || out.prevClose === 0) && out.points.length > 1) out.prevClose = out.points[out.points.length - 2];
-  if (!isFinite(out.pct) && isFinite(out.price) && isFinite(out.prevClose) && out.prevClose) {
-    out.pct = ((out.price - out.prevClose) / out.prevClose) * 100;
-  }
-  if (!isFinite(out.change) && isFinite(out.price) && isFinite(out.prevClose)) {
-    out.change = out.price - out.prevClose;
-  }
-  // 切到日/月/年线时，涨跌幅跟着换成"这条折线覆盖的区间"的涨跌，
-  // 否则折线变了、数字还停在今天的涨跌幅，看着就像没跟着周期走。
-  if (config.period !== 'minute') {
-    const rc = rangeChange(out.points);
-    if (isFinite(rc)) {
-      out.pct = rc;
-      if (isFinite(out.price) && isFinite(out.points[0])) {
-        out.change = out.price - out.points[0];
-      }
-      out.range = true;
-    }
-  }
-  out.ok = isFinite(out.price);
-  return out;
-}
-
-// 屏幕上实际的显示顺序。开了涨跌幅排序后跟 config.symbols 不一样，
-// 聚焦图表的序号和 ↑↓ 切换要照着这个走，否则高亮会乱跳。
-let displayCodes = [];
-
-// 按涨跌幅排：取数失败 / 没有涨跌幅的永远沉到最后，不跟着升序降序翻转
-function sortItems(items) {
-  const mode = config.sortMode;
-  if (mode !== 'pct-asc' && mode !== 'pct-desc') return items;
-  const dir = mode === 'pct-asc' ? 1 : -1;
-  return items
-    .map(function (it, i) {
-      return { it: it, i: i, v: (it && isFinite(it.pct)) ? it.pct : null };
-    })
-    .sort(function (a, b) {
-      if (a.v === null && b.v === null) return a.i - b.i;
-      if (a.v === null) return 1;
-      if (b.v === null) return -1;
-      if (a.v === b.v) return a.i - b.i;
-      return (a.v - b.v) * dir;
-    })
-    .map(function (s) { return s.it; });
-}
-
-async function fetchAll() {
-  const all = config.symbols.slice();
-  const period = config.period || 'minute';
-  const fundCodes = all.filter(isFundCode);
-  const quoteCodes = all.filter(function (c) { return !isFundCode(c); });
-
-  // 行情类：实时快照（一次请求拿全部）
-  let snap = {};
-  if (quoteCodes.length) {
-    try {
-      snap = await fetchSnapshots(quoteCodes);
-    } catch (e) {
-      snap = {};
-    }
-  }
-
-  // 场外基金：盘中估值（批量）
-  let funds = {};
-  if (fundCodes.length) {
-    try {
-      funds = await fetchFundEstimates(fundCodes);
-    } catch (e) {
-      funds = {};
-    }
-    // 每轮都把估值记进当日分时：这类基金没有分钟行情，曲线只能自己攒
-    Object.keys(funds).forEach(function (c) { recordFundMinute(c, funds[c]); });
-  }
-
-  // 行情类折线：分时 20s、K 线 60s 缓存
-  const now = Date.now();
-  const ttl = period === 'minute' ? MINUTE_TTL : KLINE_TTL;
-  if (now - seriesCache.at > ttl || seriesCache.period !== period) {
-    const map = {};
-    await runPool(quoteCodes, 4, async function (code) {
-      let pts = [];
-      try {
-        if (period === 'minute') {
-          pts = await fetchMinuteSeries(code);
-          // 美股指数等没有分时接口，退回日线，保证折线不空
-          if (pts.length < 2) pts = await fetchSeries(code, 'day');
-        } else {
-          pts = await fetchSeries(code, period);
-        }
-      } catch (e) {
-        const old = seriesCache.period === period ? seriesCache.map[code] : null;
-        pts = old || [];
-        // 同一个标的不要每次轮询都刷日志，只记第一次
-        if (!pts.length && !seriesFailLogged[code]) {
-          seriesFailLogged[code] = true;
-          logLine('[quote]', code + ' 折线取数失败：' + e.message);
-        }
-      }
-      map[code] = pts;
-      if (pts.length) seriesFailLogged[code] = false;
-    });
-    seriesCache = { at: now, map: map, period: period };
-  }
-
-  // 基金净值：pingzhongdata 自带 30 分钟缓存
-  const fundNav = {};
-  if (fundCodes.length) {
-    await runPool(fundCodes, 3, async function (code) {
-      try {
-        fundNav[code] = await fetchFundNav(code);
-      } catch (e) {
-        fundNav[code] = null;
-      }
-    });
-  }
-
-  const items = all.map(function (code) {
-    if (isFundCode(code)) return buildFundItem(code, funds[code], fundNav[code]);
-    return buildItem(code, snap[code], seriesCache.map[code] || []);
-  });
-  const sorted = sortItems(items);
-  displayCodes = sorted.map(function (it) { return it.code; });
-  return sorted;
-}
 
 /* ---------------- 窗口 ---------------- */
 
@@ -1633,166 +579,15 @@ function openSettings() {
 
 /* ---------------- 聚焦图表：单标的分时 / 5日 / 日K ---------------- */
 
-const FOCUS_TABS = ['minute', 'five', 'day'];
-const FOCUS_SESSION_A = 242;   // A 股一个交易日：09:30-11:30 + 13:00-15:00，含首尾共 242 个分钟点
-const FOCUS_SESSION_HK = 332;  // 港股：09:30-12:00 + 13:00-16:00
-const FOCUS_SESSION_US = 392;  // 美股：09:30-16:00（东部时间）
-const FOCUS_SESSION_HF = 1440; // 外盘期货/美元指数：近乎 24 小时连续交易（实际约 1380 分钟），留足余量
-const FOCUS_TTL = { minute: 15000, five: 60000, day: 60000 };
-
 // 聚焦不是另开窗口：直接把浮窗本身加宽加高，上面照旧是自选列表，下面挂图表。
 let focusOn = false;
 let focusCode = '';
 let focusTab = 'minute';
-let focusCache = {};
 let focusHotkeyAcc = '';
 let focusRestore = null;      // 展开前的窗口位置尺寸，收起时原样还原
 let focusChartW = 620;        // 图表栏宽度，拖窗口时自动记住（config.focusChartWidth）
 let focusLeftW = 320;         // 展开时左侧列表占的宽度 = 展开前的窗口宽度
 let skipResizeUntil = 0;      // 程序化改尺寸期间，别当成用户拖动落盘
-
-function sessionMinutes(code) {
-  if (/^hf_/i.test(code) || /^usDXY$/i.test(code)) return FOCUS_SESSION_HF;
-  if (/^hk/i.test(code)) return FOCUS_SESSION_HK;
-  if (/^us/i.test(code)) return FOCUS_SESSION_US;
-  return FOCUS_SESSION_A;
-}
-
-// 分时原始行：`0930 3714.48 3228780 5179731313.30`（时间 价格 累计量 累计额）
-// 累计量要差分回每分钟成交量；均价线用「价格×该分钟量」累加算 VWAP，
-// 不能用 累计额/累计量 —— 指数的量是手、额是元，除出来是市场平均股价，不是点位。
-function parseMinuteLines(lines) {
-  const pts = [];
-  let prevCum = 0, cumVol = 0, cumPV = 0;
-  for (let i = 0; i < lines.length; i++) {
-    const f = String(lines[i]).trim().split(/\s+/);
-    const t = f[0];
-    const p = num(f[1]);
-    const cum = num(f[2]);
-    if (!isFinite(p) || !/^\d{3,4}$/.test(t)) continue;
-    let v = isFinite(cum) ? cum - prevCum : 0;
-    if (!(v > 0)) v = 0;
-    if (isFinite(cum)) prevCum = cum;
-    cumVol += v;
-    cumPV += p * v;
-    pts.push({ t: t, price: p, vol: v, avg: cumVol > 0 ? cumPV / cumVol : p });
-  }
-  return pts;
-}
-
-async function buildFocusPayload(code, tab) {
-  const snapP = fetchSnapshots([code]).catch(function () { return {}; });
-  let name = NAMES[code] || code;
-  let price = NaN, pct = NaN, prevClose = NaN, change = NaN;
-  let days = [];
-  let candles = [];
-  let session = sessionMinutes(code);
-
-  if (tab === 'day') {
-    const rows = await fetchKlineRaw(code, 'day', 160);
-    candles = rows.map(function (r) {
-      return { d: String(r[0]), o: num(r[1]), c: num(r[2]), h: num(r[3]), l: num(r[4]), v: num(r[5]) };
-    }).filter(function (x) { return isFinite(x.c) && isFinite(x.o) && isFinite(x.h) && isFinite(x.l); });
-    if (candles.length) {
-      const last = candles[candles.length - 1];
-      price = last.c;
-      if (candles.length > 1) prevClose = candles[candles.length - 2].c;
-      if (!isFinite(prevClose) || prevClose === 0) prevClose = last.o;
-      pct = ((price - prevClose) / prevClose) * 100;
-      change = price - prevClose;
-    }
-  } else if (tab === 'five') {
-    const j = await fetchTencentJson('/appstock/app/day/query?code=' + encodeURIComponent(code));
-    const block = j && j.data && j.data[code];
-    const arr = (block && block.data) || [];
-    // 接口按「今天 → 前 4 天」倒序给，画图要正序
-    const list = arr.slice().sort(function (a, b) {
-      return String(a.date).localeCompare(String(b.date));
-    });
-    days = list.map(function (d) {
-      const pts = parseMinuteLines(d.data || []);
-      return { date: String(d.date || ''), prec: num(d.prec), points: pts };
-    }).filter(function (d) { return d.points.length > 1; });
-    if (days.length) {
-      const lastDay = days[days.length - 1];
-      const lastPt = lastDay.points[lastDay.points.length - 1];
-      price = lastPt.price;
-      prevClose = lastDay.prec;
-      if (!isFinite(prevClose) || !prevClose) prevClose = days[0].points[0].price;
-      pct = ((price - prevClose) / prevClose) * 100;
-      change = price - prevClose;
-    }
-  } else {
-    // 外盘期货 / 美元指数：腾讯没有分时，走东财 trends2（与主浮窗一致）
-    const emSecid = EM_SECID[code] || HF_EM_SECID[code];
-    if (emSecid) {
-      const url = 'https://push2.eastmoney.com/api/qt/stock/trends2/get?secid=' + emSecid +
-        '&fields1=f1,f2,f3,f4,f5,f6,f7,f8&fields2=f51,f52,f53,f54,f55&iscr=0&ndays=1';
-      const j = await fetchJson(url);
-      const trends = (j && j.data && j.data.trends) || [];
-      // trends 行：时间,价,涨跌额,涨跌幅,当日累计量 → 累计量差分回每分钟量
-      const pts = [];
-      let prevCum = 0;
-      for (const t of trends) {
-        const f = String(t).split(',');
-        const p = num(f[1]);
-        if (!isFinite(p)) continue;
-        const cum = num(f[4]);
-        let v = isFinite(cum) ? cum - prevCum : 0;
-        if (v < 0) v = 0;
-        if (isFinite(cum)) prevCum = cum;
-        pts.push({ t: f[0], price: p, vol: v });
-      }
-      if (pts.length > 1) {
-        days = [{ date: String((j.data && j.data.date) || ''), prec: NaN, points: pts }];
-        const lastPt = pts[pts.length - 1];
-        price = lastPt.price;
-        // trends2 里没有昨收列，prevClose/pct/change 交给下方 snap 快照填充
-      }
-    } else {
-      const j = await fetchTencentJson('/appstock/app/minute/query?code=' + encodeURIComponent(code));
-      const block = j && j.data && j.data[code];
-      const lines = (block && block.data && block.data.data) || [];
-      const qt = (block && block.qt && block.qt[code]) || [];
-      const pts = parseMinuteLines(lines);
-      if (pts.length > 1) {
-        days = [{ date: String((block.data && block.data.date) || ''), prec: num(qt[4]), points: pts }];
-        const lastPt = pts[pts.length - 1];
-        price = lastPt.price;
-        prevClose = num(qt[4]);
-        pct = num(qt[32]);
-        change = num(qt[31]);
-        if (qt[1]) name = qt[1];
-        if (!isFinite(prevClose) || !prevClose) prevClose = pts[0].price;
-        if (!isFinite(pct)) pct = ((price - prevClose) / prevClose) * 100;
-      }
-    }
-  }
-
-  const snap = await snapP;
-  if (snap && snap[code]) {
-    if (snap[code].name) name = snap[code].name;
-    if (!isFinite(price) && isFinite(snap[code].price)) price = snap[code].price;
-    if (!isFinite(prevClose) && isFinite(snap[code].prevClose)) prevClose = snap[code].prevClose;
-    if (!isFinite(pct) && isFinite(snap[code].pct)) pct = snap[code].pct;
-  }
-
-  const hasData = tab === 'day' ? candles.length > 1 : days.length > 0;
-  return {
-    code: code, name: name, tab: tab, session: session,
-    price: price, pct: pct, prevClose: prevClose, change: change,
-    days: days, candles: candles, hasData: hasData, at: Date.now()
-  };
-}
-
-async function focusPayload(code, tab) {
-  const key = code + '|' + tab;
-  const hit = focusCache[key];
-  if (hit && Date.now() - hit.at < FOCUS_TTL[tab]) return hit.data;
-  const data = await buildFocusPayload(code, tab);
-  focusCache[key] = { at: Date.now(), data: data };
-  return data;
-}
 
 // 聚焦时上下键翻的就是左列显示的那几行（config.symbols），
 // 而不是背后更长的 watchlist —— 否则高亮行会跟着跑到看不见的地方
@@ -1803,16 +598,17 @@ function focusList() {
     : ((config.watchlist && config.watchlist.length) ? config.watchlist.slice() : []);
   // 开了涨跌幅排序时，↑↓ 和「第几个/共几个」要跟着屏幕上的顺序走。
   // 只在两份清单是同一批标的时才替换，避免刚改完自选、行情还没刷新时错位。
+  const displayCodes = quoteService.getDisplayCodes();
   if (displayCodes.length === base.length &&
       displayCodes.every(function (c) { return base.indexOf(c) >= 0; })) {
-    return displayCodes.slice();
+    return displayCodes;
   }
   return base;
 }
 
 function focusMeta() {
   const list = focusList();
-  const hit = focusCache[focusCode + '|' + focusTab];
+  const hit = focusService.peek(focusCode, focusTab);
   return {
     on: focusOn,
     code: focusCode,
@@ -1821,7 +617,7 @@ function focusMeta() {
     list: list,
     index: list.indexOf(focusCode),
     total: list.length,
-    name: (hit && hit.data && hit.data.name) || NAMES[focusCode] || focusCode,
+    name: (hit && hit.name) || NAMES[focusCode] || focusCode,
     hotkey: focusHotkeyAcc,
     leftW: Math.round(focusLeftW),
     chartW: focusChartW
@@ -2333,7 +1129,7 @@ function setAndBroadcast(patch, clearCache) {
     const h = win.getSize()[1];
     win.setSize(w, h);
   }
-  if (clearCache) seriesCache = { at: 0, map: {}, period: null };
+  if (clearCache) quoteService.resetSeriesCache();
 
   // 从手动切回自动：先沿用刚才那个配色，等采样回来再修正，
   // 免得「点了自动」先跳成历史配色再跳回来。
@@ -2472,7 +1268,6 @@ ipcMain.on('save-config', function (e, patch) {
 let alertTimer = null;
 let firedKey = '';
 
-function pad2(n) { return (n < 10 ? '0' : '') + n; }
 
 // 判断今天是不是交易日：看上证指数快照里的时间戳是不是今天
 async function isTradingToday() {
@@ -2728,11 +1523,6 @@ function startScheduledTradingCheck() {
 
 /* ---------------- 设置面板 ---------------- */
 
-function isValidCode(c) {
-  if (typeof c !== 'string') return false;
-  return /^(sh|sz|bj|hk|us|hf)[a-z0-9._]{1,12}$/i.test(c) || /^\d{6}$/.test(c);
-}
-
 ipcMain.handle('settings-get', async function () {
   const codes = [];
   (config.watchlist || []).forEach(function (c) { if (codes.indexOf(c) < 0) codes.push(c); });
@@ -2820,77 +1610,13 @@ ipcMain.handle('search-symbol', async function (e, q) {
 });
 
 ipcMain.handle('settings-save', async function (e, patch) {
-  if (!patch || typeof patch !== 'object') return { ok: false, msg: '数据无效' };
+  const result = applySettingsPatch(config, patch);
+  if (!result.ok) return result;
 
-  const symbols = (Array.isArray(patch.symbols) ? patch.symbols : []).filter(isValidCode);
-  if (symbols.length === 0) return { ok: false, msg: '至少要勾选一个标的' };
+  setAndBroadcast(result.patch, true);
 
-  const watchlist = (Array.isArray(patch.watchlist) ? patch.watchlist : []).filter(isValidCode);
-  symbols.forEach(function (c) { if (watchlist.indexOf(c) < 0) watchlist.push(c); });
-
-  const period = PERIODS.indexOf(patch.period) >= 0 ? patch.period : config.period;
-
-  let interval = parseInt(patch.interval, 10);
-  if (!isFinite(interval)) interval = config.interval;
-  interval = Math.max(1000, Math.min(60000, interval));
-
-  let width = parseInt(patch.width, 10);
-  if (!isFinite(width)) width = config.width;
-  width = Math.max(220, Math.min(640, width));
-
-  let backdropOpacity = parseInt(patch.backdropOpacity, 10);
-  if (!isFinite(backdropOpacity)) backdropOpacity = config.backdropOpacity;
-  backdropOpacity = Math.max(0, Math.min(95, backdropOpacity));
-
-  let probeIntervalMs = parseInt(patch.probeIntervalMs, 10);
-  if (!isFinite(probeIntervalMs)) probeIntervalMs = config.probeIntervalMs;
-  probeIntervalMs = Math.max(1000, Math.min(15000, probeIntervalMs));
-
-  const alertCfg = {
-    enabled: !(patch.alert && patch.alert.enabled === false),
-    time: (patch.alert && /^\d{2}:\d{2}$/.test(patch.alert.time)) ? patch.alert.time : config.alert.time
-  };
-
-  const autoExitCfg = {
-    enabled: !!(patch.autoExit && patch.autoExit.enabled),
-    time: (patch.autoExit && /^\d{2}:\d{2}$/.test(patch.autoExit.time)) ? patch.autoExit.time : config.autoExit.time
-  };
-
-  const autoStartCfg = {
-    enabled: !!(patch.autoStart && patch.autoStart.enabled),
-    time: (patch.autoStart && /^\d{2}:\d{2}$/.test(patch.autoStart.time)) ? patch.autoStart.time : config.autoStart.time
-  };
-
-  const shortcuts = normalizeShortcuts(patch.shortcuts);
-  // 配色：auto 跟随背景；light / dark 是用户手动兜底。
-  // 自动判定失灵（截屏拿不到画面、纯黑桌面、远程桌面）时，这里是唯一的退路。
-  const textMode = TEXT_MODES.indexOf(patch.textMode) >= 0 ? patch.textMode : config.textMode;
   // 聚焦图表快捷键变了，重新注册全局快捷键（可能在保存时注册失败，日志可见）
-  if (shortcuts.focus !== (config.shortcuts || {}).focus) {
-    config.shortcuts = config.shortcuts || {};
-    config.shortcuts.focus = shortcuts.focus;
-    registerFocusHotkey();
-  }
-
-  setAndBroadcast({
-    symbols: symbols,
-    watchlist: watchlist,
-    period: period,
-    interval: interval,
-    textMode: textMode,
-    backdrop: !!patch.backdrop,
-    backdropOpacity: backdropOpacity,
-    probeIntervalMs: probeIntervalMs,
-    showName: patch.showName !== false,
-    baseline: patch.baseline !== false,
-    alwaysOnTop: !!patch.alwaysOnTop,
-    locked: !!patch.locked,
-    width: width,
-    alert: alertCfg,
-    autoExit: autoExitCfg,
-    autoStart: autoStartCfg,
-    shortcuts: shortcuts
-  }, true);
+  if (result.effects.reRegisterHotkey) registerFocusHotkey();
 
   // 轮询间隔改了，重启定时器让新值立即生效
   startBackgroundProbe();
@@ -2898,15 +1624,15 @@ ipcMain.handle('settings-save', async function (e, patch) {
   // 自启跟着保存动作同步：开了就装/更新计划任务，关了就把任务删掉
   let taskMsg = '';
   const taskOk = await new Promise(function (res) {
-    applyAutoStart(autoStartCfg.enabled, autoStartCfg.time, res);
+    applyAutoStart(result.patch.autoStart.enabled, result.patch.autoStart.time, res);
   });
   if (!taskOk) taskMsg = '，但写入计划任务失败（可尝试用管理员身份运行一次）';
-  taskInstalledCache = autoStartCfg.enabled && taskOk;
+  taskInstalledCache = result.patch.autoStart.enabled && taskOk;
 
   // 收盘退出时间/开关改了，定时器要按新配置重算
   sessionDay = todayKey();
-  const exitAt = minutesOf(autoExitCfg.time);
-  sessionAfterClose = !!(autoExitCfg.enabled && exitAt != null && nowMinutes() >= exitAt);
+  const exitAt = minutesOf(result.patch.autoExit.time);
+  sessionAfterClose = !!(result.patch.autoExit.enabled && exitAt != null && nowMinutes() >= exitAt);
 
   return { ok: true, msg: taskMsg };
 });
@@ -2919,7 +1645,7 @@ ipcMain.handle('focus-state', function () { return focusMeta(); });
 
 ipcMain.handle('focus-data', async function () {
   try {
-    const data = await focusPayload(focusCode, focusTab);
+    const data = await focusService.payload(focusCode, focusTab);
     return Object.assign({ ok: true }, data);
   } catch (e) {
     logLine('[focus]', '取数失败 ' + focusCode + ' (' + focusTab + ')：' + e.message);
@@ -3331,7 +2057,7 @@ app.on('window-all-closed', function () {
 app.on('before-quit', function () {
   logLine('[before-quit]', '准备退出');
   saveConfig();
-  flushFundMinute();   // 兜住最后几秒还没落盘的估值点
+  fundStore.dispose();   // 兜住最后几秒还没落盘的估值点
 });
 
 app.on('will-quit', function () {

@@ -71,6 +71,23 @@ npm start
 
 Windows 用户装好依赖后，直接双击 `start.cmd` 也行。
 
+### 测试
+
+```bash
+npm test        # Node 内置 test runner：core / data 模块的单元测试，不需要 Electron 或网络
+npm run check   # 语法检查（electron/、scripts/、test/）
+npm run smoke   # 启动真实 Electron 冒烟：主窗口 / 设置 / A 股聚焦 / 外盘聚焦
+```
+
+`npm run smoke` 会为每个场景创建独立的临时 `--user-data-dir`，不会影响正在运行的实例和 `%APPDATA%\mini-ticker`。脚本检查进程退出码、截图大小和日志里有没有渲染/接线错误；想保留截图和日志排查问题，用：
+
+```bash
+TICKER_SMOKE_KEEP=1 npm run smoke        # bash
+$env:TICKER_SMOKE_KEEP=1; npm run smoke  # PowerShell
+```
+
+冒烟依赖本机 Electron，目前只在 Windows 上跑，未接入 CI。CI 在 GitHub Actions 上跑 Ubuntu + Windows、Node 20，只执行 `check` 和 `test`，配置见 `.github/workflows/ci.yml`。
+
 ### 自己打包
 
 ```bash
