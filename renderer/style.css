@@ -454,7 +454,8 @@ body.focus .row:hover .name { color: var(--text); }
   flex: 1 1 auto;
   min-height: 0;
   position: relative;
-  padding: 0 4px 2px;
+  /* 只留 2px 给线条外发光，再多就是从绘图区身上抠肉 */
+  padding: 0 2px 1px;
 }
 
 #chart svg { display: block; }

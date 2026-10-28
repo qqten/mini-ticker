@@ -70,6 +70,13 @@
     chartEl.innerHTML = '<div class="empty">' + msg + '</div>';
   }
 
+  // 横轴文字：靠边的换成 start/end 锚点贴到边上，否则会被面板边缘切掉半截
+  function axisLabel(x, y, str, W, color) {
+    if (x > W - 18) return txt(W - TICK_INSET, y, str, 'end', color);
+    if (x < 18) return txt(TICK_INSET, y, str, 'start', color);
+    return txt(x, y, str, 'middle', color);
+  }
+
   function shortDate(d) {
     var s = String(d || '');
     if (/^\d{8}$/.test(s)) return s.slice(4, 6) + '-' + s.slice(6, 8);
@@ -201,11 +208,22 @@
 
   /* ---------------- 版面 ---------------- */
 
+  var TICK_PAD = 9;   // 绘图区左右最小内缩：刻度文字就画在这条缝上（贴面板边）
+  var TICK_INSET = 3; // 刻度文字距面板左/右边缘的像素
+
   function geom(withMacd) {
-    var box = chartEl.getBoundingClientRect();
-    var W = Math.max(260, Math.round(box.width) - 10);
-    var H = Math.max(120, Math.round(box.height) - 2);
-    var padL = 54, padR = 44, padT = 6, axisH = 16, gap = 7;
+    // 内边距从样式里读，宽度就是真实可用宽度，不再用写死的 -10 去猜
+    var cs = getComputedStyle(chartEl);
+    function px(k) { return parseFloat(cs[k]) || 0; }
+    var W = Math.max(260, Math.round(chartEl.clientWidth - px('paddingLeft') - px('paddingRight')));
+    var H = Math.max(120, Math.round(chartEl.clientHeight - px('paddingTop') - px('paddingBottom')));
+
+    // 刻度贴边：文字直接画在绘图区上、贴着面板左右边，只留一条 9px 的缝。
+    // 以前写死 padL=54 / padR=44 装刻度，面板只有 300 多像素时两边吃掉三分之一。
+    var padL = TICK_PAD;
+    var padR = TICK_PAD;
+
+    var padT = 6, axisH = 16, gap = 7;
     var body = H - padT - axisH - gap * (withMacd ? 2 : 1);
     var volH = Math.round(body * (withMacd ? 0.2 : 0.24));
     var macdH = withMacd ? Math.round(body * 0.22) : 0;
@@ -243,7 +261,6 @@
     if (!days.length) return empty('暂无分时数据');
     var T = theme();
 
-    var g = geom(false);
     var session = p.session || 242;
     var total = session * days.length;
     var pts = [];
@@ -276,6 +293,14 @@
     var padY = (hi - lo) * 0.08;
     lo -= padY;
     hi += padY;
+
+    // 右侧涨跌幅刻度：和左边价格刻度是同一个 hi/lo，先算好，等下一起画
+    var lastPrec = p.prevClose;
+    var pctTicks = [];
+    if (isNum(lastPrec) && lastPrec > 0) {
+      pctTicks = [fPct(((hi - lastPrec) / lastPrec) * 100), fPct(((lo - lastPrec) / lastPrec) * 100)];
+    }
+    var g = geom(false);
 
     var X = function (i) { return g.padL + (i / (total - 1)) * g.plotW; };
     var Y = function (v) { return g.priceBot - ((v - lo) / (hi - lo)) * g.priceH; };
@@ -324,18 +349,17 @@
     s.push('<polyline points="' + linePts.join(' ') + '" fill="none" stroke="' + T.line +
       '" stroke-width="1.3" stroke-linejoin="round"/>');
 
-    // 价格刻度（左）
-    s.push(txt(g.padL - 6, g.priceTop + 9, fx(hi), 'end', T.sub));
-    s.push(txt(g.padL - 6, g.priceBot - 1, fx(lo), 'end', T.sub));
+    // 价格刻度（左）：贴在面板左边缘，画在图上
+    s.push(txt(TICK_INSET, g.priceTop + 9, fx(hi), 'start', T.sub));
+    s.push(txt(TICK_INSET, g.priceBot - 1, fx(lo), 'start', T.sub));
 
     // 涨跌幅刻度（右）
-    var lastPrec = p.prevClose;
-    if (isNum(lastPrec) && lastPrec > 0) {
-      s.push(txt(g.W - g.padR + 6, g.priceTop + 9, fPct(((hi - lastPrec) / lastPrec) * 100), 'start', T.sub));
-      s.push(txt(g.W - g.padR + 6, g.priceBot - 1, fPct(((lo - lastPrec) / lastPrec) * 100), 'start', T.sub));
+    if (pctTicks.length) {
+      s.push(txt(g.W - TICK_INSET, g.priceTop + 9, pctTicks[0], 'end', T.sub));
+      s.push(txt(g.W - TICK_INSET, g.priceBot - 1, pctTicks[1], 'end', T.sub));
       var y0 = Y(lastPrec);
       if (y0 > g.priceTop + 16 && y0 < g.priceBot - 6) {
-        s.push(txt(g.W - g.padR + 6, y0 + 3, '0%', 'start', T.sub));
+        s.push(txt(g.W - TICK_INSET, y0 + 3, '0%', 'end', T.sub));
       }
     }
 
@@ -346,7 +370,7 @@
     if (days.length > 1) {
       for (var q = 0; q < days.length; q++) {
         var cx = X(q * session + Math.floor(session / 2));
-        s.push(txt(cx, g.axisY, shortDate(days[q].date), 'middle', T.sub));
+        s.push(axisLabel(cx, g.axisY, shortDate(days[q].date), g.W, T.sub));
       }
     } else {
       var ticks = sessionTicks(p.code, session);
@@ -391,7 +415,6 @@
     }
     var n = rows.length;
 
-    var g = geom(true);
     var hi = -Infinity, lo = Infinity, maxV = 0, maxM = 0, sumV = 0;
     for (var k = 0; k < n; k++) {
       var r = rows[k];
@@ -406,6 +429,9 @@
     var padY = (hi - lo) * 0.06;
     hi += padY;
     lo -= padY;
+
+    // 日K 右边没有刻度，padR 只剩最小空隙，K 线能一路铺到右边缘
+    var g = geom(true);
 
     var step = g.plotW / n;
     var cw = Math.max(1.2, Math.min(14, step * 0.62));
@@ -486,8 +512,8 @@
     macdLine('dea', T.avg);
 
     // 刻度
-    s.push(txt(g.padL - 6, g.priceTop + 9, fx(hi), 'end', T.sub));
-    s.push(txt(g.padL - 6, g.priceBot - 1, fx(lo), 'end', T.sub));
+    s.push(txt(TICK_INSET, g.priceTop + 9, fx(hi), 'start', T.sub));
+    s.push(txt(TICK_INSET, g.priceBot - 1, fx(lo), 'start', T.sub));
     s.push(txt(g.padL + 2, g.volTop + 9, '量 ' + fVol(sumV), 'start', T.sub, 9));
     s.push(txt(g.padL + 2, g.macdTop + 8, 'MACD(12,26,9)', 'start', T.sub, 8.5));
 
@@ -500,7 +526,7 @@
     var cnt = n >= 5 ? 5 : n;
     for (var t = 0; t < cnt; t++) {
       var idx = cnt === 1 ? 0 : Math.round((t * (n - 1)) / (cnt - 1));
-      s.push(txt(Xc(idx), g.axisY, shortDate(rows[idx].d), 'middle', T.sub));
+      s.push(axisLabel(Xc(idx), g.axisY, shortDate(rows[idx].d), g.W, T.sub));
     }
 
     s.push(crosshairSvg(g));
