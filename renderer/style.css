@@ -384,7 +384,8 @@ body.focus .row:hover .name { color: var(--text); }
 }
 
 #f-name {
-  max-width: 38%;
+  /* 数字和序号都挪走后票名有地方了，只在真的长到顶到周期按钮时才省略 */
+  max-width: 66%;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
@@ -393,31 +394,7 @@ body.focus .row:hover .name { color: var(--text); }
   letter-spacing: .3px;
 }
 
-#f-point {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text);
-  font-variant-numeric: tabular-nums;
-  font-feature-settings: "tnum";
-}
-
-#f-chg, #f-pct {
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-  font-feature-settings: "tnum";
-}
-
-/* 涨跌色要单独提权：上面给 #f-chg 设了颜色，.up/.down 是类选择器压不过 id */
-#f-chg.up, #f-pct.up { color: var(--up); }
-#f-chg.down, #f-pct.down { color: var(--down); }
-#f-chg.flat, #f-pct.flat { color: var(--flat); }
-
-#f-pos {
-  margin-left: 2px;
-  opacity: .5;
-  font-variant-numeric: tabular-nums;
-}
-
+/* 头部只剩票名，周期按钮靠 margin-left:auto 顶到右边 */
 #f-tabs {
   margin-left: auto;
   display: flex;

@@ -13,10 +13,6 @@
   var panel = document.getElementById('focus');
   var chartEl = document.getElementById('chart');
   var elName = document.getElementById('f-name');
-  var elPoint = document.getElementById('f-point');
-  var elChg = document.getElementById('f-chg');
-  var elPct = document.getElementById('f-pct');
-  var elPos = document.getElementById('f-pos');
   var tabsEl = document.getElementById('f-tabs');
   var appEl = document.getElementById('app');
   // 上一次点亮的是哪一行：用来判断「换标的了」，只在这时把行滚进视野
@@ -33,8 +29,6 @@
     if (!isNum(v)) return '--';
     return v.toFixed(Math.abs(v) < 10 ? 4 : 2);
   }
-  function clsOf(v) { return !isNum(v) ? 'flat' : v > 0 ? 'up' : v < 0 ? 'down' : 'flat'; }
-
   function fVol(v) {
     if (!isNum(v)) return '--';
     if (v >= 1e8) return (v / 1e8).toFixed(2) + '亿';
@@ -538,13 +532,9 @@
   /* ---------------- 头部与行高亮 ---------------- */
 
   function paintHead(p) {
+    // 头部只留票名：价格和涨跌幅在左边列表的当前行已经亮着，
+    // 再写一遍既重复又把票名挤成「沪…」
     elName.textContent = p.name || p.code || state.name || '--';
-    elPoint.textContent = fPrice(p.price);
-    elChg.textContent = fChg(p.change);
-    elChg.className = 'chg ' + clsOf(p.change);
-    elPct.textContent = fPct(p.pct);
-    elPct.className = 'pct ' + clsOf(p.pct);
-    elPos.textContent = (state.index >= 0 ? state.index + 1 : '-') + '/' + (state.total || 0);
   }
 
   function paintTabs(tab) {
@@ -641,7 +631,6 @@
       chartEl.innerHTML = '';
       return;
     }
-    elPos.textContent = (s.index >= 0 ? s.index + 1 : '-') + '/' + (s.total || 0);
     // 只是窗口尺寸变了（同标的同周期）就别重新取数，按新宽度重画即可
     if (was && sameTarget && payload) {
       render();
