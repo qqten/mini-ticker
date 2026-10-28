@@ -1384,6 +1384,26 @@ function createWindow() {
         }, 4300);
       }
 
+      // 调试：TICKER_SHOT_ZOOM=4 在聚焦图表上连续向上滚，验证「滚轮缩放」
+      if (process.env.TICKER_SHOT_ZOOM) {
+        setTimeout(async function () {
+          if (!win || win.isDestroyed()) return;
+          const times = Math.max(1, Math.min(20, parseInt(process.env.TICKER_SHOT_ZOOM, 10) || 2));
+          try {
+            const r = await win.webContents.executeJavaScript(
+              "(function(){var c=document.getElementById('chart');if(!c)return 'no-chart';" +
+              "var b=c.getBoundingClientRect();if(!b.width)return 'no-box';" +
+              "var x=b.x+b.width*0.6,y=b.y+b.height*0.35;" +
+              "for(var i=0;i<" + times + ";i++){" +
+              "c.dispatchEvent(new WheelEvent('wheel',{bubbles:true,cancelable:true,deltaY:-120,clientX:x,clientY:y}));}" +
+              "var z=document.getElementById('f-zoom');" +
+              "return (z&&z.textContent?z.textContent:'-')+' | rect='+c.querySelectorAll('svg rect').length;})()"
+            );
+            logLine('[shot]', '滚轮放大 x' + times + ' → ' + r);
+          } catch (e) { logLine('[shot]', '缩放测试失败 ' + e.message); }
+        }, 5000);
+      }
+
       // 调试：TICKER_SHOT_SORT=1 点几下排序按钮，验证排序真的生效
       if (process.env.TICKER_SHOT_SORT) {
         setTimeout(async function () {

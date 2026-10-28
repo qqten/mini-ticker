@@ -394,6 +394,24 @@ body.focus .row:hover .name { color: var(--text); }
   letter-spacing: .3px;
 }
 
+/* 缩放倍率：只在滚轮缩放过之后出现，双击图表还原 */
+#f-zoom {
+  flex: 0 0 auto;
+  display: none;
+  font-size: 9.5px;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: 3px;
+  color: var(--sub);
+  background: rgba(255, 255, 255, .07);
+  font-variant-numeric: tabular-nums;
+}
+
+#f-zoom.on { display: inline-block; }
+
+/* 浅色桌面上白底方块看不见，换成淡淡的一层深色 */
+body[data-text="dark"] #f-zoom { background: rgba(24, 32, 44, .09); }
+
 /* 头部只剩票名，周期按钮靠 margin-left:auto 顶到右边 */
 #f-tabs {
   margin-left: auto;

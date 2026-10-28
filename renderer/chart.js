@@ -13,10 +13,19 @@
   var panel = document.getElementById('focus');
   var chartEl = document.getElementById('chart');
   var elName = document.getElementById('f-name');
+  var elZoom = document.getElementById('f-zoom');
   var tabsEl = document.getElementById('f-tabs');
   var appEl = document.getElementById('app');
   // 上一次点亮的是哪一行：用来判断「换标的了」，只在这时把行滚进视野
   var lastActive = '';
+
+  /* 缩放窗口：s/e 是整幅横向的归一化区间，0..1 就是全部铺满。
+     滚轮以光标为不动点收缩/展开，纵轴跟着可见数据重新拟合；
+     换标的、换周期、双击图表都会回到 0..1。 */
+  var view = { s: 0, e: 1 };
+  function resetView() { view.s = 0; view.e = 1; }
+  function zoomRatio() { return 1 / Math.max(1e-6, view.e - view.s); }
+  function isZoomed() { return view.e - view.s < 0.999; }
 
   /* ---------------- 小工具 ---------------- */
 
@@ -84,6 +93,17 @@
     return m ? m[1] + ':' + m[2] : s;
   }
 
+  // pts 按 x 有序，二分找离目标索引最近的那个点（缩放后画横轴标签用）
+  function nearestPt(pts, i) {
+    var a = 0, b = pts.length - 1;
+    while (a < b) {
+      var mid = (a + b) >> 1;
+      if (pts[mid].x < i) a = mid + 1; else b = mid;
+    }
+    var p1 = pts[Math.max(0, a - 1)], p2 = pts[Math.min(pts.length - 1, a)];
+    return Math.abs(p1.x - i) <= Math.abs(p2.x - i) ? p1 : p2;
+  }
+
   /* ---------------- 十字光标数值提示 ---------------- */
 
   var tipCtx = null;   // 当前图的数据/坐标上下文，由 render 末尾赋值
@@ -136,12 +156,9 @@
   function tipMinute(c, sx, sy) {
     if (sx < c.g.padL || sx > c.g.padL + c.g.plotW) return null;
     if (sy < c.g.priceTop || sy > c.g.volBot) return null;
-    var i = Math.round((sx - c.g.padL) / c.g.plotW * (c.total - 1));
-    i = Math.max(0, Math.min(c.pts.length - 1, i));
-    var best = c.pts[0];
-    for (var k = 0; k < c.pts.length; k++) {
-      if (Math.abs(c.pts[k].x - i) < Math.abs(best.x - i)) best = c.pts[k];
-    }
+    var i = c.xs + ((sx - c.g.padL) / c.g.plotW) * (c.xe - c.xs);
+    i = Math.max(0, Math.min(c.total - 1, i));
+    var best = nearestPt(c.pts, i);
     var dIdx = Math.floor(best.x / c.session);
     var t = fmtTime(best.t || '');
     var date = c.days[dIdx] ? shortDate(c.days[dIdx].date) : '';
@@ -163,8 +180,8 @@
   function tipDay(c, sx, sy) {
     if (sx < c.g.padL || sx > c.g.padL + c.g.plotW) return null;
     var n = c.rows.length;
-    var i = Math.floor((sx - c.g.padL) / c.step);
-    i = Math.max(0, Math.min(n - 1, i));
+    var i = Math.floor(c.xs + (sx - c.g.padL) / c.step);
+    i = Math.max(c.i0, Math.min(c.i1, Math.min(n - 1, i)));
     var r = c.rows[i];
     var chg = r.o > 0 ? (r.c - r.o) / r.o * 100 : NaN;
     return {
@@ -276,13 +293,21 @@
     }
     if (pts.length < 2) return empty('暂无分时数据');
 
+    // 可见窗口：把 0..1 的缩放区间换成索引区间（浮点，贴边更自然）
+    var xs = view.s * (total - 1);
+    var xe = view.e * (total - 1);
+    if (xe - xs < 1) xe = xs + 1;
+
     var lo = Infinity, hi = -Infinity, maxV = 0, sumV = 0;
     for (var k = 0; k < pts.length; k++) {
+      // 缩放后纵轴只按看得见的那段拟合：放大到某个时段，那一小段的波动才看得清
+      if (pts[k].x < xs || pts[k].x > xe) continue;
       if (pts[k].p < lo) lo = pts[k].p;
       if (pts[k].p > hi) hi = pts[k].p;
       if (pts[k].v > maxV) maxV = pts[k].v;
       sumV += pts[k].v;
     }
+    if (!isFinite(hi) || !isFinite(lo)) return empty('暂无分时数据');
     if (!(hi > lo)) { hi += 1; lo -= 1; }
     var padY = (hi - lo) * 0.08;
     lo -= padY;
@@ -296,31 +321,38 @@
     }
     var g = geom(false);
 
-    var X = function (i) { return g.padL + (i / (total - 1)) * g.plotW; };
+    var X = function (i) { return g.padL + ((i - xs) / (xe - xs)) * g.plotW; };
     var Y = function (v) { return g.priceBot - ((v - lo) / (hi - lo)) * g.priceH; };
     var VY = function (v) { return g.volBot - (maxV ? (v / maxV) * g.volH : 0); };
 
     var s = ['<svg width="' + g.W + '" height="' + g.H + '" viewBox="0 0 ' + g.W + ' ' + g.H + '">'];
 
-    // 昨收虚线 + 5日分隔
+    // 昨收虚线 + 5日分隔：缩放后可能只露出一段，裁到绘图区内再画
+    var leftEdge = g.padL, rightEdge = g.padL + g.plotW;
     for (var dd = 0; dd < days.length; dd++) {
       var pc = days[dd].prec;
-      var x0 = X(dd * session);
-      var x1 = X(dd * session + Math.max(1, (days[dd].points || []).length - 1));
+      var dx0 = dd * session;
+      var dx1 = dd * session + Math.max(1, (days[dd].points || []).length - 1);
+      if (dx1 < xs || dx0 > xe) continue;
       if (isNum(pc) && pc > 0) {
         var yb = Y(pc);
-        s.push('<line x1="' + x0.toFixed(1) + '" y1="' + yb.toFixed(1) + '" x2="' + x1.toFixed(1) +
-          '" y2="' + yb.toFixed(1) + '" stroke="' + T.sub + '" stroke-width="1" stroke-dasharray="2 3" opacity=".45"/>');
+        var lx0 = Math.max(leftEdge, X(dx0));
+        var lx1 = Math.min(rightEdge, X(dx1));
+        if (lx1 > lx0) {
+          s.push('<line x1="' + lx0.toFixed(1) + '" y1="' + yb.toFixed(1) + '" x2="' + lx1.toFixed(1) +
+            '" y2="' + yb.toFixed(1) + '" stroke="' + T.sub + '" stroke-width="1" stroke-dasharray="2 3" opacity=".45"/>');
+        }
       }
-      if (dd > 0) {
-        s.push('<line x1="' + x0.toFixed(1) + '" y1="' + g.priceTop + '" x2="' + x0.toFixed(1) +
+      if (dd > 0 && dx0 > xs && dx0 < xe) {
+        s.push('<line x1="' + X(dx0).toFixed(1) + '" y1="' + g.priceTop + '" x2="' + X(dx0).toFixed(1) +
           '" y2="' + g.volBot + '" stroke="' + T.grid + '" stroke-dasharray="2 4"/>');
       }
     }
 
     // 成交量柱：与上一分钟比价定色，当天第一根和昨收比
-    var bw = Math.max(1, (g.plotW / total) * 0.7);
+    var bw = Math.max(1, Math.min(12, (g.plotW / (xe - xs + 1)) * 0.7));
     for (var b = 0; b < pts.length; b++) {
+      if (pts[b].x < xs - 1 || pts[b].x > xe + 1) continue;
       var ref = pts[b].first ? pts[b].prec : pts[b - 1].p;
       var col = pts[b].p >= ref ? T.up : T.down;
       var y = VY(pts[b].v);
@@ -332,6 +364,7 @@
     // 价格线 + 均价线
     var linePts = [], avgPts = [];
     for (var n = 0; n < pts.length; n++) {
+      if (pts[n].x < xs - 1 || pts[n].x > xe + 1) continue;
       var xx = X(pts[n].x).toFixed(1);
       linePts.push(xx + ',' + Y(pts[n].p).toFixed(1));
       if (isNum(pts[n].a)) avgPts.push(xx + ',' + Y(pts[n].a).toFixed(1));
@@ -360,27 +393,54 @@
     // 成交量总量：放量区左上，别贴右边的涨跌幅刻度（会挤在一起看不清）
     s.push(txt(g.padL + 2, g.volTop + 9, '量 ' + fVol(sumV), 'start', T.sub, 9));
 
-    // 横轴
-    if (days.length > 1) {
-      for (var q = 0; q < days.length; q++) {
-        var cx = X(q * session + Math.floor(session / 2));
-        s.push(axisLabel(cx, g.axisY, shortDate(days[q].date), g.W, T.sub));
+    // 横轴：没缩放时沿用固定刻度（整点 / 整天）；缩放后按可见窗口取几个真实时间点
+    if (!isZoomed()) {
+      if (days.length > 1) {
+        for (var q = 0; q < days.length; q++) {
+          var cx = X(q * session + Math.floor(session / 2));
+          s.push(axisLabel(cx, g.axisY, shortDate(days[q].date), g.W, T.sub));
+        }
+      } else {
+        var ticks = sessionTicks(p.code, session);
+        var right = g.W - g.padR;
+        for (var t = 0; t < ticks.length; t++) {
+          var tx = Math.max(g.padL, Math.min(right, X(ticks[t][0])));
+          // 首尾两个刻度贴边，改锚点避免超出绘图区
+          var anchor = tx <= g.padL + 2 ? 'start' : tx >= right - 2 ? 'end' : 'middle';
+          s.push(txt(tx, g.axisY, ticks[t][1], anchor, T.sub));
+        }
       }
     } else {
-      var ticks = sessionTicks(p.code, session);
-      var right = g.W - g.padR;
-      for (var t = 0; t < ticks.length; t++) {
-        var tx = Math.max(g.padL, Math.min(right, X(ticks[t][0])));
-        // 首尾两个刻度贴边，改锚点避免超出绘图区
-        var anchor = tx <= g.padL + 2 ? 'start' : tx >= right - 2 ? 'end' : 'middle';
-        s.push(txt(tx, g.axisY, ticks[t][1], anchor, T.sub));
+      // 5 日图缩放后得带上日期，字长一截，少放两个免得糊成一片
+      var nLbl = days.length > 1 ? 3 : 5;
+      var lbls = [];
+      for (var z = 0; z < nLbl; z++) {
+        var zp = nearestPt(pts, xs + ((xe - xs) * z) / (nLbl - 1));
+        var zd = days[Math.floor(zp.x / session)];
+        var zs2 = days.length > 1
+          ? shortDate(zd && zd.date) + ' ' + fmtTime(zp.t)
+          : fmtTime(zp.t);
+        lbls.push({ x: Math.max(g.padL, Math.min(g.W - TICK_INSET, X(zp.x))), s: zs2, w: zs2.length * 5.4 });
+      }
+      // 窗口很窄时几个标签会挤到一起：从右往左留，先丢掉中间那些，
+      // 首尾两个（本窗口的起止时间）一定留着
+      var kept = [], rightBound = Infinity;
+      for (var L = lbls.length - 1; L >= 0; L--) {
+        var it = lbls[L];
+        var lx = it.x > g.W - 18 ? it.x - it.w : (it.x < 18 ? it.x : it.x - it.w / 2);
+        if (lx + it.w > rightBound - 6) continue;
+        kept.push(it);
+        rightBound = lx;
+      }
+      for (var K = kept.length - 1; K >= 0; K--) {
+        s.push(axisLabel(kept[K].x, g.axisY, kept[K].s, g.W, T.sub));
       }
     }
 
     s.push(crosshairSvg(g));
     s.push('</svg>');
     chartEl.innerHTML = s.join('');
-    tipCtx = { type: 'minute', g: g, X: X, Y: Y, pts: pts, days: days, session: session, total: total, prec: p.prevClose };
+    tipCtx = { type: 'minute', g: g, X: X, Y: Y, pts: pts, days: days, session: session, total: total, prec: p.prevClose, xs: xs, xe: xe, dataEnd: pts[pts.length - 1].x / (total - 1) };
   }
 
   /* ---------------- 日K（K线 + 均线 + 成交量 + MACD） ---------------- */
@@ -409,8 +469,15 @@
     }
     var n = rows.length;
 
+    // 可见窗口（索引，浮点）：缩放后只画这一段，纵轴也按这段重新拟合
+    var xs = view.s * (n - 1);
+    var xe = view.e * (n - 1);
+    if (xe - xs < 1) xe = xs + 1;
+    var i0 = Math.max(0, Math.floor(xs));
+    var i1 = Math.min(n - 1, Math.ceil(xe));
+
     var hi = -Infinity, lo = Infinity, maxV = 0, maxM = 0, sumV = 0;
-    for (var k = 0; k < n; k++) {
+    for (var k = i0; k <= i1; k++) {
       var r = rows[k];
       if (r.h > hi) hi = r.h;
       if (r.l < lo) lo = r.l;
@@ -419,6 +486,7 @@
       var m = Math.max(Math.abs(r.dif), Math.abs(r.dea), Math.abs(r.macd));
       if (m > maxM) maxM = m;
     }
+    if (!isFinite(hi) || !isFinite(lo)) return empty('暂无 K 线数据');
     if (!(hi > lo)) { hi += 1; lo -= 1; }
     var padY = (hi - lo) * 0.06;
     hi += padY;
@@ -427,9 +495,9 @@
     // 日K 右边没有刻度，padR 只剩最小空隙，K 线能一路铺到右边缘
     var g = geom(true);
 
-    var step = g.plotW / n;
-    var cw = Math.max(1.2, Math.min(14, step * 0.62));
-    var Xc = function (i) { return g.padL + step * (i + 0.5); };
+    var step = g.plotW / (xe - xs);
+    var cw = Math.max(1.2, Math.min(24, step * 0.66));
+    var Xc = function (i) { return g.padL + step * (i - xs + 0.5); };
     var Y = function (v) { return g.priceBot - ((v - lo) / (hi - lo)) * g.priceH; };
     var VY = function (v) { return g.volBot - (maxV ? (v / maxV) * g.volH : 0); };
     var Mzero = g.macdTop + g.macdH / 2;
@@ -446,6 +514,7 @@
 
     // 成交量
     for (var v = 0; v < n; v++) {
+      if (v < i0 - 1 || v > i1 + 1) continue;
       var rr = rows[v];
       var col = rr.c >= rr.o ? T.up : T.down;
       var vy = VY(rr.v);
@@ -456,6 +525,7 @@
 
     // K 线
     for (var i2 = 0; i2 < n; i2++) {
+      if (i2 < i0 - 1 || i2 > i1 + 1) continue;
       var q = rows[i2];
       var cc = q.c >= q.o ? T.up : T.down;
       var x = Xc(i2);
@@ -471,6 +541,7 @@
     function lineOf(key, color, width) {
       var pts = [];
       for (var j = 0; j < n; j++) {
+        if (j < i0 - 1 || j > i1 + 1) continue;
         if (isNum(rows[j][key])) pts.push(Xc(j).toFixed(1) + ',' + Y(rows[j][key]).toFixed(1));
       }
       if (pts.length < 2) return;
@@ -485,6 +556,7 @@
     s.push('<line x1="' + g.padL + '" y1="' + Mzero.toFixed(1) + '" x2="' + (g.padL + g.plotW) +
       '" y2="' + Mzero.toFixed(1) + '" stroke="' + T.grid + '"/>');
     for (var m2 = 0; m2 < n; m2++) {
+      if (m2 < i0 - 1 || m2 > i1 + 1) continue;
       var mv = rows[m2].macd;
       if (!isNum(mv)) continue;
       var y1 = MY(mv), y0 = Mzero;
@@ -496,6 +568,7 @@
     function macdLine(key, color) {
       var pts = [];
       for (var j = 0; j < n; j++) {
+        if (j < i0 - 1 || j > i1 + 1) continue;
         if (isNum(rows[j][key])) pts.push(Xc(j).toFixed(1) + ',' + MY(rows[j][key]).toFixed(1));
       }
       if (pts.length < 2) return;
@@ -516,17 +589,19 @@
     s.push(txt(g.padL + g.plotW - 80, g.priceTop + 9, 'MA10', 'start', T.ma10, 9));
     s.push(txt(g.padL + g.plotW - 44, g.priceTop + 9, 'MA20', 'start', T.ma20, 9));
 
-    // 横轴日期
-    var cnt = n >= 5 ? 5 : n;
+    // 横轴日期：按可见根数决定放几个，缩得很近时少放几个免得糊成一片
+    var visN = xe - xs + 1;
+    var cnt = visN >= 40 ? 5 : visN >= 18 ? 4 : Math.max(2, Math.min(3, Math.round(visN / 6)));
     for (var t = 0; t < cnt; t++) {
-      var idx = cnt === 1 ? 0 : Math.round((t * (n - 1)) / (cnt - 1));
+      var idx = Math.round(xs + (t * (xe - xs)) / (cnt - 1));
+      idx = Math.max(0, Math.min(n - 1, idx));
       s.push(axisLabel(Xc(idx), g.axisY, shortDate(rows[idx].d), g.W, T.sub));
     }
 
     s.push(crosshairSvg(g));
     s.push('</svg>');
     chartEl.innerHTML = s.join('');
-    tipCtx = { type: 'day', g: g, Xc: Xc, Y: Y, rows: rows, step: step, n: n };
+    tipCtx = { type: 'day', g: g, Xc: Xc, Y: Y, rows: rows, step: step, n: n, xs: xs, xe: xe, i0: i0, i1: i1 };
   }
 
   /* ---------------- 头部与行高亮 ---------------- */
@@ -620,6 +695,8 @@
     document.body.classList.toggle('focus', state.on);
     // 左列保持展开前的宽度（主进程算的），右边剩下的全归图表
     if (s.leftW) document.body.style.setProperty('--left-w', Math.round(s.leftW) + 'px');
+    // 换标的 / 换周期 = 换了张图，缩放回到整幅；只是尺寸变了则保留当前的缩放
+    if (!sameTarget) { resetView(); syncZoomBadge(); }
     paintTabs(s.tab);
     paintActiveRow(s.code);
 
@@ -627,6 +704,8 @@
       stop();
       payload = null;
       tipCtx = null;
+      resetView();
+      syncZoomBadge();
       hideTip();
       chartEl.innerHTML = '';
       return;
@@ -663,6 +742,58 @@
     showTip(info, e.clientX, e.clientY);
   });
   chartEl.addEventListener('mouseleave', hideTip);
+
+  /* ---------------- 滚轮缩放 ---------------- */
+
+  // 头部那个 ×N 小标：缩放了才出现，双击图表还原
+  function syncZoomBadge() {
+    if (!elZoom) return;
+    var on = isZoomed();
+    elZoom.classList.toggle('on', on);
+    if (!on) { elZoom.textContent = ''; return; }
+    var r = zoomRatio();
+    elZoom.textContent = (r >= 10 ? Math.round(r) : r.toFixed(1)) + '×';
+  }
+
+  chartEl.addEventListener('wheel', function (e) {
+    if (!state.on || !tipCtx) return;
+    e.preventDefault();
+    var svg = chartEl.querySelector('svg');
+    if (!svg) return;
+    var g = tipCtx.g;
+    var rect = svg.getBoundingClientRect();
+    // 光标在绘图区的位置，换算成整幅的归一化坐标（0..1）
+    var px = Math.max(g.padL, Math.min(g.padL + g.plotW, e.clientX - rect.left));
+    // 盘中数据只画到当前时刻，右边那截是空的：光标落在空区就贴着数据末尾放大，
+    // 否则会放大到一片空白（以前实测锚在 60% 宽度处就直接空白了）
+    var dataEnd = Math.min(1, tipCtx.dataEnd || 1);
+    var anchor = Math.min(view.s + ((px - g.padL) / Math.max(1, g.plotW)) * (view.e - view.s), dataEnd);
+
+    var cur = view.e - view.s;
+    var span = cur * (e.deltaY > 0 ? 1.3 : 1 / 1.3);
+    // 至少留 12 根，再往里放就没东西可看了
+    var total = tipCtx.total || tipCtx.n || 12;
+    span = Math.min(1, Math.max(span, Math.min(1, 12 / Math.max(12, total))));
+
+    // 以光标为不动点：光标下的那个点缩放前后停在同一个像素上
+    var s0 = anchor - (anchor - view.s) * (span / cur);
+    var s1 = s0 + span;
+    if (anchor >= dataEnd - 1e-6) { s1 = dataEnd; s0 = s1 - span; }
+    if (s0 < 0) { s1 -= s0; s0 = 0; }
+    if (s1 > 1) { s0 -= (s1 - 1); s1 = 1; }
+    if (s1 - s0 >= 0.999) resetView();
+    else { view.s = Math.max(0, s0); view.e = Math.min(1, s1); }
+    syncZoomBadge();
+    render();
+  }, { passive: false });
+
+  // 双击还原整幅
+  chartEl.addEventListener('dblclick', function () {
+    if (!state.on || !tipCtx || !isZoomed()) return;
+    resetView();
+    syncZoomBadge();
+    render();
+  });
 
   document.addEventListener('keydown', function (e) {
     if (!state.on) return;
