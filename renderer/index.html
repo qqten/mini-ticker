@@ -23,9 +23,13 @@
         <button type="button" data-tab="minute">分时</button>
         <button type="button" data-tab="five">5日</button>
         <button type="button" data-tab="day">日K</button>
+        <button type="button" data-tab="month">月K</button>
       </span>
     </div>
     <div id="chart"></div>
+    <!-- 鼠标贴到图表左右边缘时出现，停住就自动往那个方向平移；纯视觉提示，不吃鼠标事件 -->
+    <div class="edge-arrow" id="edge-l" aria-hidden="true"></div>
+    <div class="edge-arrow" id="edge-r" aria-hidden="true"></div>
   </div>
   <script src="app.js"></script>
   <script src="chart.js"></script>

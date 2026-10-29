@@ -350,23 +350,70 @@ function createWindow() {
       }
 
       // 调试：TICKER_SHOT_ZOOM=4 在聚焦图表上连续向上滚，验证「滚轮缩放」
+      //       给负数就是向下滚（缩小），-9 一路缩到全幅看全部历史
       if (process.env.TICKER_SHOT_ZOOM) {
         setTimeout(async function () {
           if (!win || win.isDestroyed()) return;
-          const times = Math.max(1, Math.min(20, parseInt(process.env.TICKER_SHOT_ZOOM, 10) || 2));
+          const raw = parseInt(process.env.TICKER_SHOT_ZOOM, 10) || 2;
+          const times = Math.max(1, Math.min(20, Math.abs(raw)));
+          const dy = raw < 0 ? 120 : -120;
           try {
             const r = await win.webContents.executeJavaScript(
               "(function(){var c=document.getElementById('chart');if(!c)return 'no-chart';" +
               "var b=c.getBoundingClientRect();if(!b.width)return 'no-box';" +
               "var x=b.x+b.width*0.6,y=b.y+b.height*0.35;" +
               "for(var i=0;i<" + times + ";i++){" +
-              "c.dispatchEvent(new WheelEvent('wheel',{bubbles:true,cancelable:true,deltaY:-120,clientX:x,clientY:y}));}" +
+              "c.dispatchEvent(new WheelEvent('wheel',{bubbles:true,cancelable:true,deltaY:" + dy + ",clientX:x,clientY:y}));}" +
               "var z=document.getElementById('f-zoom');" +
-              "return (z&&z.textContent?z.textContent:'-')+' | rect='+c.querySelectorAll('svg rect').length;})()"
+              "var ax=[].map.call(c.querySelectorAll('svg text'),function(t){return t.textContent})" +
+              ".filter(function(t){return /^\\d{2}-\\d{2}$/.test(t)});" +
+              "return (z&&z.textContent?z.textContent:'-')+' | rect='+c.querySelectorAll('svg rect').length" +
+              "+' | 轴='+(ax.length?ax[0]+'..'+ax[ax.length-1]:'-');" +
+              ";})()"
             );
-            logLine('[shot]', '滚轮放大 x' + times + ' → ' + r);
+            logLine('[shot]', '滚轮' + (dy < 0 ? '放大' : '缩小') + ' x' + times + ' → ' + r);
           } catch (e) { logLine('[shot]', '缩放测试失败 ' + e.message); }
         }, 5000);
+      }
+
+      // 调试：TICKER_SHOT_PAN=120 在图表上按住往右拖 120px，验证「拖动平移」
+      if (process.env.TICKER_SHOT_PAN) {
+        setTimeout(async function () {
+          if (!win || win.isDestroyed()) return;
+          const px = parseInt(process.env.TICKER_SHOT_PAN, 10) || 120;
+          try {
+            const r = await win.webContents.executeJavaScript(
+              "(function(){var c=document.getElementById('chart');if(!c)return 'no-chart';" +
+              "var b=c.getBoundingClientRect();if(!b.width)return 'no-box';" +
+              "var y=b.y+b.height*0.4,x=b.x+b.width*0.7;" +
+              "c.dispatchEvent(new MouseEvent('mousedown',{bubbles:true,cancelable:true,clientX:x,clientY:y,button:0}));" +
+              "window.dispatchEvent(new MouseEvent('mousemove',{bubbles:true,cancelable:true,clientX:x+" + px + ",clientY:y}));" +
+              "window.dispatchEvent(new MouseEvent('mouseup',{bubbles:true,cancelable:true,clientX:x+" + px + ",clientY:y}));" +
+              "var z=document.getElementById('f-zoom');" +
+              "return (z&&z.textContent?z.textContent:'-')+' | rect='+c.querySelectorAll('svg rect').length;" +
+              ";})()"
+            );
+            logLine('[shot]', '拖动 ' + px + 'px → ' + r);
+          } catch (e) { logLine('[shot]', '拖动测试失败 ' + e.message); }
+        }, 5000);
+      }
+
+      // 调试：TICKER_SHOT_EDGE=l|r 把鼠标停在左/右边缘，验证箭头出现且持续平移
+      if (process.env.TICKER_SHOT_EDGE) {
+        setTimeout(async function () {
+          if (!win || win.isDestroyed()) return;
+          const dir = String(process.env.TICKER_SHOT_EDGE).toLowerCase() === 'r' ? 'r' : 'l';
+          try {
+            const r = await win.webContents.executeJavaScript(
+              "(function(){var c=document.getElementById('chart');if(!c)return 'no-chart';" +
+              "var b=c.getBoundingClientRect();if(!b.width)return 'no-box';" +
+              "var x=" + (dir === 'r' ? "b.x+b.width-6" : "b.x+6") + ",y=b.y+b.height*0.45;" +
+              "c.dispatchEvent(new MouseEvent('mousemove',{bubbles:true,cancelable:true,clientX:x,clientY:y}));" +
+              "return 'moved';})()"
+            );
+            logLine('[shot]', '悬停' + (dir === 'r' ? '右' : '左') + '边缘 → ' + r);
+          } catch (e) { logLine('[shot]', '边缘测试失败 ' + e.message); }
+        }, 6000);
       }
 
       // 调试：TICKER_SHOT_SORT=1 点几下排序按钮，验证排序真的生效
@@ -472,7 +519,7 @@ function createWindow() {
               "active:(function(){var a=document.querySelector('.row.active');return a?a.dataset.code:null;})()," +
               "sort:(function(){var b=document.getElementById('sort-btn');if(!b)return null;" +
               "return [b.textContent,b.className,Math.round(b.getBoundingClientRect().width),Math.round(b.getBoundingClientRect().height)];})()," +
-              "cls:document.body.className});})()"
+              "cls:document.body.className,dbg:(function(){var c=document.getElementById('chart');return c?(c.dataset.dbg||''):'';})()});})()"
             );
             logLine('[layout]', String(txt));
           } catch (e) {

@@ -15,17 +15,34 @@
   var elName = document.getElementById('f-name');
   var elZoom = document.getElementById('f-zoom');
   var tabsEl = document.getElementById('f-tabs');
+  var elEdgeL = document.getElementById('edge-l');
+  var elEdgeR = document.getElementById('edge-r');
   var appEl = document.getElementById('app');
   // 上一次点亮的是哪一行：用来判断「换标的了」，只在这时把行滚进视野
   var lastActive = '';
 
   /* 缩放窗口：s/e 是整幅横向的归一化区间，0..1 就是全部铺满。
      滚轮以光标为不动点收缩/展开，纵轴跟着可见数据重新拟合；
-     换标的、换周期、双击图表都会回到 0..1。 */
+     拖动平移只改 s/e 的位置、不改宽度。
+
+     日K 现在会拉回 1200 根历史，但默认只露最近 120 根（和以前看起来一样），
+     剩下的靠缩出去 / 往左拖才能翻到。所以「回到默认」不等于「回到整幅」：
+     defSpan 记当前这张图的默认可视比例，由渲染时按数据量算出来。 */
   var view = { s: 0, e: 1 };
-  function resetView() { view.s = 0; view.e = 1; }
-  function zoomRatio() { return 1 / Math.max(1e-6, view.e - view.s); }
-  function isZoomed() { return view.e - view.s < 0.999; }
+  var viewTouched = false;  // 用户缩放过或拖动过；false 时每帧都贴回默认窗口
+  var defSpan = 1;          // 当前图的默认可视比例
+  var DEF_DAY_BARS = 120;   // 日K 默认露出多少根
+  var lastDayN = 0;         // 上一帧日K 的总根数，用来发现「数据量变了」
+
+  function resetView() {
+    viewTouched = false;
+    lastDayN = 0;
+    view.e = 1;
+    view.s = 1 - defSpan;
+  }
+  function zoomRatio() { return defSpan / Math.max(1e-6, view.e - view.s); }
+  // 只看跨度：平移不改变跨度，倍率没变，就别在头上挂个没用的 1.0×
+  function isZoomed() { return Math.abs((view.e - view.s) - defSpan) > 1e-6; }
 
   /* ---------------- 小工具 ---------------- */
 
@@ -84,6 +101,12 @@
     var s = String(d || '');
     if (/^\d{8}$/.test(s)) return s.slice(4, 6) + '-' + s.slice(6, 8);
     return s.length >= 10 ? s.slice(5, 10) : s;
+  }
+
+  // 月K 的原始日期是月末交易日（"2016-11-30"），轴上只留年月才看得懂
+  function shortMonth(d) {
+    var m = String(d || '').match(/^(\d{4})-(\d{2})/);
+    return m ? m[1].slice(2) + '-' + m[2] : shortDate(d);
   }
 
   // 分钟时间归一：A 股 "0930" -> "09:30"，外盘 "2026-10-26 05:00" -> "05:00"
@@ -293,6 +316,10 @@
     }
     if (pts.length < 2) return empty('暂无分时数据');
 
+    // 分时只有当天（或 5 日）这么多点，默认就整幅，没有「藏着的历史」
+    defSpan = 1;
+    if (!viewTouched) { view.s = 0; view.e = 1; }
+
     // 可见窗口：把 0..1 的缩放区间换成索引区间（浮点，贴边更自然）
     var xs = view.s * (total - 1);
     var xe = view.e * (total - 1);
@@ -443,12 +470,13 @@
     tipCtx = { type: 'minute', g: g, X: X, Y: Y, pts: pts, days: days, session: session, total: total, prec: p.prevClose, xs: xs, xe: xe, dataEnd: pts[pts.length - 1].x / (total - 1) };
   }
 
-  /* ---------------- 日K（K线 + 均线 + 成交量 + MACD） ---------------- */
+  /* ---------------- 日K / 月K（K线 + 均线 + 成交量 + MACD） ---------------- */
 
   function renderDay(p) {
     var c = p.candles || [];
     if (c.length < 2) return empty('暂无 K 线数据');
     var T = theme();
+    var isMonth = p.tab === 'month';
 
     var closes = c.map(function (x) { return x.c; });
     var ma5 = ma(closes, 5), ma10 = ma(closes, 10), ma20 = ma(closes, 20);
@@ -458,9 +486,9 @@
     var dea = ema(dif, 9);
     var macd = dif.map(function (v, i) { return (v - dea[i]) * 2; });
 
-    var start = Math.max(0, c.length - 120);
+    // 全部历史都留着（日K 有 1200 根），靠默认窗口只露最近一段
     var rows = [];
-    for (var i = start; i < c.length; i++) {
+    for (var i = 0; i < c.length; i++) {
       rows.push({
         d: c[i].d, o: c[i].o, c: c[i].c, h: c[i].h, l: c[i].l, v: c[i].v,
         ma5: ma5[i], ma10: ma10[i], ma20: ma20[i],
@@ -468,6 +496,19 @@
       });
     }
     var n = rows.length;
+
+    // 月K 120 根本来就铺得下，直接整幅；日K 默认只露最近 120 根
+    defSpan = isMonth ? 1 : Math.min(1, DEF_DAY_BARS / Math.max(1, n));
+    // 首帧数据可能还没齐（也可能换标的后根数变了）。只要当前跨度还是「默认那么多根」，
+    // 就按新的总根数重排一次，否则会停在 0.8× 这种莫名其妙的倍率上
+    var nChanged = lastDayN > 0 && lastDayN !== n;
+    var shownBefore = (view.e - view.s) * (lastDayN || n);
+    var wasDefaultSpan = Math.abs(shownBefore - Math.min(DEF_DAY_BARS, lastDayN || n)) < 1.5;
+    if (!viewTouched || (nChanged && wasDefaultSpan && !isMonth)) {
+      view.e = 1;
+      view.s = 1 - defSpan;
+    }
+    lastDayN = n;
 
     // 可见窗口（索引，浮点）：缩放后只画这一段，纵轴也按这段重新拟合
     var xs = view.s * (n - 1);
@@ -495,9 +536,33 @@
     // 日K 右边没有刻度，padR 只剩最小空隙，K 线能一路铺到右边缘
     var g = geom(true);
 
-    var step = g.plotW / (xe - xs);
-    var cw = Math.max(1.2, Math.min(24, step * 0.66));
-    var Xc = function (i) { return g.padL + step * (i - xs + 0.5); };
+    // 一根占多少像素。缩到整幅时 1200 根只有 0.25px/根，真画 1200 组 K 线
+    // 既看不清又拖慢渲染，所以低于 1.6px 就按像素桶合并成一根。
+    var stepRaw = g.plotW / Math.max(1e-6, xe - xs);
+    var agg = stepRaw < 1.6 ? Math.max(1, Math.ceil(1.6 / stepRaw)) : 1;
+
+    var bars = [];
+    for (var b0 = i0; b0 <= i1; b0 += agg) {
+      var b1 = Math.min(i1, b0 + agg - 1);
+      var firstB = rows[b0], lastB = rows[b1];
+      var bh = -Infinity, bl = Infinity, bv = 0;
+      for (var q0 = b0; q0 <= b1; q0++) {
+        if (rows[q0].h > bh) bh = rows[q0].h;
+        if (rows[q0].l < bl) bl = rows[q0].l;
+        if (rows[q0].v > bv) bv = rows[q0].v;
+      }
+      bars.push({
+        o: firstB.o, c: lastB.c, h: bh, l: bl, v: bv,
+        ma5: lastB.ma5, ma10: lastB.ma10, ma20: lastB.ma20,
+        dif: lastB.dif, dea: lastB.dea, macd: lastB.macd
+      });
+    }
+
+    var step = g.plotW / Math.max(1, bars.length);
+    var cw = Math.max(1.2, Math.min(24, step * 0.7));
+    var Xb = function (k) { return g.padL + step * (k + 0.5); };
+    // 十字光标仍按原始索引算，合并只是在画的时候省事，读数不能跟着变粗
+    var Xn = function (i) { return g.padL + (i - xs) * stepRaw + stepRaw / 2; };
     var Y = function (v) { return g.priceBot - ((v - lo) / (hi - lo)) * g.priceH; };
     var VY = function (v) { return g.volBot - (maxV ? (v / maxV) * g.volH : 0); };
     var Mzero = g.macdTop + g.macdH / 2;
@@ -513,22 +578,21 @@
     });
 
     // 成交量
-    for (var v = 0; v < n; v++) {
-      if (v < i0 - 1 || v > i1 + 1) continue;
-      var rr = rows[v];
-      var col = rr.c >= rr.o ? T.up : T.down;
-      var vy = VY(rr.v);
-      s.push('<rect x="' + (Xc(v) - cw / 2).toFixed(1) + '" y="' + vy.toFixed(1) + '" width="' +
+    for (var v = 0; v < bars.length; v++) {
+      var rb = bars[v];
+      var col = rb.c >= rb.o ? T.up : T.down;
+      var vy = VY(rb.v);
+      s.push('<rect x="' + (Xb(v) - cw / 2).toFixed(1) + '" y="' + vy.toFixed(1) + '" width="' +
         cw.toFixed(1) + '" height="' + Math.max(0.6, g.volBot - vy).toFixed(1) +
         '" fill="' + col + '" opacity=".75"/>');
     }
 
-    // K 线
-    for (var i2 = 0; i2 < n; i2++) {
-      if (i2 < i0 - 1 || i2 > i1 + 1) continue;
-      var q = rows[i2];
+    // K 线：合并后每根不足 1.6px 宽，影线就画在中轴上，
+    // 这样整幅状态下也能看出高低点大概在哪，不会糊成一条实心带
+    for (var i2 = 0; i2 < bars.length; i2++) {
+      var q = bars[i2];
       var cc = q.c >= q.o ? T.up : T.down;
-      var x = Xc(i2);
+      var x = Xb(i2);
       s.push('<line x1="' + x.toFixed(1) + '" y1="' + Y(q.h).toFixed(1) + '" x2="' + x.toFixed(1) +
         '" y2="' + Y(q.l).toFixed(1) + '" stroke="' + cc + '" stroke-width="1"/>');
       var yTop = Y(Math.max(q.o, q.c));
@@ -540,9 +604,8 @@
     // 均线
     function lineOf(key, color, width) {
       var pts = [];
-      for (var j = 0; j < n; j++) {
-        if (j < i0 - 1 || j > i1 + 1) continue;
-        if (isNum(rows[j][key])) pts.push(Xc(j).toFixed(1) + ',' + Y(rows[j][key]).toFixed(1));
+      for (var j = 0; j < bars.length; j++) {
+        if (isNum(bars[j][key])) pts.push(Xb(j).toFixed(1) + ',' + Y(bars[j][key]).toFixed(1));
       }
       if (pts.length < 2) return;
       s.push('<polyline points="' + pts.join(' ') + '" fill="none" stroke="' + color +
@@ -555,21 +618,19 @@
     // MACD
     s.push('<line x1="' + g.padL + '" y1="' + Mzero.toFixed(1) + '" x2="' + (g.padL + g.plotW) +
       '" y2="' + Mzero.toFixed(1) + '" stroke="' + T.grid + '"/>');
-    for (var m2 = 0; m2 < n; m2++) {
-      if (m2 < i0 - 1 || m2 > i1 + 1) continue;
-      var mv = rows[m2].macd;
+    for (var m2 = 0; m2 < bars.length; m2++) {
+      var mv = bars[m2].macd;
       if (!isNum(mv)) continue;
       var y1 = MY(mv), y0 = Mzero;
       var top = Math.min(y0, y1), hgt = Math.max(0.6, Math.abs(y1 - y0));
-      s.push('<rect x="' + (Xc(m2) - cw / 2).toFixed(1) + '" y="' + top.toFixed(1) + '" width="' +
+      s.push('<rect x="' + (Xb(m2) - cw / 2).toFixed(1) + '" y="' + top.toFixed(1) + '" width="' +
         cw.toFixed(1) + '" height="' + hgt.toFixed(1) + '" fill="' + (mv >= 0 ? T.up : T.down) +
         '" opacity=".7"/>');
     }
     function macdLine(key, color) {
       var pts = [];
-      for (var j = 0; j < n; j++) {
-        if (j < i0 - 1 || j > i1 + 1) continue;
-        if (isNum(rows[j][key])) pts.push(Xc(j).toFixed(1) + ',' + MY(rows[j][key]).toFixed(1));
+      for (var j = 0; j < bars.length; j++) {
+        if (isNum(bars[j][key])) pts.push(Xb(j).toFixed(1) + ',' + MY(bars[j][key]).toFixed(1));
       }
       if (pts.length < 2) return;
       s.push('<polyline points="' + pts.join(' ') + '" fill="none" stroke="' + color +
@@ -592,16 +653,23 @@
     // 横轴日期：按可见根数决定放几个，缩得很近时少放几个免得糊成一片
     var visN = xe - xs + 1;
     var cnt = visN >= 40 ? 5 : visN >= 18 ? 4 : Math.max(2, Math.min(3, Math.round(visN / 6)));
+    // 超过一年就别只写 MM-DD 了：25-09 和 26-09 在轴上长得一模一样
+    var wide = isMonth || visN > 260;
     for (var t = 0; t < cnt; t++) {
       var idx = Math.round(xs + (t * (xe - xs)) / (cnt - 1));
       idx = Math.max(0, Math.min(n - 1, idx));
-      s.push(axisLabel(Xc(idx), g.axisY, shortDate(rows[idx].d), g.W, T.sub));
+      s.push(axisLabel(Xn(idx), g.axisY,
+        wide ? shortMonth(rows[idx].d) : shortDate(rows[idx].d), g.W, T.sub));
     }
 
     s.push(crosshairSvg(g));
     s.push('</svg>');
     chartEl.innerHTML = s.join('');
-    tipCtx = { type: 'day', g: g, Xc: Xc, Y: Y, rows: rows, step: step, n: n, xs: xs, xe: xe, i0: i0, i1: i1 };
+    // 光标按原始索引换算：合并只是画的时候省事，读数不能跟着变粗
+    tipCtx = { type: 'day', g: g, Xc: Xn, Y: Y, rows: rows, step: stepRaw, n: n, xs: xs, xe: xe, i0: i0, i1: i1 };
+    // 调试用：n=总根数 span=当前比例 def=默认比例 bars=合并后画了多少根
+    chartEl.dataset.dbg = 'n=' + n + ' span=' + (view.e - view.s).toFixed(4) +
+      ' def=' + defSpan.toFixed(4) + ' bars=' + bars.length + ' agg=' + agg;
   }
 
   /* ---------------- 头部与行高亮 ---------------- */
@@ -641,8 +709,11 @@
   function render() {
     if (!state.on || !payload) return;
     hideTip();
-    if (payload.tab === 'day') renderDay(payload);
+    if (payload.tab === 'day' || payload.tab === 'month') renderDay(payload);
     else renderMinute(payload);
+    // defSpan 是渲染时按数据量算的，徽标和边缘箭头都得放在渲染之后同步
+    syncZoomBadge();
+    syncEdgeArrows();
   }
 
   /* ---------------- 数据 ---------------- */
@@ -707,6 +778,8 @@
       resetView();
       syncZoomBadge();
       hideTip();
+      stopEdge();
+      syncEdgeArrows();
       chartEl.innerHTML = '';
       return;
     }
@@ -731,7 +804,7 @@
 
   // 十字光标：鼠标在图上移动显示当时数据，移出图隐藏
   chartEl.addEventListener('mousemove', function (e) {
-    if (!state.on || !tipCtx || !payload) return;
+    if (!state.on || !tipCtx || !payload || dragState) return;
     var svg = chartEl.querySelector('svg');
     if (!svg) return;
     var rect = svg.getBoundingClientRect();
@@ -741,16 +814,21 @@
     if (!info) { hideTip(); return; }
     showTip(info, e.clientX, e.clientY);
   });
-  chartEl.addEventListener('mouseleave', hideTip);
+  chartEl.addEventListener('mouseleave', function () {
+    hideTip();
+    stopEdge();
+  });
 
   /* ---------------- 滚轮缩放 ---------------- */
 
-  // 头部那个 ×N 小标：缩放了才出现，双击图表还原
+  // 头部那个 ×N 小标：和默认窗口不一样才出现，双击图表还原
   function syncZoomBadge() {
     if (!elZoom) return;
     var on = isZoomed();
     elZoom.classList.toggle('on', on);
     if (!on) { elZoom.textContent = ''; return; }
+    // 缩到底 = 全部历史都摊开了，这时候写「全」比 ×0.1 好懂
+    if (view.e - view.s >= 0.999) { elZoom.textContent = '全'; return; }
     var r = zoomRatio();
     elZoom.textContent = (r >= 10 ? Math.round(r) : r.toFixed(1)) + '×';
   }
@@ -781,17 +859,159 @@
     if (anchor >= dataEnd - 1e-6) { s1 = dataEnd; s0 = s1 - span; }
     if (s0 < 0) { s1 -= s0; s0 = 0; }
     if (s1 > 1) { s0 -= (s1 - 1); s1 = 1; }
-    if (s1 - s0 >= 0.999) resetView();
-    else { view.s = Math.max(0, s0); view.e = Math.min(1, s1); }
+    if (s1 - s0 >= 0.999) {
+      // 缩到头就是整幅：这时候露的是全部历史，不能算「默认窗口」，否则一松手又跳回去
+      viewTouched = true;
+      view.s = 0; view.e = 1;
+    } else {
+      view.s = Math.max(0, s0);
+      view.e = Math.min(1, s1);
+      viewTouched = true;
+    }
     syncZoomBadge();
     render();
   }, { passive: false });
 
+  /* ---------------- 平移：拖拽 + 左右边缘悬停 ---------------- */
+
+  // 窗口整体右/左移 delta（归一化比例）。撞到两端返回 false，调用方据此收手
+  function panBy(delta) {
+    var span = view.e - view.s;
+    if (span >= 0.999) return false;
+    var s = view.s + delta, en = view.e + delta;
+    if (s < 0) { s = 0; en = span; }
+    if (en > 1) { en = 1; s = 1 - span; }
+    if (Math.abs(s - view.s) < 1e-6) return false;
+    view.s = s;
+    view.e = en;
+    viewTouched = true;
+    return true;
+  }
+
+  var edgeDir = 0, edgeTimer = null;
+
+  function stopEdge() {
+    edgeDir = 0;
+    if (edgeTimer) { clearTimeout(edgeTimer); edgeTimer = null; }
+    if (elEdgeL) elEdgeL.classList.remove('on');
+    if (elEdgeR) elEdgeR.classList.remove('on');
+  }
+
+  function moveEdgeArrow(dir, clientY) {
+    var host = elEdgeL && elEdgeL.parentElement;
+    if (!host) return;
+    var hostBox = host.getBoundingClientRect();
+    var topMin = chartEl.offsetTop;
+    var topMax = Math.max(topMin, topMin + chartEl.offsetHeight - 24);
+    var top = Math.max(topMin, Math.min(topMax, clientY - hostBox.top - 12));
+    var el = dir < 0 ? elEdgeL : elEdgeR;
+    if (!el) return;
+    el.style.top = top + 'px';
+    el.classList.add('on');
+    (dir < 0 ? elEdgeR : elEdgeL).classList.remove('on');
+  }
+
+  function edgeStep() {
+    edgeTimer = null;
+    if (!edgeDir) return;
+    var span = view.e - view.s;
+    if (panBy(edgeDir * span * 0.08)) {
+      render();
+      syncEdgeArrows();
+      edgeTimer = setTimeout(edgeStep, 70);
+    } else {
+      stopEdge();   // 到头了
+    }
+  }
+
+  function startEdge(dir, clientY) {
+    if (edgeDir === dir) { moveEdgeArrow(dir, clientY); return; }
+    stopEdge();
+    edgeDir = dir;
+    moveEdgeArrow(dir, clientY);
+    // 先顿一下：鼠标只是扫过边缘时别让图一下子窜出去
+    edgeTimer = setTimeout(edgeStep, 190);
+  }
+
+  // 只有「还有没看到的部分」才给箭头，到头了就收起来
+  function syncEdgeArrows() {
+    var movable = (view.e - view.s) < 0.999;
+    if (elEdgeL) {
+      elEdgeL.classList.toggle('can', movable && view.s > 1e-6);
+      if (!movable || view.s <= 1e-6) elEdgeL.classList.remove('on');
+    }
+    if (elEdgeR) {
+      elEdgeR.classList.toggle('can', movable && view.e < 1 - 1e-6);
+      if (!movable || view.e >= 1 - 1e-6) elEdgeR.classList.remove('on');
+    }
+  }
+
+  chartEl.addEventListener('mousemove', function (e) {
+    if (!state.on || !tipCtx || dragState) { stopEdge(); return; }
+    var svg = chartEl.querySelector('svg');
+    if (!svg) { stopEdge(); return; }
+    var box = svg.getBoundingClientRect();
+    var sx = e.clientX - box.left;
+    var zone = 22;
+    if (sx <= zone && view.s > 1e-6 && view.e - view.s < 0.999) {
+      startEdge(-1, e.clientY);
+    } else if (sx >= box.width - zone && view.e < 1 - 1e-6 && view.e - view.s < 0.999) {
+      startEdge(1, e.clientY);
+    } else {
+      stopEdge();
+    }
+  });
+
+  // 按住拖动平移。threshold 3px：手抖不算拖，免得点一下就把图挪走
+  var dragState = null;
+
+  chartEl.addEventListener('mousedown', function (e) {
+    if (!state.on || !tipCtx || e.button !== 0) return;
+    var svg = chartEl.querySelector('svg');
+    if (!svg) return;
+    dragState = {
+      x0: e.clientX, s0: view.s, e0: view.e,
+      w: Math.max(1, svg.getBoundingClientRect().width), moved: false
+    };
+  });
+
+  window.addEventListener('mousemove', function (e) {
+    if (!dragState) return;
+    var dx = e.clientX - dragState.x0;
+    if (!dragState.moved) {
+      if (Math.abs(dx) < 3) return;
+      dragState.moved = true;
+      chartEl.classList.add('dragging');
+      stopEdge();
+    }
+    var span = dragState.e0 - dragState.s0;
+    if (span >= 0.999) return;
+    var shift = -(dx / dragState.w) * span;
+    var s = dragState.s0 + shift, en = dragState.e0 + shift;
+    if (s < 0) { en -= s; s = 0; }
+    if (en > 1) { s -= (en - 1); en = 1; }
+    view.s = Math.max(0, s);
+    view.e = Math.min(1, en);
+    viewTouched = true;
+    hideTip();
+    render();
+    syncEdgeArrows();
+  });
+
+  window.addEventListener('mouseup', function () {
+    if (!dragState) return;
+    dragState = null;
+    chartEl.classList.remove('dragging');
+  });
+
   // 双击还原整幅
   chartEl.addEventListener('dblclick', function () {
-    if (!state.on || !tipCtx || !isZoomed()) return;
+    if (!state.on || !tipCtx) return;
+    // 缩放或拖动过都算「没在默认视角」，双击一律回到默认窗口（最新那段）
+    var atDefault = !isZoomed() && Math.abs(view.e - 1) < 1e-6;
+    if (atDefault) return;
     resetView();
-    syncZoomBadge();
+    hideTip();
     render();
   });
 
@@ -805,11 +1025,12 @@
     else if (k === '1') { window.ticker.focusTab('minute'); }
     else if (k === '2') { window.ticker.focusTab('five'); }
     else if (k === '3') { window.ticker.focusTab('day'); }
+    else if (k === '4') { window.ticker.focusTab('month'); }
     else if (k === 'Escape') { e.preventDefault(); window.ticker.focusClose(); }
   });
 
   function cycleTab(dir) {
-    var order = ['minute', 'five', 'day'];
+    var order = ['minute', 'five', 'day', 'month'];
     var i = order.indexOf(state.tab);
     if (i < 0) i = 0;
     i = (i + dir + order.length) % order.length;

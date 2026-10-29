@@ -4,12 +4,17 @@ const { NAMES, EM_SECID, HF_EM_SECID } = require('../core/constants.cjs');
 const { num } = require('../core/utils.cjs');
 const { HEADERS } = require('./market.cjs');
 
-const FOCUS_TABS = ['minute', 'five', 'day'];
+const FOCUS_TABS = ['minute', 'five', 'day', 'month'];
 const FOCUS_SESSION_A = 242;   // A 股一个交易日：09:30-11:30 + 13:00-15:00，含首尾共 242 个分钟点
 const FOCUS_SESSION_HK = 332;  // 港股：09:30-12:00 + 13:00-16:00
 const FOCUS_SESSION_US = 392;  // 美股：09:30-16:00（东部时间）
 const FOCUS_SESSION_HF = 1440; // 外盘期货/美元指数：近乎 24 小时连续交易（实际约 1380 分钟），留足余量
-const FOCUS_TTL = { minute: 15000, five: 60000, day: 60000 };
+const FOCUS_TTL = { minute: 15000, five: 60000, day: 60000, month: 60000 };
+
+// 日K 往后翻要靠历史：腾讯 fqkline 实测最多给到 1200 根（约 5 年，最早 2021-11），
+// 再多就返回空。月K 120 根已经是 10 年，够看长期趋势了。
+const DAY_BARS = 1200;
+const MONTH_BARS = 120;
 
 function sessionMinutes(code) {
   if (/^hf_/i.test(code) || /^usDXY$/i.test(code)) return FOCUS_SESSION_HF;
@@ -60,8 +65,9 @@ function createFocusService(options) {
     let candles = [];
     const session = sessionMinutes(code);
 
-    if (tab === 'day') {
-      const rows = await market.fetchKlineRaw(code, 'day', 160);
+    if (tab === 'day' || tab === 'month') {
+      // 日K 拉满 1200 根让用户能往回翻到 5 年前；月K 120 根就是 10 年
+      const rows = await market.fetchKlineRaw(code, tab, tab === 'day' ? DAY_BARS : MONTH_BARS);
       candles = rows.map(function (r) {
         return { d: String(r[0]), o: num(r[1]), c: num(r[2]), h: num(r[3]), l: num(r[4]), v: num(r[5]) };
       }).filter(function (x) { return isFinite(x.c) && isFinite(x.o) && isFinite(x.h) && isFinite(x.l); });
@@ -151,7 +157,7 @@ function createFocusService(options) {
       if (!isFinite(pct) && isFinite(snap[code].pct)) pct = snap[code].pct;
     }
 
-    const hasData = tab === 'day' ? candles.length > 1 : days.length > 0;
+    const hasData = (tab === 'day' || tab === 'month') ? candles.length > 1 : days.length > 0;
     return {
       code: code, name: name, tab: tab, session: session,
       price: price, pct: pct, prevClose: prevClose, change: change,

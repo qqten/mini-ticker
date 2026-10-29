@@ -138,14 +138,23 @@ test('5日 payload 按日期正序并计算涨跌', async function () {
   assert.equal(data.hasData, true);
 });
 
-test('日K payload 取 160 根并过滤坏行', async function () {
+test('日K payload 拉满 1200 根历史并过滤坏行', async function () {
   const { service, calls } = makeService();
   const data = await service.payload('sh600519', 'day');
-  assert.deepEqual(calls.kline, [['sh600519', 'day', 160]]);
+  // 1200 是腾讯 fqkline 实测能返回的上限（约 5 年），再多就空
+  assert.deepEqual(calls.kline, [['sh600519', 'day', 1200]]);
   assert.equal(data.candles.length, 3);
   assert.equal(data.price, 1705);
   assert.equal(data.prevClose, 1690);
   assert.equal(data.change, 15);
+  assert.equal(data.hasData, true);
+});
+
+test('月K payload 取 120 根（约 10 年）', async function () {
+  const { service, calls } = makeService();
+  const data = await service.payload('sh600519', 'month');
+  assert.deepEqual(calls.kline, [['sh600519', 'month', 120]]);
+  assert.equal(data.candles.length, 3);
   assert.equal(data.hasData, true);
 });
 
@@ -191,7 +200,7 @@ test('payload 命中缓存直到 TTL 过期，peek 只读缓存', async function
   assert.equal(service.peek('sh600519', 'minute'), null);
 });
 
-test('FOCUS_TABS 与 TTL 保持原有口径', function () {
-  assert.deepEqual(FOCUS_TABS, ['minute', 'five', 'day']);
-  assert.deepEqual(FOCUS_TTL, { minute: 15000, five: 60000, day: 60000 });
+test('FOCUS_TABS 与 TTL 覆盖四个周期', function () {
+  assert.deepEqual(FOCUS_TABS, ['minute', 'five', 'day', 'month']);
+  assert.deepEqual(FOCUS_TTL, { minute: 15000, five: 60000, day: 60000, month: 60000 });
 });

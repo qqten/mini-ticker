@@ -350,6 +350,8 @@ body.noname .name { display: none; }
   min-height: 0;
   flex-direction: column;
   overflow: hidden;
+  /* 左右边缘的平移箭头按这个定位 */
+  position: relative;
 }
 
 body.focus #focus { display: flex; }
@@ -457,6 +459,45 @@ body[data-text="dark"] #f-zoom { background: rgba(24, 32, 44, .09); }
 }
 
 #chart svg { display: block; }
+
+/* 边缘平移箭头：鼠标贴到左/右边缘时出现并跟着上下走，停住就往那个方向平移。
+   pointer-events: none 是关键 —— 否则它会挡住图表的十字光标和拖拽。
+   底下垫一层半透明胶囊：边缘正好压着价格刻度文字，光画个三角会糊在一起看不清。 */
+.edge-arrow {
+  position: absolute;
+  top: 0;
+  width: 15px;
+  height: 24px;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  opacity: 0;
+  z-index: 3;
+  border-radius: 8px;
+  background: rgba(128, 140, 160, .34);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, .18);
+  transition: opacity .12s ease;
+}
+
+body.focus .edge-arrow.can { display: flex; }
+.edge-arrow.on { opacity: .92; }
+
+.edge-arrow::before {
+  content: '';
+  width: 0;
+  height: 0;
+  border-top: 4.5px solid transparent;
+  border-bottom: 4.5px solid transparent;
+}
+
+#edge-l { left: 1px; }
+#edge-l::before { border-right: 5.5px solid var(--text); }
+#edge-r { right: 1px; }
+#edge-r::before { border-left: 5.5px solid var(--text); }
+
+/* 拖起来的时候给个抓取光标，免得以为点在选东西 */
+#chart.dragging { cursor: grabbing; }
 
 /* 透明窗口压在任意桌面上：给文字加描边光晕，给线条加投影，否则遇到同色背景就消失 */
 #chart text {
