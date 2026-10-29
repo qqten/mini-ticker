@@ -439,6 +439,26 @@ function createWindow() {
         }, 1200);
       }
 
+      // 调试：TICKER_SHOT_PERIOD=3 点几下右上角周期标识，验证点击轮换周期
+      if (process.env.TICKER_SHOT_PERIOD) {
+        setTimeout(async function () {
+          if (!win || win.isDestroyed()) return;
+          const times = Math.max(1, Math.min(5, parseInt(process.env.TICKER_SHOT_PERIOD, 10) || 1));
+          const js =
+            "(async function(){" +
+            "var b=document.getElementById('period-label');if(!b)return 'no-label';" +
+            "var log=[b.textContent];" +
+            "for(var i=0;i<" + times + ";i++){b.click();await new Promise(function(r){setTimeout(r,380);});log.push(b.textContent);}" +
+            "return log.join('→');" +
+            "})()";
+          try {
+            const ret = await win.webContents.executeJavaScript(js);
+            logLine('[shot]', '点周期标识 x' + times + ' → ' + ret);
+            logLine('[shot]', 'config.period=' + config.period);
+          } catch (e) { logLine('[shot]', '周期点击测试失败 ' + e.message); }
+        }, 1200);
+      }
+
       // 调试：TICKER_SHOT_MENU=1 打出右键菜单项，验证只剩设置 / 退出
       if (process.env.TICKER_SHOT_MENU) {
         setTimeout(function () {

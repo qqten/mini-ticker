@@ -145,7 +145,16 @@ body[data-text="dark"].backdrop {
   color: var(--sub);
   opacity: .8;
   text-shadow: var(--shadow);
-  transition: color .38s ease;
+  transition: color .38s ease, opacity .15s ease;
+  /* 点一下切下一个周期，跟 Ctrl+1~4 同效 */
+  cursor: pointer;
+  padding: 0 3px;
+  border-radius: 4px;
+}
+
+#period-label:hover {
+  opacity: 1;
+  color: var(--text);
 }
 
 /* 涨跌幅排序：跟右上角图钉同一行的小按钮。

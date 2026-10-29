@@ -301,6 +301,17 @@
   }
   paintSort();
 
+  // 点一下周期标识就跟 Ctrl+1~4 一样往后切一格：分时 → 日线 → 月线 → 年线 → 分时
+  var PERIOD_ORDER = ['minute', 'day', 'month', 'year'];
+  if (periodLabel) {
+    periodLabel.title = '点一下切下一个周期（分时 → 日线 → 月线 → 年线）';
+    periodLabel.addEventListener('click', function (e) {
+      e.stopPropagation();
+      var i = PERIOD_ORDER.indexOf(currentPeriod);
+      window.ticker.setPeriod(PERIOD_ORDER[(i + 1) % PERIOD_ORDER.length]);
+    });
+  }
+
   var pinned = false;
   var pinBtn = document.getElementById('pin-btn');
 
@@ -322,7 +333,7 @@
   document.addEventListener('pointerdown', function (e) {
     if (e.button !== 0) return;
     if (pinned) return; // 固定模式不响应拖动
-    if (e.target === pinBtn || e.target === sortBtn) return;
+    if (e.target === pinBtn || e.target === sortBtn || e.target === periodLabel) return;
     // 图表区（含周期按钮）要能交互，别被当成拖窗口；拖窗口从左列拖
     if (e.target.closest && e.target.closest('#focus')) return;
     if (e.target === splitter) return;   // 分界线有自己的一套拖动
@@ -424,7 +435,7 @@
     var t = e.target;
     if (suppressClick) { suppressClick = false; return; }
     if (t.closest && (t.closest('#focus') || t.closest('#splitter'))) return;
-    if (t === pinBtn || t === sortBtn) return;
+    if (t === pinBtn || t === sortBtn || t === periodLabel) return;
     // 拖着窗口跑（起点和落点差得多）不算点击，别顺手展开 / 换标的
     if (downAt && (Math.abs(e.screenX - downAt.sx) > 3 || Math.abs(e.screenY - downAt.sy) > 3 ||
       Math.abs(e.clientX - downAt.x) > 4 || Math.abs(e.clientY - downAt.y) > 4)) return;
