@@ -1,8 +1,8 @@
-version: 1.1.1
+version: 1.1.2
 files:
-  - url: https://gitee.com/qqten/mini-ticker/releases/download/v1.1.1/MiniTicker-Setup-1.1.1.exe
-    sha512: /WZdQ+W8u528l4+lrDpQUqZGQH1J5EAcxq3iMWHGZkzEv34TBA5JEqs19ioxYRUDCtscVIcoF5L866JhPlOkDQ==
-    size: 76392895
-path: MiniTicker-Setup-1.1.1.exe
-sha512: /WZdQ+W8u528l4+lrDpQUqZGQH1J5EAcxq3iMWHGZkzEv34TBA5JEqs19ioxYRUDCtscVIcoF5L866JhPlOkDQ==
-releaseDate: '2026-11-03T06:37:52.700Z'
+  - url: https://gitee.com/qqten/mini-ticker/releases/download/v1.1.2/MiniTicker-Setup-1.1.2.exe
+    sha512: zFOiFqXx0uScMV5Gj9aWW9Ay1nwTOmyuXgYiJH7CFwC7ykk8vnw05L69hHumIJp9G5HfKYH0xViFeUUKuWABuw==
+    size: 76393245
+path: MiniTicker-Setup-1.1.2.exe
+sha512: zFOiFqXx0uScMV5Gj9aWW9Ay1nwTOmyuXgYiJH7CFwC7ykk8vnw05L69hHumIJp9G5HfKYH0xViFeUUKuWABuw==
+releaseDate: '2026-11-03T07:22:16.521Z'
