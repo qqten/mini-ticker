@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { DEFAULT_SNAP, clampRect, snapRect, rectInside, focusExpandX, collapseRect, pickRememberedPosition } = require('../electron/core/window-layout.cjs');
+const { DEFAULT_SNAP, clampRect, snapRect, rectInside, focusExpandX, focusExpandBox, collapseRect, pickRememberedPosition } = require('../electron/core/window-layout.cjs');
 
 const AREA = { x: 0, y: 0, width: 1920, height: 1040 };
 // 第二块屏在右侧，工作区从 1920 开始
@@ -60,9 +60,9 @@ test('focusExpandX 支持固定图表方向', function () {
   assert.equal(focusExpandX(1500, 320, AREA, 940, 'left'), 880);
   // 固定图表在右：靠左时向右展开
   assert.equal(focusExpandX(40, 320, AREA, 940, 'right'), 40);
-  // 固定方向和空间冲突时退到另一边
-  assert.equal(focusExpandX(40, 320, AREA, 940, 'left'), 40);
-  assert.equal(focusExpandX(1500, 320, AREA, 940, 'right'), 880);
+  // 固定方向和空间冲突时不换边：左边不够就往右推（图表仍在左），右边不够就往左推
+  assert.equal(focusExpandX(40, 320, AREA, 940, 'left'), 0);
+  assert.equal(focusExpandX(1500, 320, AREA, 940, 'right'), 980);
 });
 
 test('focusExpandX 支持负坐标和多屏工作区', function () {
@@ -103,10 +103,55 @@ test('pickRememberedPosition 只在记忆屏幕仍连接时采用', function () 
 test('固定图表在左：左边地方够就坚决左扩，不偷偷换边', function () {
   // 左边只剩 200px（够 160 的保底），图表会被压窄，但仍然在左边
   assert.equal(focusExpandX(200, 320, AREA, 520, 'left'), 0);
-  // 左边完全没地方（贴左边缘）才退到右边
+  // 左边完全没地方（贴左边缘）也留在左边
   assert.equal(focusExpandX(0, 320, AREA, 940, 'left'), 0);
   // 右边只剩 200px：固定右时保持原位（图表压窄），不换到左边
   assert.equal(focusExpandX(1400, 320, AREA, 520, 'right'), 1400);
+});
+
+test('focusExpandBox 固定方位时靠挪窗口保证图表宽度', function () {
+  const want = 620;
+  // 列表贴右边缘（x=1500），选「图表在右」：右侧只有 100px，
+  // 但整屏放得下 → 窗口整体左移，列表让位，图表仍是完整 620
+  const right = focusExpandBox({ x: 1500, y: 100, width: 320, height: 400 }, AREA, 'right', want);
+  assert.equal(right.chartW, want);
+  assert.equal(right.width, 320 + want);
+  assert.equal(right.x, 1920 - right.width);
+  assert.equal(right.chartLeft, false);
+  assert.equal(right.x + right.width, 1920, '图表那一栏贴住屏幕右边缘');
+  assert.ok(right.x < 1500, '列表被整体左移腾出位置');
+
+  // 列表贴左边缘（x=0），选「图表在左」：左边 0px → 窗口整体右移，列表跟着挪
+  const left = focusExpandBox({ x: 0, y: 100, width: 320, height: 400 }, AREA, 'left', want);
+  assert.equal(left.chartW, want);
+  assert.equal(left.x, 0);
+  assert.equal(left.chartLeft, true);
+  // 图表占 [0,620]，列表在 [620,940] —— 列表确实被挪到了新位置
+  assert.equal(left.x + left.width - left.listW, 620);
+
+  // auto 仍按当下空位放，不主动挪窗口：靠右时向左长，原来的右边缘（1820）不动
+  const autoRight = focusExpandBox({ x: 1500, y: 100, width: 320, height: 400 }, AREA, 'auto', want);
+  assert.equal(autoRight.x, 1500 - want);
+  assert.equal(autoRight.x + autoRight.width, 1820);
+  assert.equal(autoRight.chartLeft, true);
+  const autoLeft = focusExpandBox({ x: 40, y: 100, width: 320, height: 400 }, AREA, 'auto', want);
+  assert.equal(autoLeft.x, 40);
+  assert.equal(autoLeft.chartLeft, false);
+});
+
+test('focusExpandBox 整屏塞不下才压窄图表', function () {
+  // 列表 640 + 想要 1100 = 1740，1920-8 够；换成窄屏 1024 就压窄
+  const narrow = { x: 0, y: 0, width: 1024, height: 768 };
+  const box = focusExpandBox({ x: 700, y: 100, width: 640, height: 400 }, narrow, 'right', 1100);
+  assert.equal(box.width, narrow.width - 8);
+  assert.equal(box.chartW, narrow.width - 8 - 640);
+  assert.equal(box.x + box.width, narrow.width, '夹回工作区右边缘');
+  assert.equal(box.chartLeft, false);
+
+  // 极端窄屏：保底 160 的图表宽度
+  const tiny = { x: 0, y: 0, width: 700, height: 600 };
+  const t = focusExpandBox({ x: 0, y: 0, width: 600, height: 400 }, tiny, 'left', 620);
+  assert.equal(t.chartW, 160);
 });
 
 test('collapseRect 只收图表那一栏，列表原地不动', function () {

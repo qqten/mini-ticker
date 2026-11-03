@@ -18,7 +18,7 @@ const { createFundMinuteStore } = require('./data/fund-minutes.cjs');
 const { createQuoteService } = require('./data/quote-service.cjs');
 const { createFocusService, FOCUS_TABS } = require('./data/focus.cjs');
 const { applySettingsPatch } = require('./core/settings.cjs');
-const { clampRect, snapRect, rectInside, focusExpandX, collapseRect, pickRememberedPosition } = require('./core/window-layout.cjs');
+const { clampRect, snapRect, rectInside, focusExpandBox, collapseRect, pickRememberedPosition } = require('./core/window-layout.cjs');
 
 // 极简浮窗不需要 GPU 合成，禁用硬件加速可避免部分机器上 GPU 进程崩溃、并降低功耗
 app.disableHardwareAcceleration();
@@ -899,35 +899,24 @@ const FOCUS_CHART_KEEP = 200;
 function focusTargetBounds() {
   const cur = win.getBounds();
   const area = screen.getDisplayMatching(cur).workArea;
-  const leftW = Math.round(cur.width);
   const side = config.focusChartSide || 'auto';
-  let chartW = Math.round(config.focusChartWidth || FOCUS_CHART_DEFAULT);
-  if (!isFinite(chartW)) chartW = FOCUS_CHART_DEFAULT;
-  chartW = Math.max(FOCUS_CHART_MIN, Math.min(FOCUS_CHART_MAX, chartW));
+  let want = Math.round(config.focusChartWidth || FOCUS_CHART_DEFAULT);
+  if (!isFinite(want)) want = FOCUS_CHART_DEFAULT;
+  want = Math.max(FOCUS_CHART_MIN, Math.min(FOCUS_CHART_MAX, want));
 
-  // 先看目标那一侧还剩多少地方：不够就把图表压窄，而不是悄悄换到另一边。
-  // 两边都不够（窗口几乎占满屏）时按宽敞的那边算，再用屏幕宽度兜底。
-  const roomL = cur.x - area.x;
-  const roomR = area.x + area.width - (cur.x + cur.width);
-  let avail;
-  if (side === 'left') avail = roomL;
-  else if (side === 'right') avail = roomR;
-  else avail = Math.max(roomL, roomR);
-  avail = Math.min(avail, area.width - leftW - 8);
-  chartW = Math.max(160, Math.min(chartW, avail));
-  const width = leftW + chartW;
+  // 固定方位（图表在左/右）时图表宽度优先给足：那一侧原本空间不够就把整个窗口
+  // 平移过去（列表跟着让位），只有整块屏都塞不下才压窄图表。auto 仍按当下空位来放。
+  const box = focusExpandBox(cur, area, side, want);
   const height = Math.min(cur.height, area.height);
-
-  const x = focusExpandX(cur.x, cur.width, area, width, side);
   const y = Math.max(area.y, Math.min(cur.y, area.y + area.height - height));
   return {
-    x: x,
+    x: box.x,
     y: y,
-    width: width,
+    width: box.width,
     height: height,
-    leftW: leftW,
-    chartW: chartW,
-    expandLeft: x < cur.x
+    leftW: box.listW,
+    chartW: box.chartW,
+    expandLeft: box.chartLeft
   };
 }
 
@@ -986,7 +975,8 @@ function setFocus(on) {
     logLine('[focus]', '展开图表 ' + focusCode + ' tab=' + focusTab +
       ' 方向 ' + (b.expandLeft ? '左' : '右') +
       '（图表在列表' + (b.expandLeft ? '左' : '右') + '侧）' +
-      ' 宽度 ' + b.leftW + '+' + b.chartW);
+      ' 宽度 ' + b.leftW + '+' + b.chartW +
+      ' 位置 ' + b.x + ',' + b.y);
     return;
   }
 
@@ -1048,7 +1038,8 @@ function reapplyFocusSide() {
 }
 
 function focusStep(dir) {
-  if (!focusOn) return;  const list = focusList();
+  if (!focusOn) return;
+  const list = focusList();
   if (!list.length) return;
   let i = list.indexOf(focusCode);
   if (i < 0) i = 0;
