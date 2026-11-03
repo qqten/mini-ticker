@@ -110,6 +110,15 @@
           <b id="width-val">320</b>
         </div>
         <p class="hint">也可以直接把鼠标移到浮窗左右边缘拖拽，松手即记住宽度。</p>
+        <div class="field">
+          <span class="fl">聚焦图表</span>
+          <div class="seg">
+            <label><input type="radio" name="focusChartSide" value="auto" /><span>自动</span></label>
+            <label><input type="radio" name="focusChartSide" value="left" /><span>图表在左</span></label>
+            <label><input type="radio" name="focusChartSide" value="right" /><span>图表在右</span></label>
+          </div>
+        </div>
+        <p class="hint">默认自动：浮窗靠近屏幕右侧时保持列表贴边、图表出现在列表左侧；靠近左侧时图表出现在右侧。也可以固定图表在列表左 / 右，那一侧放不下时会自动换到另一侧。</p>
       </section>
 
       <section data-cat="hotkeys">
@@ -138,7 +147,15 @@
           <span class="fl">聚焦图表</span>
           <input class="sc" id="sc-focus" type="text" readonly spellcheck="false" />
         </div>
-        <p class="hint">点击输入框后直接按想用的组合键即可录入（如 Ctrl+Shift+R），Esc 恢复默认。聚焦图表是全局快捷键，会被其它程序占用时提示注册失败。</p>
+        <div class="field sc-field">
+          <span class="fl">显示 / 隐藏</span>
+          <input class="sc" id="sc-showHide" type="text" readonly spellcheck="false" />
+        </div>
+        <div class="field sc-field">
+          <span class="fl">鼠标穿透</span>
+          <input class="sc" id="sc-clickThrough" type="text" readonly spellcheck="false" />
+        </div>
+        <p class="hint">点击输入框后直接按想用的组合键即可录入（如 Ctrl+Shift+R），Esc 恢复默认。聚焦图表、显示隐藏、鼠标穿透是全局快捷键，会被其它程序占用时提示注册失败。</p>
       </section>
 
       <section data-cat="session">

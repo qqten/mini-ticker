@@ -762,8 +762,22 @@
     state.index = s.index;
     state.total = s.total;
     state.name = s.name;
+    state.closing = !!s.closing;
 
-    document.body.classList.toggle('focus', state.on);
+    if (state.on) {
+      document.body.classList.remove('focus-closing');
+      document.body.classList.add('focus');
+      document.body.classList.toggle('chart-left', !!s.chartLeft);
+    } else if (state.closing) {
+      // 主进程准备缩窗口：保持聚焦布局不动，只让图表淡出，等最终 off 状态再切回普通布局
+      document.body.classList.add('focus-closing');
+      stop();
+      hideTip();
+      stopEdge();
+      return;
+    } else {
+      document.body.classList.remove('focus', 'chart-left', 'focus-closing');
+    }
     // 左列保持展开前的宽度（主进程算的），右边剩下的全归图表
     if (s.leftW) document.body.style.setProperty('--left-w', Math.round(s.leftW) + 'px');
     // 换标的 / 换周期 = 换了张图，缩放回到整幅；只是尺寸变了则保留当前的缩放

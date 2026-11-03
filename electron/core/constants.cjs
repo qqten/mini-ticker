@@ -59,6 +59,9 @@ const PERIOD_LABEL = { minute: '分时', day: '日线', month: '月线', year: '
 // 文字配色：light = 亮色文字（配深背景），dark = 暗色文字（配浅背景），auto = 跟随窗口背后的实际画面
 const TEXT_MODES = ['light', 'dark', 'auto'];
 
+// 聚焦图表相对列表的位置：auto = 靠近哪边就从另一侧展开，left / right = 固定图表在左 / 右
+const FOCUS_CHART_SIDES = ['auto', 'left', 'right'];
+
 const DEFAULT_CONFIG = {
   symbols: ['sh000001', 'sz399001', 'sz399006', 'sh000688'],
   watchlist: DEFAULT_WATCHLIST,
@@ -88,6 +91,11 @@ const DEFAULT_CONFIG = {
   // 高度：0 表示跟随内容自动撑开，>0 表示用户手动拖过、以这个值为准
   height: 0,
   pos: null,
+  // 聚焦图表位置：auto 靠屏幕哪边就从另一侧展开；left/right 固定图表在列表左/右
+  focusChartSide: 'auto',
+  // 多屏记忆：displayId -> { x, y }，以及最后一次所在屏幕
+  displayPositions: {},
+  lastDisplayId: '',
   // 快捷键：周期/刷新是窗口内快捷键，focus 是全局唤起聚焦图表
   shortcuts: {
     periodMinute: 'Ctrl+1',
@@ -95,7 +103,9 @@ const DEFAULT_CONFIG = {
     periodMonth: 'Ctrl+3',
     periodYear: 'Ctrl+4',
     refresh: 'Ctrl+R',
-    focus: 'Ctrl+Alt+F'
+    focus: 'Ctrl+Alt+F',
+    showHide: 'Ctrl+Alt+H',
+    clickThrough: 'Ctrl+Alt+T'
   }
 };
 
@@ -122,6 +132,7 @@ module.exports = {
   PERIODS,
   PERIOD_LABEL,
   TEXT_MODES,
+  FOCUS_CHART_SIDES,
   DEFAULT_CONFIG,
   TYPE_LABEL
 };

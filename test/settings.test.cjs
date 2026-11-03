@@ -82,9 +82,9 @@ test('applySettingsPatch 的时间字段非法时回退当前值', function () {
   const cur = current();
   const result = applySettingsPatch(cur, {
     symbols: ['sh000001'],
-    alert: { enabled: false, time: '9:5' },
-    autoExit: { enabled: true, time: '9:5' },
-    autoStart: { enabled: true, time: '09:25' }
+    alert: { enabled: false, time: '25:00' },
+    autoExit: { enabled: true, time: '12:60' },
+    autoStart: { enabled: true, time: '9:25' }
   });
   assert.deepEqual(result.patch.alert, { enabled: false, time: '14:30' });
   assert.deepEqual(result.patch.autoExit, { enabled: true, time: '15:05' });
@@ -115,30 +115,55 @@ test('applySettingsPatch 保留原有布尔字段语义', function () {
   assert.equal(on.patch.alert.enabled, false);
 });
 
-test('applySettingsPatch 规范化快捷键，并只在聚焦键变化时要求重注册', function () {
+test('applySettingsPatch 校验聚焦图表位置', function () {
+  const cur = current();
+  const left = applySettingsPatch(cur, { symbols: ['sh000001'], focusChartSide: 'left' });
+  assert.equal(left.patch.focusChartSide, 'left');
+
+  const bad = applySettingsPatch(cur, { symbols: ['sh000001'], focusChartSide: 'middle' });
+  assert.equal(bad.patch.focusChartSide, 'auto');
+});
+
+test('applySettingsPatch 规范化快捷键，并只在全局键变化时要求重注册', function () {
   const cur = current();
   const same = applySettingsPatch(cur, {
     symbols: ['sh000001'],
-    shortcuts: { refresh: 'Ctrl+R', focus: 'Ctrl+Alt+F' }
+    shortcuts: { refresh: 'Ctrl+R', focus: 'Ctrl+Alt+F', showHide: 'Ctrl+Alt+H', clickThrough: 'Ctrl+Alt+T' }
   });
-  assert.equal(same.effects.reRegisterHotkey, false);
+  assert.equal(same.effects.reRegisterHotkeys, false);
   assert.equal(same.patch.shortcuts.refresh, DEFAULT_CONFIG.shortcuts.refresh);
+  assert.equal(same.patch.shortcuts.showHide, DEFAULT_CONFIG.shortcuts.showHide);
+  assert.equal(same.patch.shortcuts.clickThrough, DEFAULT_CONFIG.shortcuts.clickThrough);
 
-  const changed = applySettingsPatch(cur, {
+  const focus = applySettingsPatch(cur, {
     symbols: ['sh000001'],
     shortcuts: { focus: 'Ctrl+Shift+F' }
   });
-  assert.equal(changed.effects.reRegisterHotkey, true);
-  assert.equal(changed.patch.shortcuts.focus, 'Ctrl+Shift+F');
+  assert.equal(focus.effects.reRegisterHotkeys, true);
+  assert.equal(focus.patch.shortcuts.focus, 'Ctrl+Shift+F');
   // 其它非法项回退默认
-  assert.equal(changed.patch.shortcuts.refresh, DEFAULT_CONFIG.shortcuts.refresh);
+  assert.equal(focus.patch.shortcuts.refresh, DEFAULT_CONFIG.shortcuts.refresh);
+
+  const showHide = applySettingsPatch(cur, {
+    symbols: ['sh000001'],
+    shortcuts: { showHide: 'Ctrl+Alt+S' }
+  });
+  assert.equal(showHide.effects.reRegisterHotkeys, true);
+  assert.equal(showHide.patch.shortcuts.showHide, 'Ctrl+Alt+S');
+
+  const through = applySettingsPatch(cur, {
+    symbols: ['sh000001'],
+    shortcuts: { clickThrough: 'Ctrl+Alt+P' }
+  });
+  assert.equal(through.effects.reRegisterHotkeys, true);
+  assert.equal(through.patch.shortcuts.clickThrough, 'Ctrl+Alt+P');
 });
 
 test('applySettingsPatch 只返回设置面板负责的字段', function () {
   const result = applySettingsPatch(current(), { symbols: ['sh000001'] });
   assert.deepEqual(Object.keys(result.patch).sort(), [
     'alert', 'alwaysOnTop', 'autoExit', 'autoStart', 'backdrop', 'backdropOpacity',
-    'baseline', 'interval', 'locked', 'period', 'probeIntervalMs', 'shortcuts',
+    'baseline', 'focusChartSide', 'interval', 'locked', 'period', 'probeIntervalMs', 'shortcuts',
     'showName', 'symbols', 'textMode', 'watchlist', 'width'
   ]);
 });

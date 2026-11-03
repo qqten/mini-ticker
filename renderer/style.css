@@ -25,14 +25,16 @@ body {
   flex: 1 1 auto;
   min-width: 0;
   min-height: 0;
+  order: 1;
   /* 聚焦展开后左边这一列保持展开前的宽度（由主进程算出，写入 --left-w） */
   flex-basis: auto;
 }
 
 body.focus #left {
-  /* 用 min() 兜底：窗口被拖窄时左列自动让位，图表永远留 200px */
+  /* 用 min() 兜底：窗口被拖窄到比列表还窄时左列跟着收；
+     动画展开/收起期间窗口宽度还在变，列表保持原宽度，图表从 0 长出来/收回去 */
   flex: 0 0 auto;
-  width: min(var(--left-w, 320px), calc(100% - 200px));
+  width: min(var(--left-w, 320px), 100%);
   min-width: 0;
 }
 
@@ -40,6 +42,7 @@ body.focus #left {
 #splitter {
   display: none;
   flex: 0 0 5px;
+  order: 2;
   align-self: stretch;
   cursor: col-resize;
   position: relative;
@@ -355,6 +358,7 @@ body.noname .name { display: none; }
   display: none;
   /* 不吃宽度：窗口被主进程加宽了多少，图表就占多少 */
   flex: 1 1 auto;
+  order: 3;
   min-width: 0;
   min-height: 0;
   flex-direction: column;
@@ -363,7 +367,36 @@ body.noname .name { display: none; }
   position: relative;
 }
 
-body.focus #focus { display: flex; }
+body.focus #focus {
+  display: flex;
+  animation: focus-in .18s ease-out both;
+  transform-origin: left center;
+}
+
+/* 图表在列表左侧时，从靠列表的那条边展开/收起 */
+body.focus.chart-left #focus { transform-origin: right center; }
+
+@keyframes focus-in {
+  from { opacity: 0; transform: scaleX(.97); }
+  to { opacity: 1; transform: scaleX(1); }
+}
+
+/* 收起：窗口先不动，图表淡出，160ms 后主进程再缩窗口 */
+body.focus.focus-closing #focus {
+  animation: none;
+  opacity: 0;
+  transform: scaleX(.97);
+  transition: opacity .18s ease, transform .18s ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  body.focus #focus { animation: none; }
+  body.focus.focus-closing #focus { transition: none; }
+}
+
+/* 靠屏幕右侧展开时主进程会让窗口向左长，图表换到列表左边，列表留在原来的贴边位置 */
+body.chart-left #focus { order: 1; }
+body.chart-left #left { order: 3; }
 
 /* 展开后列表仍按行数均分高度，宽度由 #left 固定 */
 body.focus #app { flex: 1 1 auto; }

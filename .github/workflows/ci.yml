@@ -31,3 +31,29 @@ jobs:
 
       - name: Unit tests
         run: npm test
+
+  smoke:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      # 冒烟需要 Electron 二进制，不能加 --ignore-scripts。
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Electron smoke tests
+        run: npm run smoke
+
+      - name: Upload smoke artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-artifacts
+          path: ${{ runner.temp }}/mini-ticker-smoke-*
+          if-no-files-found: ignore

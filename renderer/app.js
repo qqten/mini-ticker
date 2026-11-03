@@ -409,7 +409,10 @@
   // move/up 挂在 window 上：鼠标拖出分界线（或系统没给 pointer capture）时也能继续跟手
   window.addEventListener('pointermove', function (e) {
     if (!splitting) return;
-    document.body.style.setProperty('--left-w', clampSplit(e.clientX) + 'px');
+    // 图表在列表左侧时，分界线左边是图表，鼠标越往左列表越宽
+    var chartLeft = document.body.classList.contains('chart-left');
+    var raw = chartLeft ? window.innerWidth - e.clientX : e.clientX;
+    document.body.style.setProperty('--left-w', clampSplit(raw) + 'px');
   });
 
   function endSplit() {

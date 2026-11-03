@@ -253,10 +253,10 @@
   }
 
   /* ---- 快捷键录入 ---- */
-  var SC_KEYS = ['periodMinute', 'periodDay', 'periodMonth', 'periodYear', 'refresh', 'focus'];
+  var SC_KEYS = ['periodMinute', 'periodDay', 'periodMonth', 'periodYear', 'refresh', 'focus', 'showHide', 'clickThrough'];
   var SC_DEFAULTS = {
     periodMinute: 'Ctrl+1', periodDay: 'Ctrl+2', periodMonth: 'Ctrl+3', periodYear: 'Ctrl+4',
-    refresh: 'Ctrl+R', focus: 'Ctrl+Alt+F'
+    refresh: 'Ctrl+R', focus: 'Ctrl+Alt+F', showHide: 'Ctrl+Alt+H', clickThrough: 'Ctrl+Alt+T'
   };
   var SC_KEY_NAMES = { ' ': 'Space', 'ArrowUp': 'ArrowUp', 'ArrowDown': 'ArrowDown', 'ArrowLeft': 'ArrowLeft', 'ArrowRight': 'ArrowRight' };
 
@@ -427,6 +427,7 @@
   function save() {
     var periodEl = document.querySelector('input[name="period"]:checked');
     var textModeEl = document.querySelector('input[name="textMode"]:checked');
+    var focusSideEl = document.querySelector('input[name="focusChartSide"]:checked');
 
     var patch = {
       symbols: state.symbols,
@@ -434,6 +435,7 @@
       period: periodEl ? periodEl.value : 'minute',
       interval: parseInt($('interval').value, 10),
       textMode: textModeEl ? textModeEl.value : 'auto',
+      focusChartSide: focusSideEl ? focusSideEl.value : 'auto',
       backdrop: $('backdrop').checked,
       backdropOpacity: parseInt($('backdropOpacity').value, 10),
       probeIntervalMs: parseInt($('probeIntervalSec').value, 10) * 1000,
@@ -522,6 +524,8 @@
     $('baseline').checked = d.baseline !== false;
     $('alwaysOnTop').checked = !!d.alwaysOnTop;
     $('locked').checked = !!d.locked;
+    var fcs = document.querySelector('input[name="focusChartSide"][value="' + (d.focusChartSide || 'auto') + '"]');
+    if (fcs) fcs.checked = true;
 
     $('width').value = d.width;
     $('width-val').textContent = d.width;

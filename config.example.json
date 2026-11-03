@@ -48,13 +48,18 @@
   "width": 320,
   "height": 0,
   "pos": null,
+  "focusChartSide": "auto",
+  "displayPositions": {},
+  "lastDisplayId": "",
   "shortcuts": {
     "periodMinute": "Ctrl+1",
     "periodDay": "Ctrl+2",
     "periodMonth": "Ctrl+3",
     "periodYear": "Ctrl+4",
     "refresh": "Ctrl+R",
-    "focus": "Ctrl+Alt+F"
+    "focus": "Ctrl+Alt+F",
+    "showHide": "Ctrl+Alt+H",
+    "clickThrough": "Ctrl+Alt+T"
   },
   "focusChartWidth": 620
 }

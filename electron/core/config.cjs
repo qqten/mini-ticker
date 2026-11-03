@@ -7,13 +7,14 @@ const {
   DEFAULT_CONFIG,
   DEFAULT_WATCHLIST,
   PERIODS,
-  TEXT_MODES
+  TEXT_MODES,
+  FOCUS_CHART_SIDES
 } = require('./constants.cjs');
 const { sameList, clampInt } = require('./utils.cjs');
 const { readJson, writeJsonAtomic, backupJson } = require('./atomic-json.cjs');
 
 // 配置结构版本。以后加字段/改语义时在这里递增，并在 normalizeConfig 里迁移。
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 // 快捷键格式校验：修饰符(Ctrl/Alt/Shift)+ 主键，如 Ctrl+1 / Ctrl+Alt+F / Ctrl+Shift+R
 const SHORTCUT_KEY_RE = /^(F\d{1,2}|[0-9]|[a-zA-Z]|Space|Enter|Escape|Tab|ArrowUp|ArrowDown|ArrowLeft|ArrowRight|Home|End|PageUp|PageDown|Backspace|Delete)$/;
@@ -31,10 +32,19 @@ function validShortcut(s) {
   return SHORTCUT_KEY_RE.test(key);
 }
 
+// HH:MM，24 小时制，同时校验范围。只校验格式会让 25:00 / 12:60 进配置，
+// 定时器算出来是 null 或跨天，提醒和收盘退出就会静默失效。
+function isValidTime(value) {
+  if (typeof value !== 'string' || !/^\d{2}:\d{2}$/.test(value)) return false;
+  const h = parseInt(value.slice(0, 2), 10);
+  const m = parseInt(value.slice(3, 5), 10);
+  return h >= 0 && h <= 23 && m >= 0 && m <= 59;
+}
+
 function normalizeShortcuts(sc) {
   const def = DEFAULT_CONFIG.shortcuts;
   const out = {};
-  ['periodMinute', 'periodDay', 'periodMonth', 'periodYear', 'refresh', 'focus'].forEach(function (k) {
+  ['periodMinute', 'periodDay', 'periodMonth', 'periodYear', 'refresh', 'focus', 'showHide', 'clickThrough'].forEach(function (k) {
     out[k] = validShortcut(sc && sc[k]) ? sc[k].trim() : def[k];
   });
   return out;
@@ -53,14 +63,17 @@ function normalizeConfig(raw) {
 
   if (PERIODS.indexOf(cfg.period) < 0) cfg.period = 'minute';
   if (TEXT_MODES.indexOf(cfg.textMode) < 0) cfg.textMode = 'auto';
+  if (FOCUS_CHART_SIDES.indexOf(cfg.focusChartSide) < 0) {
+    cfg.focusChartSide = DEFAULT_CONFIG.focusChartSide;
+  }
   if (cfg.lastEffectiveTextMode !== 'dark') cfg.lastEffectiveTextMode = 'light';
   if (['off', 'pct-desc', 'pct-asc'].indexOf(cfg.sortMode) < 0) cfg.sortMode = 'off';
 
   cfg.alert = Object.assign({}, DEFAULT_CONFIG.alert, raw.alert || {});
-  if (!/^\d{2}:\d{2}$/.test(cfg.alert.time)) cfg.alert.time = DEFAULT_CONFIG.alert.time;
+  if (!isValidTime(cfg.alert.time)) cfg.alert.time = DEFAULT_CONFIG.alert.time;
 
   cfg.autoExit = Object.assign({}, DEFAULT_CONFIG.autoExit, raw.autoExit || {});
-  if (!/^\d{2}:\d{2}$/.test(cfg.autoExit.time)) cfg.autoExit.time = DEFAULT_CONFIG.autoExit.time;
+  if (!isValidTime(cfg.autoExit.time)) cfg.autoExit.time = DEFAULT_CONFIG.autoExit.time;
 
   cfg.autoStart = Object.assign({}, DEFAULT_CONFIG.autoStart, raw.autoStart || {});
   // 兼容中间版本写过的 mode 字段：mode=schedule 等同于 enabled
@@ -69,7 +82,7 @@ function normalizeConfig(raw) {
     delete cfg.autoStart.mode;
   }
   cfg.autoStart.enabled = !!cfg.autoStart.enabled;
-  if (!/^\d{2}:\d{2}$/.test(cfg.autoStart.time)) cfg.autoStart.time = DEFAULT_CONFIG.autoStart.time;
+  if (!isValidTime(cfg.autoStart.time)) cfg.autoStart.time = DEFAULT_CONFIG.autoStart.time;
 
   cfg.interval = clampInt(cfg.interval, DEFAULT_CONFIG.interval, 1000, 60000);
   cfg.probeIntervalMs = clampInt(cfg.probeIntervalMs, DEFAULT_CONFIG.probeIntervalMs, 1000, 15000);
@@ -91,6 +104,19 @@ function normalizeConfig(raw) {
   } else {
     cfg.pos = { x: Math.round(cfg.pos.x), y: Math.round(cfg.pos.y) };
   }
+  // 多屏记忆：只保留合法的 displayId -> 坐标，避免配置被手改坏后窗口开到屏幕外。
+  cfg.displayPositions = {};
+  if (raw.displayPositions && typeof raw.displayPositions === 'object' && !Array.isArray(raw.displayPositions)) {
+    Object.keys(raw.displayPositions).slice(0, 32).forEach(function (id) {
+      const p = raw.displayPositions[id];
+      if (!id || id.length > 64) return;
+      if (id === '__proto__' || id === 'constructor' || id === 'prototype') return;
+      if (!p || typeof p !== 'object' || !isFinite(p.x) || !isFinite(p.y)) return;
+      cfg.displayPositions[id] = { x: Math.round(p.x), y: Math.round(p.y) };
+    });
+  }
+  cfg.lastDisplayId = typeof raw.lastDisplayId === 'string' ? raw.lastDisplayId.slice(0, 64) : '';
+
   if (typeof cfg.updateFeed !== 'string') cfg.updateFeed = '';
 
   return cfg;
@@ -209,6 +235,7 @@ function migrateConfig(options) {
 
 module.exports = {
   SCHEMA_VERSION,
+  isValidTime,
   validShortcut,
   normalizeShortcuts,
   normalizeConfig,

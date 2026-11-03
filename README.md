@@ -14,8 +14,10 @@
 - **场外基金也有分时线**：基金没有分钟行情，就每轮抓一次盘中估值自己攒成曲线，跟股票一样一条线看下来
 - **四种周期**：分时 / 日线 / 月线 / 年线，`Ctrl+1~4` 秒切，右上角常驻当前周期标识
 - **涨幅排序**：右上角一个小按钮，点一下 涨幅从高到低、再点从低到高、第三下回到自选顺序，选择会记住
-- **聚焦图表**：`Ctrl+Alt+F` 把浮窗向右加宽，左边照旧是列表、右边长出一块图表区（分时 / 5日 / 日K / 月K，K 线 + 均线 + 成交量 + MACD + 十字光标读数，可缩放、可拖动翻历史）
+- **聚焦图表**：`Ctrl+Alt+F` 按窗口在屏幕上的位置展开——靠近左侧时图表长在列表右边，靠近右侧时图表长在列表左边，列表始终贴着原来那侧屏幕边缘；设置里也能固定图表在左或右（分时 / 5日 / 日K / 月K，K 线 + 均线 + 成交量 + MACD + 十字光标读数，可缩放、可拖动翻历史）
 - **可伸缩**：鼠标移到浮窗任意一边拖动改宽/改高，松手记住；窄到 220px 也还能用，会自己收字号、把折线压成迷你条
+- **贴边吸附 / 多屏记忆**：拖动靠近屏幕边缘会自动吸住；每个显示器分别记住位置，换屏、拔屏或重启后还能回到原来的屏幕
+- **全局显示 / 隐藏与穿透**：`Ctrl+Alt+H` 显示或隐藏浮窗，`Ctrl+Alt+T` 切换鼠标穿透，没焦点时也能操作
 - **按名字搜**：中文名、拼音首字母、代码都能搜，不用背代码
 - **尾盘提醒**：到点弹通知 + 任务栏闪烁
 - **收盘自动退出 / 自动启动**：收盘定时退出；自动启动走 Windows 计划任务，工作日定点拉起，节假日会跳过
@@ -74,19 +76,21 @@ Windows 用户装好依赖后，直接双击 `start.cmd` 也行。
 ### 测试
 
 ```bash
-npm test        # Node 内置 test runner：core / data 模块的单元测试，不需要 Electron 或网络
-npm run check   # 语法检查（electron/、scripts/、test/）
-npm run smoke   # 启动真实 Electron 冒烟：主窗口 / 设置 / A 股聚焦 / 外盘聚焦
+npm test          # Node 内置 test runner：core / data 模块的单元测试，不需要 Electron 或网络
+npm run check     # 语法检查（electron/、scripts/、test/）
+npm run smoke     # 启动真实 Electron 冒烟：主窗口 / 设置 / 分时 / 5日 / 日K / 月K / 图表交互
+npm run smoke:pack  # 对 dist/win-unpacked/MiniTicker.exe 跑同一套冒烟（先 npm run pack:dir）
 ```
 
-`npm run smoke` 会为每个场景创建独立的临时 `--user-data-dir`，不会影响正在运行的实例和 `%APPDATA%\mini-ticker`。脚本检查进程退出码、截图大小和日志里有没有渲染/接线错误；想保留截图和日志排查问题，用：
+`npm run smoke` 会为每个场景创建独立的临时 `--user-data-dir`，不会影响正在运行的实例和 `%APPDATA%\mini-ticker`。脚本检查进程退出码、截图是否为有效 PNG 且大小正常、日志里有没有渲染/接线错误，以及缩放、拖动、边缘平移、周期点击等交互是否真的执行。想保留截图和日志排查问题，用：
 
 ```bash
 TICKER_SMOKE_KEEP=1 npm run smoke        # bash
 $env:TICKER_SMOKE_KEEP=1; npm run smoke  # PowerShell
+TICKER_SMOKE_ONLY=focus,focus-day npm run smoke  # 只跑指定场景
 ```
 
-冒烟依赖本机 Electron，目前只在 Windows 上跑，未接入 CI。CI 在 GitHub Actions 上跑 Ubuntu + Windows、Node 20，只执行 `check` 和 `test`，配置见 `.github/workflows/ci.yml`。
+冒烟依赖本机 Electron，目前只在 Windows 上跑。CI 在 GitHub Actions 上跑 Ubuntu + Windows、Node 20：Ubuntu/Windows 执行语法检查和单元测试，Windows 额外执行 Electron 冒烟，配置见 `.github/workflows/ci.yml`。
 
 ### 自己打包
 
@@ -118,6 +122,8 @@ ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-
 | `Ctrl+1` ~ `Ctrl+4` | 切分时 / 日线 / 月线 / 年线 |
 | `Ctrl+R` | 立即刷新 |
 | `Ctrl+Alt+F` | 展开 / 收起聚焦图表（全局快捷键，浮窗没焦点时也能按） |
+| `Ctrl+Alt+H` | 显示 / 隐藏浮窗（全局快捷键，隐藏后行情继续刷新） |
+| `Ctrl+Alt+T` | 切换鼠标穿透（全局快捷键，开启后点击会落到下层应用；重启恢复可点击） |
 
 快捷键都能在**设置 → 快捷键**里改。
 
@@ -134,14 +140,14 @@ ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-
 | --- | --- |
 | 标的 | 搜索添加、勾选是否显示在浮窗、✕ 从候选里移除 |
 | 行情 | 默认周期、刷新间隔（1~60 秒，浮窗和聚焦图表共用） |
-| 外观 | 文字配色（自动 / 亮色字 / 暗色字）、衬底开关与浓度、显示名称 / 基准线、亮暗采样间隔、折线宽度；窗口始终置顶、锁定位置、宽度 |
-| 快捷键 | 六个快捷键，点一下输入框再按想用的组合键就录上，Esc 恢复默认，撞车会提示 |
+| 外观 | 文字配色（自动 / 亮色字 / 暗色字）、衬底开关与浓度、显示名称 / 基准线、亮暗采样间隔、折线宽度；窗口始终置顶、锁定位置、宽度、聚焦图表在列表左 / 右 / 自动 |
+| 快捷键 | 八个快捷键，点一下输入框再按想用的组合键就录上，Esc 恢复默认，撞车会提示 |
 | 交易时段 | 尾盘提醒（带测试按钮）、收盘自动退出、开盘自动启动（写 Windows 计划任务） |
 | 关于 | 当前版本、更新状态、检查更新 / 重启更新 |
 
 ## 聚焦图表
 
-浮窗只放得下折线，要看细节就按 `Ctrl+Alt+F`，或者**直接在浮窗上左键单击**。**不另开窗口**，而是把当前窗口向右加宽：左边仍是原来那份列表（只留名称、点位差、涨跌幅三栏，折线换到右边大图里），右边多出来的是图表区。右边顶到屏幕边缘时会改成向左加宽，位置和高度都不变。背景依然是透明的，只有线条和文字。
+浮窗只放得下折线，要看细节就按 `Ctrl+Alt+F`，或者**直接在浮窗上左键单击**。**不另开窗口**，而是按当前靠哪边决定图表长在哪侧：靠近屏幕左侧时图表出现在列表右边；靠近屏幕右侧时保持列表贴边，图表出现在列表左边。列表只留名称、点位差、涨跌幅三栏，高度不变。默认是「自动」，也可以在设置里固定图表在列表左 / 右。展开 / 收起用淡入淡出过渡，窗口只在透明区域做一次尺寸变化，不会逐帧抽动。背景依然是透明的，只有线条和文字。
 
 ![聚焦图表：左侧列表 + 右侧日K，鼠标悬停显示十字光标和当根数值](preview/focus-chart.png)
 
@@ -172,7 +178,7 @@ ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-
 | 按键 | 效果 |
 | --- | --- |
 | `↑` / `↓` | 上一个 / 下一个（跟着列表里显示的那几行走） |
-| 鼠标点行 | 直接切到那一行（跟 `↑↓` 等价） |
+| 鼠标点行 | 直接切到那一行（跟 `↑↓` 等价）；再点当前行就收起图表 |
 | 图表区滚轮 | 放大 / 缩小（以光标为不动点）；一直缩小能看全部历史 |
 | 图表区拖动 | 按住左右拖，翻到更早 / 更新的那段 |
 | 图表区左右边缘 | 鼠标停住就自动持续平移，箭头跟着鼠标走 |
@@ -224,8 +230,11 @@ ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-
 | `alert` | 尾盘提醒开关与时间 |
 | `autoExit` | 收盘自动退出时间，默认 `15:05`（留几分钟让收盘数据落定） |
 | `autoStart` | 自动启动：`enabled` 开启后按 `time`（默认 09:25）写 Windows 计划任务，工作日定点拉起 |
-| `shortcuts` | 六个快捷键，Electron accelerator 写法，比如 `CommandOrControl+Shift+K` |
+| `shortcuts` | 八个快捷键，Electron accelerator 写法，比如 `CommandOrControl+Shift+K`；其中 `focus` / `showHide` / `clickThrough` 是全局快捷键 |
 | `width` / `height` | 浮窗尺寸，拖动边缘自动写回；`height` 为 `0` 表示跟随内容撑开 |
+| `focusChartSide` | 聚焦图表位置：`auto`（默认，靠屏幕右边时图表在列表左侧，靠左边时在右侧）/ `left` / `right` |
+| `displayPositions` | 多屏记忆：`displayId -> { x, y }`，窗口移动时自动更新 |
+| `lastDisplayId` | 最后一次所在显示器的 id，启动时优先恢复这块屏幕上的位置 |
 | `sparkWidth` | 列表里迷你折线的期望宽度，实际还会被窗口宽度约束 |
 | `focusChartWidth` | 聚焦图表展开时的图表区宽度 |
 

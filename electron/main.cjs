@@ -18,6 +18,7 @@ const { createFundMinuteStore } = require('./data/fund-minutes.cjs');
 const { createQuoteService } = require('./data/quote-service.cjs');
 const { createFocusService, FOCUS_TABS } = require('./data/focus.cjs');
 const { applySettingsPatch } = require('./core/settings.cjs');
+const { clampRect, snapRect, rectInside, focusExpandX, pickRememberedPosition } = require('./core/window-layout.cjs');
 
 // 极简浮窗不需要 GPU 合成，禁用硬件加速可避免部分机器上 GPU 进程崩溃、并降低功耗
 app.disableHardwareAcceleration();
@@ -108,8 +109,117 @@ let settingsWin = null;
 let dragTimer = null;
 let dragProbeTimer = null;
 let dragBase = null;
+// 聚焦展开 / 收起：窗口只做一次瞬时改尺寸（透明区域看不见），
+// 真正的过渡交给渲染层做淡入淡出，避免逐帧改窗口尺寸造成的抽动。
+let focusExpandTimer = null;
+let focusCollapseTimer = null;
+let focusClosing = false;
 
 /* ---------------- 窗口 ---------------- */
+
+function displayIdOf(display) {
+  return String(display.id);
+}
+
+// 收起时先让图表淡出，再缩窗口
+const FOCUS_FADE_MS = 180;
+
+// 启动位置优先级：上次所在屏幕的记忆位置 → 上次位置（夹回最近的屏幕）。
+// 屏幕被拔掉、分辨率变了、旧配置坐标在屏幕外时，都会在这里被夹回可视区。
+function preferredWindowPosition(width, height) {
+  const displays = screen.getAllDisplays();
+  const remembered = pickRememberedPosition(config.displayPositions, config.lastDisplayId, displays);
+  if (remembered) {
+    return clampRect(remembered.x, remembered.y, width, height, remembered.display.workArea);
+  }
+
+  const target = config.pos;
+  if (!target || !isFinite(target.x) || !isFinite(target.y)) return null;
+
+  const display = screen.getDisplayNearestPoint({
+    x: Math.round(target.x + width / 2),
+    y: Math.round(target.y + height / 2)
+  });
+  return clampRect(target.x, target.y, width, height, display.workArea);
+}
+
+function rememberWindowPlacement() {
+  if (!win || win.isDestroyed()) return;
+  // 聚焦展开时窗口会临时移动/加宽，别把展开后的坐标当成用户位置记下来，
+  // 否则展开状态退出后，下次启动会落在左移/右移过的位置。
+  if (focusOn || focusClosing) return;
+  const b = win.getBounds();
+  const display = screen.getDisplayMatching(b);
+  const id = displayIdOf(display);
+  config.pos = { x: b.x, y: b.y };
+  config.lastDisplayId = id;
+  if (!config.displayPositions || typeof config.displayPositions !== 'object') {
+    config.displayPositions = {};
+  }
+  config.displayPositions[id] = { x: b.x, y: b.y };
+}
+
+function keepWindowInWorkArea() {
+  if (!win || win.isDestroyed()) return false;
+  const b = win.getBounds();
+  const display = screen.getDisplayMatching(b);
+  const p = clampRect(b.x, b.y, b.width, b.height, display.workArea);
+  if (p.x === b.x && p.y === b.y) return false;
+  win.setPosition(p.x, p.y);
+  return true;
+}
+
+let displayWatchTimer = null;
+let displayWatchStarted = false;
+function watchDisplays() {
+  if (displayWatchStarted) return;
+  displayWatchStarted = true;
+  const onChange = function () {
+    if (displayWatchTimer) clearTimeout(displayWatchTimer);
+    displayWatchTimer = setTimeout(function () {
+      if (!win || win.isDestroyed()) return;
+      keepWindowInWorkArea();
+      rememberWindowPlacement();
+      saveConfig();
+    }, 200);
+  };
+  screen.on('display-added', onChange);
+  screen.on('display-removed', onChange);
+  screen.on('display-metrics-changed', onChange);
+}
+
+// 截图偶尔会拿到空 NativeImage（尤其设置窗口刚创建时还没真正绘制）。
+// 这里等页面加载完成、把窗口显示出来，再最多重试 4 次，避免写出 0 字节 PNG。
+async function capturePagePng(target) {
+  if (!target || target.isDestroyed()) return null;
+  try { if (!target.isVisible()) target.show(); } catch (e) {}
+  try { target.focus(); } catch (e) {}
+
+  for (let attempt = 0; attempt < 4; attempt++) {
+    if (target.isDestroyed()) return null;
+    try {
+      if (target.webContents.isLoading()) {
+        await new Promise(function (resolve) {
+          let done = false;
+          const finish = function () {
+            if (done) return;
+            done = true;
+            resolve();
+          };
+          target.webContents.once('did-finish-load', finish);
+          setTimeout(finish, 2000);
+        });
+      }
+      const img = await target.webContents.capturePage();
+      if (img && !img.isEmpty()) {
+        const png = img.toPNG();
+        if (png && png.length > 0) return png;
+      }
+    } catch (e) {}
+    await new Promise(function (resolve) { setTimeout(resolve, 300); });
+  }
+  return null;
+}
 
 function createWindow() {
   const opts = {
@@ -139,9 +249,10 @@ function createWindow() {
     }
   };
 
-  if (config.pos && isFinite(config.pos.x) && isFinite(config.pos.y)) {
-    opts.x = config.pos.x;
-    opts.y = config.pos.y;
+  const initialPos = preferredWindowPosition(opts.width, opts.height);
+  if (initialPos) {
+    opts.x = initialPos.x;
+    opts.y = initialPos.y;
   }
 
   win = new BrowserWindow(opts);
@@ -156,11 +267,13 @@ function createWindow() {
       bop: String(config.backdropOpacity == null ? 40 : config.backdropOpacity)
     }
   });
-  logLine('[window]', 'BrowserWindow 已创建 pos=' + JSON.stringify(config.pos) +
-    ' text=' + effectiveTextMode());
+  logLine('[window]', 'BrowserWindow 已创建 pos=' + JSON.stringify(initialPos || config.pos) +
+    ' display=' + (config.lastDisplayId || '-') + ' text=' + effectiveTextMode());
 
   win.once('ready-to-show', function () {
     logLine('[window]', 'ready-to-show');
+    // 首次启动（或旧配置没有位置）也记下当前屏幕，之后换屏能回到这里
+    rememberWindowPlacement();
     win.show();
   });
 
@@ -245,6 +358,14 @@ function createWindow() {
         }
       }
       if (which === 'focus') {
+        // 调试：TICKER_SHOT_FOCUS_SIDE=right|left 先把窗口贴到屏幕边，验证展开方向
+        if (process.env.TICKER_SHOT_FOCUS_SIDE) {
+          const cur = win.getBounds();
+          const area = screen.getDisplayMatching(cur).workArea;
+          const side = String(process.env.TICKER_SHOT_FOCUS_SIDE).toLowerCase();
+          const x = side === 'right' ? area.x + area.width - cur.width : area.x;
+          win.setPosition(x, cur.y);
+        }
         setFocus(true);
         // 调试：TICKER_SHOT_FOCUS_TAB=day/five/minute 指定周期；TICKER_SHOT_FOCUS_STEP=1 切换下一个自选
         if (process.env.TICKER_SHOT_FOCUS_TAB) {
@@ -416,6 +537,20 @@ function createWindow() {
         }, 6000);
       }
 
+      // 调试：TICKER_SHOT_SHOWHIDE=1 走一遍全局显示/隐藏，截图前再显示回来
+      if (process.env.TICKER_SHOT_SHOWHIDE) {
+        setTimeout(function () {
+          toggleShowHide();
+          setTimeout(function () { toggleShowHide(); }, 400);
+        }, 4000);
+      }
+
+      // 调试：TICKER_SHOT_THROUGH=1 开关一次鼠标穿透
+      if (process.env.TICKER_SHOT_THROUGH) {
+        setTimeout(function () { toggleClickThrough(); }, 2800);
+        setTimeout(function () { toggleClickThrough(); }, 3400);
+      }
+
       // 调试：TICKER_SHOT_SORT=1 点几下排序按钮，验证排序真的生效
       if (process.env.TICKER_SHOT_SORT) {
         setTimeout(async function () {
@@ -487,8 +622,9 @@ function createWindow() {
           logLine('[hover]', '调试悬停 x=' + pt.x + ' y=' + pt.y + ' 折线宽=' + pt.w);
         }, 2600);
       }
-      // 调试：TICKER_SHOT_CLICKROW=2 普通模式下点第 3 行，验证「单击进聚焦」
-      if (process.env.TICKER_SHOT_CLICKROW && which !== 'focus') {
+      // 调试：TICKER_SHOT_CLICKROW=2 点第 3 行；普通模式验证「单击进聚焦」，
+      // 聚焦模式验证「再点同一行收起」
+      if (process.env.TICKER_SHOT_CLICKROW) {
         setTimeout(async function () {
           if (!win || win.isDestroyed()) return;
           const idx = Number(process.env.TICKER_SHOT_CLICKROW) || 0;
@@ -539,19 +675,25 @@ function createWindow() {
               "active:(function(){var a=document.querySelector('.row.active');return a?a.dataset.code:null;})()," +
               "sort:(function(){var b=document.getElementById('sort-btn');if(!b)return null;" +
               "return [b.textContent,b.className,Math.round(b.getBoundingClientRect().width),Math.round(b.getBoundingClientRect().height)];})()," +
-              "cls:document.body.className,dbg:(function(){var c=document.getElementById('chart');return c?(c.dataset.dbg||''):'';})()});})()"
+              "cls:document.body.className,chartLeft:document.body.classList.contains('chart-left')?1:0," +
+              "dbg:(function(){var c=document.getElementById('chart');return c?(c.dataset.dbg||''):'';})()});})()"
             );
             logLine('[layout]', String(txt));
           } catch (e) {
             logLine('[layout]', 'fail ' + e.message);
           }
         }
-        const img = await target.webContents.capturePage();
+        const png = await capturePagePng(target);
+        if (!png) {
+          logLine('[shot]', '截图失败：空图');
+          app.quit();
+          return;
+        }
         // 打包后 ROOT 在只读的 app.asar 里，截图得落到可写的 DATA_DIR
         const dir = path.join(DATA_DIR, '.dev');
         try { fs.mkdirSync(dir, { recursive: true }); } catch (e) {}
         const file = which === 'settings' ? 'settings.png' : which === 'focus' ? 'focus.png' : 'self.png';
-        fs.writeFileSync(path.join(dir, file), img.toPNG());
+        fs.writeFileSync(path.join(dir, file), png);
         app.quit();
       }, which === 'settings' ? 7000 : which === 'focus' ? 6500 : 5000);
     });
@@ -559,8 +701,7 @@ function createWindow() {
 
   win.on('moved', function () {
     if (!win) return;
-    const pos = win.getPosition();
-    config.pos = { x: pos[0], y: pos[1] };
+    rememberWindowPlacement();
     // 拖到别处后背景可能完全变了，落定重采一次（和 drag-end 共用同一套去抖，
     // 以前两边各发一次，一次拖动结束会连截两张图）
     if (probeMoveTimer) clearTimeout(probeMoveTimer);
@@ -602,6 +743,11 @@ function createWindow() {
   win.on('closed', function () {
     win = null;
     focusOn = false;
+    focusChartLeft = false;
+    focusRestore = null;
+    focusClosing = false;
+    if (focusExpandTimer) { clearTimeout(focusExpandTimer); focusExpandTimer = null; }
+    if (focusCollapseTimer) { clearTimeout(focusCollapseTimer); focusCollapseTimer = null; }
     if (settingsWin && !settingsWin.isDestroyed()) settingsWin.close();
   });
 }
@@ -654,6 +800,7 @@ let focusHotkeyAcc = '';
 let focusRestore = null;      // 展开前的窗口位置尺寸，收起时原样还原
 let focusChartW = 620;        // 图表栏宽度，拖窗口时自动记住（config.focusChartWidth）
 let focusLeftW = 320;         // 展开时左侧列表占的宽度 = 展开前的窗口宽度
+let focusChartLeft = false;   // 本次展开图表是否在列表左侧（靠屏幕右边时为 true）
 let skipResizeUntil = 0;      // 程序化改尺寸期间，别当成用户拖动落盘
 
 // 聚焦时上下键翻的就是左列显示的那几行（config.symbols），
@@ -687,7 +834,9 @@ function focusMeta() {
     name: (hit && hit.name) || NAMES[focusCode] || focusCode,
     hotkey: focusHotkeyAcc,
     leftW: Math.round(focusLeftW),
-    chartW: focusChartW
+    chartW: focusChartW,
+    chartLeft: focusChartLeft,
+    closing: focusClosing
   };
 }
 
@@ -714,8 +863,8 @@ function focusSetSplit(leftW) {
   pushFocusState();
 }
 
-// 展开方式：不改高度，只把窗口往右边加宽（右边顶到屏幕边缘时改往左加宽），
-// 左边这一块宽度保持原样，多出来的部分给图表。这样列表位置和字号完全不变。
+// 展开方式：靠近屏幕右侧时保持右边缘不动、向左加宽；靠近左侧时保持左边缘不动、
+// 向右加宽。列表位置会跟着窗口整体移动，但列表本身宽度和字号不变，多出来的都给图表。
 const FOCUS_CHART_MIN = 320;
 const FOCUS_CHART_MAX = 1100;
 const FOCUS_CHART_DEFAULT = 620;
@@ -738,17 +887,47 @@ function focusTargetBounds() {
   const width = leftW + chartW;
   const height = Math.min(cur.height, area.height);
 
-  // 优先向右扩；右侧放不下就整体向左挪，右边缘保持不动
-  let x = cur.x;
-  if (x + width > area.x + area.width) x = cur.x - (width - cur.width);
-  x = Math.max(area.x, Math.min(x, area.x + area.width - width));
+  // 靠近哪边就从另一侧展开，具体方向由 focusExpandX 决定
+  const x = focusExpandX(cur.x, cur.width, area, width, config.focusChartSide || 'auto');
   const y = Math.max(area.y, Math.min(cur.y, area.y + area.height - height));
-  return { x: x, y: y, width: width, height: height, leftW: leftW, chartW: chartW };
+  return {
+    x: x,
+    y: y,
+    width: width,
+    height: height,
+    leftW: leftW,
+    chartW: chartW,
+    expandLeft: x < cur.x
+  };
+}
+
+// 先把聚焦布局推给渲染层（列表贴边、图表在正确一侧），下一帧再改窗口尺寸。
+// 新多出来的区域是透明的，用户看不到，不会出现列表先跳一下的抽动。
+function scheduleFocusBounds(b) {
+  if (!win || win.isDestroyed()) return;
+  if (focusExpandTimer) clearTimeout(focusExpandTimer);
+  focusExpandTimer = setTimeout(function () {
+    focusExpandTimer = null;
+    if (!win || win.isDestroyed() || !focusOn || focusClosing) return;
+    win.setBounds({ x: b.x, y: b.y, width: b.width, height: b.height });
+  }, 20);
 }
 
 function setFocus(on) {
   if (!win || win.isDestroyed()) return;
   on = !!on;
+
+  // 收起淡出还没结束就再次展开：窗口还在展开后的尺寸，直接让图表淡回来
+  if (on && focusClosing) {
+    if (focusCollapseTimer) { clearTimeout(focusCollapseTimer); focusCollapseTimer = null; }
+    focusClosing = false;
+    focusOn = true;
+    pushFocusState();
+    win.focus();
+    logLine('[focus]', '取消收起');
+    return;
+  }
+
   if (on === focusOn) { if (on) pushFocusState(); return; }
 
   if (on) {
@@ -758,29 +937,59 @@ function setFocus(on) {
       focusCode = first || list[0] || 'sh000001';
     }
     const b = focusTargetBounds();
-    focusRestore = win.getBounds();
+    // 收起动画还没播完就再次展开时，沿用最初收起前的尺寸，
+    // 否则下一次收起会停在动画中途的半宽状态。
+    focusRestore = focusRestore || win.getBounds();
     focusLeftW = b.leftW;
     focusChartW = b.chartW;
+    focusChartLeft = !!b.expandLeft;
     focusOn = true;
-    // maxWidth 平时卡在 640，展开前先放开，否则 setBounds 会被裁回 640
-    try { win.setMaximumSize(1600, 900); } catch (e) {}
-    skipResizeUntil = Date.now() + 900;
+    // maxWidth 平时卡在 640，展开时先放开，否则 setBounds 会被裁回 640
+    try { win.setMaximumSize(1800, 900); } catch (e) {}
+    skipResizeUntil = Date.now() + 600;
     resizingAt = Date.now();
-    win.setBounds({ x: b.x, y: b.y, width: b.width, height: b.height });
+    // 先让渲染层切到聚焦布局（列表贴边、图表在正确一侧），下一帧再放大窗口；
+    // 新多出来的区域是透明的，用户看不到，不会出现列表先跳一下的抽动。
+    pushFocusState();
+    scheduleFocusBounds(b);
     win.focus();
-    logLine('[focus]', '展开图表 ' + focusCode + ' tab=' + focusTab + ' 宽度 ' + b.leftW + '+' + b.chartW);
-  } else {
-    focusOn = false;
-    const r = focusRestore;
-    focusRestore = null;
-    try { win.setMaximumSize(640, 900); } catch (e) {}
-    if (r) {
-      skipResizeUntil = Date.now() + 900;
-      resizingAt = Date.now();
-      win.setBounds(r);
-    }
-    logLine('[focus]', '收起图表');
+    logLine('[focus]', '展开图表 ' + focusCode + ' tab=' + focusTab +
+      ' 方向 ' + (b.expandLeft ? '左' : '右') +
+      '（图表在列表' + (b.expandLeft ? '左' : '右') + '侧）' +
+      ' 宽度 ' + b.leftW + '+' + b.chartW);
+    return;
   }
+
+  focusOn = false;
+  const r = focusRestore;
+  if (r) {
+    focusClosing = true;
+    skipResizeUntil = Date.now() + 600;
+    resizingAt = Date.now();
+    if (focusExpandTimer) { clearTimeout(focusExpandTimer); focusExpandTimer = null; }
+    // 先通知渲染层淡出图表（保持聚焦布局，列表还贴着原来的边），
+    // 180ms 后再缩窗口；缩完再发一次最终状态切回普通布局。
+    pushFocusState();
+    focusCollapseTimer = setTimeout(function () {
+      focusCollapseTimer = null;
+      if (!win || win.isDestroyed() || focusOn) return;
+      win.setBounds(r);
+      try { win.setMaximumSize(640, 900); } catch (e) {}
+      focusRestore = null;
+      focusChartLeft = false;
+      focusClosing = false;
+      skipResizeUntil = Date.now() + 300;
+      pushFocusState();
+    }, FOCUS_FADE_MS);
+    logLine('[focus]', '收起图表');
+    return;
+  }
+
+  focusRestore = null;
+  try { win.setMaximumSize(640, 900); } catch (e) {}
+  focusChartLeft = false;
+  focusClosing = false;
+  logLine('[focus]', '收起图表');
   pushFocusState();
 }
 
@@ -796,9 +1005,14 @@ function focusStep(dir) {
   pushFocusState();
 }
 
-// 鼠标点行切换标的（跟 ↑↓ 走同一条路，只是不用键盘）
+// 鼠标点行切换标的（跟 ↑↓ 走同一条路，只是不用键盘）；再点当前标的就收起图表
 function focusSelect(code) {
-  if (!focusOn || !code || code === focusCode) return;
+  if (!focusOn || !code) return;
+  if (code === focusCode) {
+    logLine('[focus]', '再次点击同一标的，收起图表 ' + code);
+    setFocus(false);
+    return;
+  }
   const list = focusList();
   if (list.indexOf(code) < 0) return;
   focusCode = code;
@@ -807,22 +1021,64 @@ function focusSelect(code) {
 }
 
 function focusSetTab(tab) {
+  if (!focusOn) return;
   if (FOCUS_TABS.indexOf(tab) < 0 || tab === focusTab) return;
   focusTab = tab;
+  logLine('[focus]', '切换周期 ' + tab);
   pushFocusState();
 }
 
 // Ctrl+Alt+F 全局唤起；再按一次收起
 function toggleFocus() { setFocus(!focusOn); }
 
-function registerFocusHotkey() {
-  // 优先用新 shortcuts.focus，兼容旧 focusHotkey 字段
-  const acc = (config.shortcuts && config.shortcuts.focus) || config.focusHotkey || 'Ctrl+Alt+F';
-  try { if (focusHotkeyAcc) globalShortcut.unregister(focusHotkeyAcc); } catch (e) {}
-  let ok = false;
-  try { ok = globalShortcut.register(acc, function () { logLine('[hotkey]', '触发 ' + acc); toggleFocus(); }); } catch (e) {}
-  focusHotkeyAcc = acc;
-  logLine('[hotkey]', '聚焦图表 ' + acc + (ok ? ' 注册成功' : ' 注册失败（可能被其它程序占用）'));
+// Ctrl+Alt+H 显示 / 隐藏浮窗。隐藏不销毁窗口，行情和位置都保持原样。
+function toggleShowHide() {
+  if (!win || win.isDestroyed()) return;
+  rememberWindowPlacement();
+  if (win.isVisible()) {
+    win.hide();
+    logLine('[window]', '快捷键隐藏');
+  } else {
+    keepWindowInWorkArea();
+    win.show();
+    win.focus();
+    logLine('[window]', '快捷键显示');
+  }
+  saveConfig();
+}
+
+// Ctrl+Alt+T 鼠标穿透。只影响当前运行期，重启恢复为可点击。
+function toggleClickThrough() {
+  clickThrough = !clickThrough;
+  syncMousePassthrough();
+  logLine('[window]', '鼠标穿透 ' + (clickThrough ? '开启' : '关闭'));
+}
+
+const GLOBAL_HOTKEYS = [
+  { key: 'focus', fallback: 'Ctrl+Alt+F', label: '聚焦图表', run: toggleFocus },
+  { key: 'showHide', fallback: 'Ctrl+Alt+H', label: '显示/隐藏', run: toggleShowHide },
+  { key: 'clickThrough', fallback: 'Ctrl+Alt+T', label: '鼠标穿透', run: toggleClickThrough }
+];
+const globalHotkeyAccs = {};
+
+function registerGlobalHotkeys() {
+  GLOBAL_HOTKEYS.forEach(function (item) {
+    const acc = (config.shortcuts && config.shortcuts[item.key]) || item.fallback;
+    try {
+      if (globalHotkeyAccs[item.key]) globalShortcut.unregister(globalHotkeyAccs[item.key]);
+    } catch (e) {}
+    let ok = false;
+    try {
+      ok = globalShortcut.register(acc, function () {
+        logLine('[hotkey]', item.label + ' ' + acc);
+        item.run();
+      });
+    } catch (e) {}
+    globalHotkeyAccs[item.key] = acc;
+    logLine('[hotkey]', item.label + ' ' + acc +
+      (ok ? ' 注册成功' : ' 注册失败（可能被其它程序占用）'));
+  });
+  focusHotkeyAcc = globalHotkeyAccs.focus || '';
 }
 
 /* ---------------- 背景明暗自动检测 ---------------- */
@@ -1296,33 +1552,60 @@ ipcMain.on('drag-start', function () {
   dragTimer = setInterval(function () {
     if (!win || !dragBase) return;
     const p = screen.getCursorScreenPoint();
-    win.setPosition(p.x - dragBase.dx, p.y - dragBase.dy);
+    const b = win.getBounds();
+    const x = p.x - dragBase.dx;
+    const y = p.y - dragBase.dy;
+    const display = screen.getDisplayNearestPoint({
+      x: Math.round(x + b.width / 2),
+      y: Math.round(y + b.height / 2)
+    });
+    const area = display.workArea;
+    // 只有整窗都在这块屏里才吸边。跨屏拖动时窗口必然压到两块屏，
+    // 这时候既不能夹回工作区也不能吸边，否则切屏那一下会跳半个身位。
+    if (rectInside(x, y, b.width, b.height, area)) {
+      const snapped = snapRect(x, y, b.width, b.height, area);
+      win.setPosition(snapped.x, snapped.y);
+    } else {
+      win.setPosition(x, y);
+    }
   }, 16);
   // 拖动期间不暂停轮询，但 probeBackground 会跳过采样，松手后下一周期自然恢复
 });
 
 ipcMain.on('drag-end', function () {
   stopDrag();
+  rememberWindowPlacement();
   saveConfig();
   // 拖动后落点换了，背后可能是完全不同的画面，稍等一下再测
   scheduleProbe(400);
 });
 
-// 图钉固定：开启后窗口不可拖动/拉伸，且鼠标穿透到下层应用
+// 图钉固定：开启后窗口不可拖动/拉伸，且鼠标穿透到下层应用。
+// 穿透快捷键与图钉相互独立：快捷键打开时整窗穿透，连图钉区也不响应。
 let pinned = false;
+let clickThrough = false;
+let pinZoneHover = false;
+
+function syncMousePassthrough() {
+  if (!win || win.isDestroyed()) return;
+  const ignore = clickThrough || (pinned && !pinZoneHover);
+  win.setIgnoreMouseEvents(ignore, { forward: true });
+}
+
 ipcMain.on('set-pinned', function (e, on) {
   if (!win || win.isDestroyed()) return;
   pinned = !!on;
+  pinZoneHover = false;
   win.setMovable(!pinned);
   win.setResizable(!pinned);
-  win.setIgnoreMouseEvents(pinned, { forward: true });
+  syncMousePassthrough();
 });
 
 // 鼠标移到右上角图钉按钮区域时临时恢复点击，移出后恢复穿透
 ipcMain.on('set-pin-zone', function (e, on) {
   if (!win || win.isDestroyed()) return;
-  if (!pinned) return;
-  win.setIgnoreMouseEvents(!on, { forward: true });
+  pinZoneHover = !!on;
+  syncMousePassthrough();
 });
 
 ipcMain.on('save-config', function (e, patch) {
@@ -1618,6 +1901,7 @@ ipcMain.handle('settings-get', async function () {
     period: config.period,
     interval: config.interval,
     textMode: config.textMode,
+    focusChartSide: config.focusChartSide || 'auto',
     backdrop: !!config.backdrop,
     backdropOpacity: config.backdropOpacity != null ? config.backdropOpacity : 40,
     probeIntervalMs: config.probeIntervalMs != null ? config.probeIntervalMs : 4000,
@@ -1677,13 +1961,27 @@ ipcMain.handle('search-symbol', async function (e, q) {
 });
 
 ipcMain.handle('settings-save', async function (e, patch) {
+  const prevFocusSide = config.focusChartSide;
   const result = applySettingsPatch(config, patch);
   if (!result.ok) return result;
 
   setAndBroadcast(result.patch, true);
 
-  // 聚焦图表快捷键变了，重新注册全局快捷键（可能在保存时注册失败，日志可见）
-  if (result.effects.reRegisterHotkey) registerFocusHotkey();
+  // 图表位置改了且当前正展开着：先淡出收起，再按新位置重新展开一次
+  if (focusOn && config.focusChartSide !== prevFocusSide) {
+    setFocus(false);
+    setTimeout(function () {
+      if (!win || win.isDestroyed() || focusOn) return;
+      setFocus(true);
+      // 重新展开会把焦点抢回浮窗，给设置窗口还回去
+      if (settingsWin && !settingsWin.isDestroyed()) {
+        try { settingsWin.focus(); } catch (e) {}
+      }
+    }, FOCUS_FADE_MS + 80);
+  }
+
+  // 全局快捷键变了，重新注册（可能在保存时注册失败，日志可见）
+  if (result.effects.reRegisterHotkeys) registerGlobalHotkeys();
 
   // 轮询间隔改了，重启定时器让新值立即生效
   startBackgroundProbe();
@@ -2101,7 +2399,8 @@ if (!gotTheLock) {
 
     app.setAppUserModelId('com.miniticker.watch');
     createWindow();
-    registerFocusHotkey();
+    registerGlobalHotkeys();
+    watchDisplays();
     startAlertTimer();
     startBackgroundProbe();
     startAutoExitTimer();

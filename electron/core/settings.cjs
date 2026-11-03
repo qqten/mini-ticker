@@ -1,14 +1,12 @@
 'use strict';
 
-const { PERIODS, TEXT_MODES } = require('./constants.cjs');
+const { PERIODS, TEXT_MODES, FOCUS_CHART_SIDES } = require('./constants.cjs');
 const { isValidCode } = require('./symbols.cjs');
 const { clampInt } = require('./utils.cjs');
-const { normalizeShortcuts } = require('./config.cjs');
-
-const TIME_RE = /^\d{2}:\d{2}$/;
+const { isValidTime, normalizeShortcuts } = require('./config.cjs');
 
 function patchTime(value, fallback) {
-  return TIME_RE.test(value) ? value : fallback;
+  return isValidTime(value) ? value : fallback;
 }
 
 // 设置面板保存的唯一入口：所有范围/格式校验只在这里做，
@@ -36,6 +34,9 @@ function applySettingsPatch(current, raw) {
     period: PERIODS.indexOf(raw.period) >= 0 ? raw.period : current.period,
     interval: clampInt(raw.interval, current.interval, 1000, 60000),
     textMode: TEXT_MODES.indexOf(raw.textMode) >= 0 ? raw.textMode : current.textMode,
+    focusChartSide: FOCUS_CHART_SIDES.indexOf(raw.focusChartSide) >= 0
+      ? raw.focusChartSide
+      : (current.focusChartSide || 'auto'),
     backdrop: !!raw.backdrop,
     backdropOpacity: clampInt(raw.backdropOpacity, current.backdropOpacity, 0, 95),
     probeIntervalMs: clampInt(raw.probeIntervalMs, current.probeIntervalMs, 1000, 15000),
@@ -59,12 +60,16 @@ function applySettingsPatch(current, raw) {
     shortcuts: shortcuts
   };
 
+  const currentShortcuts = current.shortcuts || {};
+  const globalKeys = ['focus', 'showHide', 'clickThrough'];
   return {
     ok: true,
     patch: patch,
     effects: {
-      // 聚焦图表是全局快捷键，换了要重新注册
-      reRegisterHotkey: shortcuts.focus !== ((current.shortcuts || {}).focus)
+      // 这三个是全局快捷键，任何一个变了都要重新注册
+      reRegisterHotkeys: globalKeys.some(function (key) {
+        return shortcuts[key] !== currentShortcuts[key];
+      })
     }
   };
 }

@@ -9,6 +9,7 @@ const path = require('path');
 const { DEFAULT_CONFIG, DEFAULT_WATCHLIST } = require('../electron/core/constants.cjs');
 const {
   SCHEMA_VERSION,
+  isValidTime,
   validShortcut,
   normalizeShortcuts,
   normalizeConfig,
@@ -39,7 +40,57 @@ test('normalizeShortcuts 对非法值逐项回退默认', function () {
   const out = normalizeShortcuts({ refresh: 'R', focus: 'Ctrl+Alt+F' });
   assert.equal(out.refresh, DEFAULT_CONFIG.shortcuts.refresh);
   assert.equal(out.focus, 'Ctrl+Alt+F');
+  assert.equal(out.showHide, DEFAULT_CONFIG.shortcuts.showHide);
+  assert.equal(out.clickThrough, DEFAULT_CONFIG.shortcuts.clickThrough);
   assert.equal(out.periodMinute, DEFAULT_CONFIG.shortcuts.periodMinute);
+});
+
+test('normalizeConfig 清洗多屏记忆并保留合法坐标', function () {
+  const cfg = normalizeConfig({
+    pos: { x: 10.4, y: -3.6 },
+    lastDisplayId: '12345',
+    displayPositions: {
+      '12345': { x: 1920, y: 100 },
+      '67890': { x: 'bad', y: 20 },
+      '': { x: 1, y: 2 },
+      '__proto__': { x: 3, y: 4 }
+    }
+  });
+  assert.deepEqual(cfg.pos, { x: 10, y: -4 });
+  assert.equal(cfg.lastDisplayId, '12345');
+  assert.deepEqual(cfg.displayPositions, { '12345': { x: 1920, y: 100 } });
+});
+
+test('normalizeConfig 丢弃非法多屏记忆字段', function () {
+  const cfg = normalizeConfig({
+    lastDisplayId: 42,
+    displayPositions: ['bad']
+  });
+  assert.equal(cfg.lastDisplayId, '');
+  assert.deepEqual(cfg.displayPositions, {});
+});
+
+test('isValidTime 同时校验格式和 24 小时范围', function () {
+  assert.equal(isValidTime('00:00'), true);
+  assert.equal(isValidTime('09:25'), true);
+  assert.equal(isValidTime('23:59'), true);
+  assert.equal(isValidTime('24:00'), false);
+  assert.equal(isValidTime('25:00'), false);
+  assert.equal(isValidTime('12:60'), false);
+  assert.equal(isValidTime('9:25'), false);
+  assert.equal(isValidTime('-1:00'), false);
+  assert.equal(isValidTime(null), false);
+});
+
+test('normalizeConfig 把越界时间回退到默认值', function () {
+  const cfg = normalizeConfig({
+    alert: { enabled: true, time: '25:00' },
+    autoExit: { enabled: true, time: '12:60' },
+    autoStart: { enabled: true, time: '09:25' }
+  });
+  assert.equal(cfg.alert.time, DEFAULT_CONFIG.alert.time);
+  assert.equal(cfg.autoExit.time, DEFAULT_CONFIG.autoExit.time);
+  assert.equal(cfg.autoStart.time, '09:25');
 });
 
 test('normalizeConfig 修掉越界 / 非法字段并补默认值', function () {
@@ -49,6 +100,7 @@ test('normalizeConfig 修掉越界 / 非法字段并补默认值', function () {
     period: 'week',
     interval: 5,
     textMode: 'blue',
+    focusChartSide: 'middle',
     sortMode: 'hot',
     width: 10,
     height: 2000,
@@ -62,6 +114,7 @@ test('normalizeConfig 修掉越界 / 非法字段并补默认值', function () {
   assert.deepEqual(cfg.watchlist, DEFAULT_WATCHLIST);
   assert.equal(cfg.period, 'minute');
   assert.equal(cfg.textMode, 'auto');
+  assert.equal(cfg.focusChartSide, DEFAULT_CONFIG.focusChartSide);
   assert.equal(cfg.sortMode, 'off');
   assert.equal(cfg.interval, 1000);
   assert.equal(cfg.width, 220);
@@ -82,6 +135,7 @@ test('normalizeConfig 保留合法自选、位置和布尔开关', function () {
     symbols: ['sh600519'],
     watchlist: ['sh600519', '001186'],
     pos: { x: 10.4, y: -3.6 },
+    focusChartSide: 'left',
     showName: false,
     baseline: false,
     backdrop: 1,
@@ -90,6 +144,7 @@ test('normalizeConfig 保留合法自选、位置和布尔开关', function () {
   assert.deepEqual(cfg.symbols, ['sh600519']);
   assert.deepEqual(cfg.watchlist, ['sh600519', '001186']);
   assert.deepEqual(cfg.pos, { x: 10, y: -4 });
+  assert.equal(cfg.focusChartSide, 'left');
   assert.equal(cfg.showName, false);
   assert.equal(cfg.baseline, false);
   assert.equal(cfg.backdrop, true);
