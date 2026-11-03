@@ -633,6 +633,14 @@
       window.ticker.save({ textMode: this.value });
     });
   }
+  // 聚焦图表方位同理：点了立刻生效并落盘，正在聚焦时窗口会当场重排
+  var focusSideRadios = document.querySelectorAll('input[name="focusChartSide"]');
+  for (var fi = 0; fi < focusSideRadios.length; fi++) {
+    focusSideRadios[fi].addEventListener('change', function () {
+      if (!this.checked) return;
+      window.ticker.save({ focusChartSide: this.value });
+    });
+  }
   $('test-alert').addEventListener('click', function () {
     window.ticker.testAlert();
     setFoot('已发出测试提醒', 'ok');

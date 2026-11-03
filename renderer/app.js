@@ -330,12 +330,28 @@
       e.clientX > window.innerWidth - m || e.clientY > window.innerHeight - m;
   }
 
+  // 开始拖窗口时把十字光标的读数框收掉：窗口跟着鼠标跑，框留在原地会很怪
+  function hideChartTip() {
+    var tip = document.getElementById('f-tip');
+    if (tip) tip.style.display = 'none';
+  }
+
   document.addEventListener('pointerdown', function (e) {
     if (e.button !== 0) return;
     if (pinned) return; // 固定模式不响应拖动
     if (e.target === pinBtn || e.target === sortBtn || e.target === periodLabel) return;
-    // 图表区（含周期按钮）要能交互，别被当成拖窗口；拖窗口从左列拖
-    if (e.target.closest && e.target.closest('#focus')) return;
+    if (nearEdge(e)) return;             // 窗口四边留给系统缩放
+    // 图表区：只有顶部那条（票名 / 缩放倍率 / 周期按钮旁边）能按住拖窗口；
+    // 图表本体留给滚轮缩放、拖动平移和十字光标，别抢它的鼠标。
+    if (e.target.closest && e.target.closest('#focus')) {
+      var draggable = e.target.closest('#focus-head') && !e.target.closest('#f-tabs');
+      if (!draggable) return;
+      hideChartTip();
+      dragging = true;
+      try { e.target.setPointerCapture(e.pointerId); } catch (err) {}
+      window.ticker.startDrag();
+      return;
+    }
     if (e.target === splitter) return;   // 分界线有自己的一套拖动
     // 折线本身就是宽度手柄：左右拖改折线宽（不拖窗口、也不触发聚焦）
     var sp = e.target.closest ? e.target.closest('.spark') : null;
@@ -369,7 +385,6 @@
       window.addEventListener('pointercancel', onUp);
       return;
     }
-    if (nearEdge(e)) return;
     dragging = true;
     try { e.target.setPointerCapture(e.pointerId); } catch (err) {}
     window.ticker.startDrag();

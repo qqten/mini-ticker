@@ -423,11 +423,14 @@ body.focus .row:hover .name { color: var(--text); }
   align-items: baseline;
   gap: 7px;
   flex: 0 0 auto;
-  height: 20px;
-  padding: 0 9px 2px;
+  /* 比纯文字高一点：这条同时是拖窗口的手柄，太窄不好抓 */
+  height: 24px;
+  padding: 2px 9px 2px;
   font-size: 11px;
   color: var(--sub);
   text-shadow: var(--shadow);
+  /* 图表区只有这一条能按住拖窗口，给个 move 光标让人知道能抓 */
+  cursor: move;
 }
 
 #f-name {

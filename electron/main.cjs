@@ -18,7 +18,7 @@ const { createFundMinuteStore } = require('./data/fund-minutes.cjs');
 const { createQuoteService } = require('./data/quote-service.cjs');
 const { createFocusService, FOCUS_TABS } = require('./data/focus.cjs');
 const { applySettingsPatch } = require('./core/settings.cjs');
-const { clampRect, snapRect, rectInside, focusExpandX, pickRememberedPosition } = require('./core/window-layout.cjs');
+const { clampRect, snapRect, rectInside, focusExpandX, collapseRect, pickRememberedPosition } = require('./core/window-layout.cjs');
 
 // 极简浮窗不需要 GPU 合成，禁用硬件加速可避免部分机器上 GPU 进程崩溃、并降低功耗
 app.disableHardwareAcceleration();
@@ -380,6 +380,18 @@ function createWindow() {
         if (process.env.TICKER_SHOT_FOCUS_CLOSE) {
           setTimeout(function () { setFocus(false); }, 3800);
         }
+        // 调试：TICKER_SHOT_FOCUS_MOVE="220,90" 展开后挪窗口，验证收起时列表不会跳回老位置
+        if (process.env.TICKER_SHOT_FOCUS_MOVE) {
+          setTimeout(function () {
+            if (!win || win.isDestroyed()) return;
+            const m = String(process.env.TICKER_SHOT_FOCUS_MOVE).split(',');
+            const dx = Number(m[0]) || 0;
+            const dy = Number(m[1]) || 0;
+            const p = win.getPosition();
+            win.setPosition(p[0] + dx, p[1] + dy);
+            logLine('[focus]', '调试挪窗口 +' + dx + ',' + dy + ' -> ' + (p[0] + dx) + ',' + (p[1] + dy));
+          }, 2600);
+        }
         // 调试：TICKER_SHOT_ROW=2 点第 3 行，验证「鼠标点行切标的」
         if (process.env.TICKER_SHOT_ROW) {
           setTimeout(function () {
@@ -414,6 +426,16 @@ function createWindow() {
             logLine('[focus]', '调试拖分界线 ' + sx + ' -> ' + to);
           }, 3400);
         }
+      }
+
+      // 调试：TICKER_SHOT_EVAL="表达式" 在窗口里跑一段 JS 并写进日志，排查前端状态用
+      if (process.env.TICKER_SHOT_EVAL) {
+        setTimeout(function () {
+          if (!win || win.isDestroyed()) return;
+          win.webContents.executeJavaScript(String(process.env.TICKER_SHOT_EVAL))
+            .then(function (r) { logLine('[eval]', typeof r === 'string' ? r : JSON.stringify(r)); })
+            .catch(function (e) { logLine('[eval]', 'fail ' + e.message); });
+        }, 4200);
       }
 
       // 调试：TICKER_SHOT_CROSS=0.55 在聚焦图表里模拟悬停，截十字光标 + 数值提示
@@ -878,17 +900,25 @@ function focusTargetBounds() {
   const cur = win.getBounds();
   const area = screen.getDisplayMatching(cur).workArea;
   const leftW = Math.round(cur.width);
+  const side = config.focusChartSide || 'auto';
   let chartW = Math.round(config.focusChartWidth || FOCUS_CHART_DEFAULT);
   if (!isFinite(chartW)) chartW = FOCUS_CHART_DEFAULT;
   chartW = Math.max(FOCUS_CHART_MIN, Math.min(FOCUS_CHART_MAX, chartW));
-  // 屏幕放不下就压缩图表栏，宁可窄一点也不能溢出可视区
-  const room = area.width - leftW - 8;
-  chartW = Math.max(160, Math.min(chartW, room));
+
+  // 先看目标那一侧还剩多少地方：不够就把图表压窄，而不是悄悄换到另一边。
+  // 两边都不够（窗口几乎占满屏）时按宽敞的那边算，再用屏幕宽度兜底。
+  const roomL = cur.x - area.x;
+  const roomR = area.x + area.width - (cur.x + cur.width);
+  let avail;
+  if (side === 'left') avail = roomL;
+  else if (side === 'right') avail = roomR;
+  else avail = Math.max(roomL, roomR);
+  avail = Math.min(avail, area.width - leftW - 8);
+  chartW = Math.max(160, Math.min(chartW, avail));
   const width = leftW + chartW;
   const height = Math.min(cur.height, area.height);
 
-  // 靠近哪边就从另一侧展开，具体方向由 focusExpandX 决定
-  const x = focusExpandX(cur.x, cur.width, area, width, config.focusChartSide || 'auto');
+  const x = focusExpandX(cur.x, cur.width, area, width, side);
   const y = Math.max(area.y, Math.min(cur.y, area.y + area.height - height));
   return {
     x: x,
@@ -961,8 +991,7 @@ function setFocus(on) {
   }
 
   focusOn = false;
-  const r = focusRestore;
-  if (r) {
+  if (focusRestore) {
     focusClosing = true;
     skipResizeUntil = Date.now() + 600;
     resizingAt = Date.now();
@@ -973,13 +1002,19 @@ function setFocus(on) {
     focusCollapseTimer = setTimeout(function () {
       focusCollapseTimer = null;
       if (!win || win.isDestroyed() || focusOn) return;
-      win.setBounds(r);
+      // 只收掉图表那一栏：列表留在它现在的位置，不回到展开前的老地方 ——
+      // 否则聚焦期间把窗口挪到别处，一退出就"啪"地跳回去。
+      const cur = win.getBounds();
+      const area = screen.getDisplayMatching(cur).workArea;
+      const target = collapseRect(cur, focusChartLeft, config.width || cur.width, area);
+      win.setBounds(target);
       try { win.setMaximumSize(640, 900); } catch (e) {}
       focusRestore = null;
       focusChartLeft = false;
       focusClosing = false;
       skipResizeUntil = Date.now() + 300;
       pushFocusState();
+      logLine('[focus]', '收起图表 列表留在 ' + target.x + ',' + target.y + ' ' + target.width);
     }, FOCUS_FADE_MS);
     logLine('[focus]', '收起图表');
     return;
@@ -993,9 +1028,27 @@ function setFocus(on) {
   pushFocusState();
 }
 
-function focusStep(dir) {
+// 设置里改了图表方位：正展开着就淡出收起，再按新方位重新展开一次。
+// 连续点几个单选框时只认最后一次，避免收起/展开动画打架。
+let focusSideTimer = null;
+function reapplyFocusSide() {
   if (!focusOn) return;
-  const list = focusList();
+  if (focusSideTimer) { clearTimeout(focusSideTimer); focusSideTimer = null; }
+  setFocus(false);
+  focusSideTimer = setTimeout(function () {
+    focusSideTimer = null;
+    if (!win || win.isDestroyed() || focusOn) return;
+    setFocus(true);
+    // 重新展开会把焦点抢回浮窗，给设置窗口还回去
+    if (settingsWin && !settingsWin.isDestroyed()) {
+      try { settingsWin.focus(); } catch (e) {}
+    }
+    logLine('[focus]', '按新方位重新展开');
+  }, FOCUS_FADE_MS + 80);
+}
+
+function focusStep(dir) {
+  if (!focusOn) return;  const list = focusList();
   if (!list.length) return;
   let i = list.indexOf(focusCode);
   if (i < 0) i = 0;
@@ -1546,6 +1599,7 @@ ipcMain.on('preview-width', function (e, w) {
 ipcMain.on('drag-start', function () {
   if (!win || config.locked) return;
   const pos = win.getPosition();
+  logLine('[drag]', '开始拖窗口 ' + pos[0] + ',' + pos[1]);
   const cur = screen.getCursorScreenPoint();
   dragBase = { dx: cur.x - pos[0], dy: cur.y - pos[1] };
   if (dragTimer) clearInterval(dragTimer);
@@ -1610,7 +1664,12 @@ ipcMain.on('set-pin-zone', function (e, on) {
 
 ipcMain.on('save-config', function (e, patch) {
   if (!patch || typeof patch !== 'object') return;
+  const prevFocusSide = config.focusChartSide;
   setAndBroadcast(patch, false);
+  // 设置面板里那几个单选框是即时生效的：方位一变，正在聚焦就当场重排
+  if (patch.focusChartSide !== undefined && config.focusChartSide !== prevFocusSide) {
+    reapplyFocusSide();
+  }
 });
 
 /* ---------------- 尾盘提醒 ---------------- */
@@ -1968,17 +2027,7 @@ ipcMain.handle('settings-save', async function (e, patch) {
   setAndBroadcast(result.patch, true);
 
   // 图表位置改了且当前正展开着：先淡出收起，再按新位置重新展开一次
-  if (focusOn && config.focusChartSide !== prevFocusSide) {
-    setFocus(false);
-    setTimeout(function () {
-      if (!win || win.isDestroyed() || focusOn) return;
-      setFocus(true);
-      // 重新展开会把焦点抢回浮窗，给设置窗口还回去
-      if (settingsWin && !settingsWin.isDestroyed()) {
-        try { settingsWin.focus(); } catch (e) {}
-      }
-    }, FOCUS_FADE_MS + 80);
-  }
+  if (config.focusChartSide !== prevFocusSide) reapplyFocusSide();
 
   // 全局快捷键变了，重新注册（可能在保存时注册失败，日志可见）
   if (result.effects.reRegisterHotkeys) registerGlobalHotkeys();

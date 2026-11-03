@@ -35,25 +35,47 @@ function snapRect(x, y, width, height, area, snapPx) {
 }
 
 // 聚焦展开的横向位置：side=auto 时窗口更靠近屏幕哪边，就从另一侧长出来；
-// side=left/right 时优先按指定的图表方向展开。首选方向空间不够时退到另一边，
-// 两边都不够再由 clamp 兜底。
+// side=left/right 时老老实实按指定的图表方向展开 —— 只要那一侧还塞得下 MIN_ROOM，
+// 宁可把图表压窄也不偷偷换边（用户选了「图表在左」就该在左）。
 function focusExpandX(x, width, area, totalWidth, side) {
   const grow = Math.max(0, totalWidth - width);
   const leftRoom = x - area.x;
   const rightRoom = area.x + area.width - (x + width);
-  let preferLeft;
-  if (side === 'left') preferLeft = true;
-  else if (side === 'right') preferLeft = false;
-  else preferLeft = rightRoom < leftRoom;
+  const MIN_ROOM = 160;
 
   let nx = x;
-  if (preferLeft) {
-    if (leftRoom >= grow) nx = x - grow;
-  } else if (rightRoom < grow && leftRoom >= grow) {
-    nx = x - grow;
+  if (side === 'left') {
+    if (leftRoom >= MIN_ROOM) nx = x - grow;
+  } else if (side === 'right') {
+    if (rightRoom >= MIN_ROOM) nx = x;
+    else if (leftRoom >= MIN_ROOM) nx = x - grow;
+  } else {
+    // auto：靠右就向左长，靠左就向右长
+    const preferLeft = rightRoom < leftRoom;
+    if (preferLeft ? leftRoom >= grow : (rightRoom < grow && leftRoom >= grow)) {
+      nx = x - grow;
+    }
   }
+
   const maxX = area.x + area.width - totalWidth;
   return Math.max(area.x, Math.min(nx, maxX));
+}
+
+// 收起聚焦：只把图表那一栏收掉，列表留在原地。
+// 不回「展开前的位置」—— 用户在聚焦期间挪过窗口的话，那样会"啪"地跳回去。
+// chartLeft=true 表示图表在左、列表贴在窗口右边缘。
+function collapseRect(bounds, chartLeft, listW, area) {
+  const width = Math.min(Math.max(220, Math.min(640, Math.round(listW))), area.width);
+  const height = Math.min(bounds.height, area.height);
+  const listX = chartLeft
+    ? (bounds.x + bounds.width - Math.min(width, bounds.width))
+    : bounds.x;
+  return {
+    x: Math.max(area.x, Math.min(listX, area.x + area.width - width)),
+    y: Math.max(area.y, Math.min(bounds.y, area.y + area.height - height)),
+    width: width,
+    height: height
+  };
 }
 
 // 整窗是否完全落在工作区内。跨屏拖动时窗口会同时压到两块屏，
@@ -80,4 +102,4 @@ function pickRememberedPosition(positions, lastDisplayId, displays) {
   return null;
 }
 
-module.exports = { DEFAULT_SNAP, clampRect, snapRect, rectInside, focusExpandX, pickRememberedPosition };
+module.exports = { DEFAULT_SNAP, clampRect, snapRect, rectInside, focusExpandX, collapseRect, pickRememberedPosition };

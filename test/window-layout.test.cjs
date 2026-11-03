@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { DEFAULT_SNAP, clampRect, snapRect, rectInside, focusExpandX, pickRememberedPosition } = require('../electron/core/window-layout.cjs');
+const { DEFAULT_SNAP, clampRect, snapRect, rectInside, focusExpandX, collapseRect, pickRememberedPosition } = require('../electron/core/window-layout.cjs');
 
 const AREA = { x: 0, y: 0, width: 1920, height: 1040 };
 // 第二块屏在右侧，工作区从 1920 开始
@@ -98,4 +98,52 @@ test('pickRememberedPosition 只在记忆屏幕仍连接时采用', function () 
   assert.equal(pickRememberedPosition({ '200': { x: 'bad', y: 1 } }, '200', displays), null);
   assert.equal(pickRememberedPosition(positions, '', displays), null);
   assert.equal(pickRememberedPosition(null, '200', displays), null);
+});
+
+test('固定图表在左：左边地方够就坚决左扩，不偷偷换边', function () {
+  // 左边只剩 200px（够 160 的保底），图表会被压窄，但仍然在左边
+  assert.equal(focusExpandX(200, 320, AREA, 520, 'left'), 0);
+  // 左边完全没地方（贴左边缘）才退到右边
+  assert.equal(focusExpandX(0, 320, AREA, 940, 'left'), 0);
+  // 右边只剩 200px：固定右时保持原位（图表压窄），不换到左边
+  assert.equal(focusExpandX(1400, 320, AREA, 520, 'right'), 1400);
+});
+
+test('collapseRect 只收图表那一栏，列表原地不动', function () {
+  // 图表在右：窗口左边缘就是列表左边缘
+  const rightExpanded = { x: 700, y: 300, width: 940, height: 400 };
+  assert.deepEqual(
+    collapseRect(rightExpanded, false, 320, AREA),
+    { x: 700, y: 300, width: 320, height: 400 }
+  );
+
+  // 图表在左：列表贴窗口右边缘，收起后列表左边缘 = 窗口右边缘 - 列表宽
+  const leftExpanded = { x: 80, y: 300, width: 940, height: 400 };
+  assert.deepEqual(
+    collapseRect(leftExpanded, true, 320, AREA),
+    { x: 700, y: 300, width: 320, height: 400 }
+  );
+});
+
+test('collapseRect 在聚焦期间挪过窗口也不跳回老位置', function () {
+  // 展开后用户把窗口整体往右下拖了 (220, 90)
+  const moved = { x: 300, y: 390, width: 940, height: 400 };
+  const right = collapseRect(moved, false, 320, AREA);
+  assert.equal(right.x, 300, '图表在右时左边缘跟着走');
+  assert.equal(right.y, 390);
+
+  const left = collapseRect(moved, true, 320, AREA);
+  assert.equal(left.x, 300 + 940 - 320, '图表在左时右边缘跟着走');
+  assert.equal(left.y, 390);
+});
+
+test('collapseRect 宽度夹取并夹回工作区', function () {
+  const b = { x: 10, y: 10, width: 940, height: 400 };
+  assert.equal(collapseRect(b, false, 100, AREA).width, 220);
+  assert.equal(collapseRect(b, false, 2000, AREA).width, 640);
+
+  // 贴右边缘收缩时不能跑到屏幕外
+  const edge = { x: 1900, y: 0, width: 940, height: 300 };
+  const c = collapseRect(edge, false, 320, AREA);
+  assert.ok(c.x + c.width <= AREA.x + AREA.width);
 });
