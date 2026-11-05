@@ -204,8 +204,16 @@
   function tipDay(c, sx, sy) {
     if (sx < c.g.padL || sx > c.g.padL + c.g.plotW) return null;
     var n = c.rows.length;
-    var i = Math.floor(c.xs + (sx - c.g.padL) / c.step);
-    i = Math.max(c.i0, Math.min(c.i1, Math.min(n - 1, i)));
+    // 先按「实际画出来的柱子宽度」定位鼠标所在的那根柱子：缩到整幅时一根柱子
+    // 会合并多根原始 K 线，若还按 stepRaw 去算，右端会累积出接近一根的偏差。
+    var k = Math.floor((sx - c.g.padL) / c.barStep);
+    k = Math.max(0, Math.min(c.barCount - 1, k));
+    var base = c.barI0 + k * c.barAgg;
+    var last = Math.min(c.i1, base + c.barAgg - 1);
+    // 合并后的柱子里再取离鼠标最近的那根原始 K 线，提示里仍然是具体日期
+    var i = Math.round(c.xs + (sx - c.g.padL) / c.step);
+    i = Math.max(base, Math.min(last, i));
+    i = Math.max(0, Math.min(n - 1, i));
     var r = c.rows[i];
     var chg = r.o > 0 ? (r.c - r.o) / r.o * 100 : NaN;
     var lines = [
@@ -217,7 +225,8 @@
     if (c.showVol) lines.push('量 ' + fVol(r.v));
     return {
       lines: lines,
-      x: c.Xc(i),
+      // 虚线贴着鼠标走，不再吸附到柱子中心，移动时不会「粘住」或冻在右端
+      x: sx,
       y: c.Y(r.h)
     };
   }
@@ -579,8 +588,14 @@
     var step = g.plotW / Math.max(1, bars.length);
     var cw = Math.max(1.2, Math.min(24, step * 0.7));
     var Xb = function (k) { return g.padL + step * (k + 0.5); };
-    // 十字光标仍按原始索引算，合并只是在画的时候省事，读数不能跟着变粗
-    var Xn = function (i) { return g.padL + (i - xs) * stepRaw + stepRaw / 2; };
+    // 横轴刻度要落在合并后柱子的中心：缩到整幅时一根柱子会合并多根原始 K 线，
+    // 按 stepRaw 直接算会累积出半根甚至一根的偏移，看起来就像刻度错开了一格。
+    var Xc = function (i) {
+      var k = Math.floor((i - i0) / agg);
+      if (k < 0) k = 0;
+      if (k > bars.length - 1) k = bars.length - 1;
+      return Xb(k);
+    };
     var Y = function (v) { return g.priceBot - ((v - lo) / (hi - lo)) * g.priceH; };
     var VY = function (v) { return g.volBot - (maxV ? (v / maxV) * g.volH : 0); };
     var Mzero = g.macdTop + g.macdH / 2;
@@ -678,15 +693,17 @@
     for (var t = 0; t < cnt; t++) {
       var idx = Math.round(xs + (t * (xe - xs)) / (cnt - 1));
       idx = Math.max(0, Math.min(n - 1, idx));
-      s.push(axisLabel(Xn(idx), g.axisY,
+      s.push(axisLabel(Xc(idx), g.axisY,
         wide ? shortMonth(rows[idx].d) : shortDate(rows[idx].d), g.W, T.sub));
     }
 
     s.push(crosshairSvg(g));
     s.push('</svg>');
     chartEl.innerHTML = s.join('');
-    // 光标按原始索引换算：合并只是画的时候省事，读数不能跟着变粗
-    tipCtx = { type: 'day', g: g, Xc: Xn, Y: Y, rows: rows, step: stepRaw, n: n, xs: xs, xe: xe, i0: i0, i1: i1, showVol: hasVol };
+    // 光标按实际柱子网格定位：合并只是画的时候省事，提示不能跟着偏一根
+    tipCtx = { type: 'day', g: g, Y: Y, rows: rows, step: stepRaw, barStep: step,
+      barI0: i0, barAgg: agg, barCount: bars.length,
+      n: n, xs: xs, xe: xe, i0: i0, i1: i1, showVol: hasVol };
     // 调试用：n=总根数 span=当前比例 def=默认比例 bars=合并后画了多少根
     chartEl.dataset.dbg = 'n=' + n + ' span=' + (view.e - view.s).toFixed(4) +
       ' def=' + defSpan.toFixed(4) + ' bars=' + bars.length + ' agg=' + agg;
