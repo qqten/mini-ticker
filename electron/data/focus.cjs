@@ -63,7 +63,8 @@ function createFocusService(options) {
     let price = NaN, pct = NaN, prevClose = NaN, change = NaN;
     let days = [];
     let candles = [];
-    const session = sessionMinutes(code);
+    let session = sessionMinutes(code);
+    let fiveForeign = false;
 
     if (tab === 'day' || tab === 'month') {
       // 日K 拉满 1200 根让用户能往回翻到 5 年前；月K 120 根就是 10 年
@@ -80,48 +81,63 @@ function createFocusService(options) {
         change = price - prevClose;
       }
     } else if (tab === 'five') {
-      const j = await market.fetchTencentJson('/appstock/app/day/query?code=' + encodeURIComponent(code));
-      const block = j && j.data && j.data[code];
-      const arr = (block && block.data) || [];
-      // 接口按「今天 → 前 4 天」倒序给，画图要正序
-      const list = arr.slice().sort(function (a, b) {
-        return String(a.date).localeCompare(String(b.date));
-      });
-      days = list.map(function (d) {
-        const pts = parseMinuteLines(d.data || []);
-        return { date: String(d.date || ''), prec: num(d.prec), points: pts };
-      }).filter(function (d) { return d.points.length > 1; });
-      if (days.length) {
-        const lastDay = days[days.length - 1];
-        const lastPt = lastDay.points[lastDay.points.length - 1];
-        price = lastPt.price;
-        prevClose = lastDay.prec;
-        if (!isFinite(prevClose) || !prevClose) prevClose = days[0].points[0].price;
-        pct = ((price - prevClose) / prevClose) * 100;
-        change = price - prevClose;
+      // 外盘期货 / 美元指数：腾讯没有 5 日分时，用东财 5 分钟 K 线拼最近 5 个交易日
+      const emSecid = EM_SECID[code] || HF_EM_SECID[code];
+      if (emSecid && typeof market.fetchFiveDay === 'function') {
+        days = await market.fetchFiveDay(code);
+        fiveForeign = true;
+        if (days.length) {
+          // 5 分钟粒度每天点数比 A 股少，横轴按实际最大点数排，避免每天只占一小截
+          let maxPts = 0;
+          for (let i = 0; i < days.length; i++) {
+            if (days[i].points.length > maxPts) maxPts = days[i].points.length;
+          }
+          session = maxPts || session;
+          const lastPts = days[days.length - 1].points;
+          price = lastPts[lastPts.length - 1].price;
+          // 昨收和涨跌幅以快照（昨结）为准，后面统一补，和列表保持一致
+        }
+      } else {
+        const j = await market.fetchTencentJson('/appstock/app/day/query?code=' + encodeURIComponent(code));
+        const block = j && j.data && j.data[code];
+        const arr = (block && block.data) || [];
+        // 接口按「今天 → 前 4 天」倒序给，画图要正序
+        const list = arr.slice().sort(function (a, b) {
+          return String(a.date).localeCompare(String(b.date));
+        });
+        days = list.map(function (d) {
+          const pts = parseMinuteLines(d.data || []);
+          return { date: String(d.date || ''), prec: num(d.prec), points: pts };
+        }).filter(function (d) { return d.points.length > 1; });
+        if (days.length) {
+          const lastDay = days[days.length - 1];
+          const lastPt = lastDay.points[lastDay.points.length - 1];
+          price = lastPt.price;
+          prevClose = lastDay.prec;
+          if (!isFinite(prevClose) || !prevClose) prevClose = days[0].points[0].price;
+          pct = ((price - prevClose) / prevClose) * 100;
+          change = price - prevClose;
+        }
       }
     } else {
       // 外盘期货 / 美元指数：腾讯没有分时，走东财 trends2（与主浮窗一致）
       const emSecid = EM_SECID[code] || HF_EM_SECID[code];
       if (emSecid) {
         const url = 'https://push2.eastmoney.com/api/qt/stock/trends2/get?secid=' + emSecid +
-          '&fields1=f1,f2,f3,f4,f5,f6,f7,f8&fields2=f51,f52,f53,f54,f55&iscr=0&ndays=1';
+          '&fields1=f1,f2,f3,f4,f5,f6,f7,f8&fields2=f51,f52,f53,f54,f55,f56,f57,f58&iscr=0&ndays=1';
         const j = await http.fetchJson(url, {
           headers: HEADERS, timeout: 4000, retries: 1, tag: 'em-minute'
         });
         const trends = (j && j.data && j.data.trends) || [];
-        // trends 行：时间,价,涨跌额,涨跌幅,当日累计量 → 累计量差分回每分钟量
+        // trends 行：时间,开,收,高,低,成交量,成交额,均价；价格取分钟收盘，量直接取成交量。
+        // 伦敦金 / 美元指数本身没有成交量，接口整列为 0，交给图表隐藏成交量栏。
         const pts = [];
-        let prevCum = 0;
         for (const t of trends) {
           const f = String(t).split(',');
-          const p = num(f[1]);
+          const p = num(f[2]);
           if (!isFinite(p)) continue;
-          const cum = num(f[4]);
-          let v = isFinite(cum) ? cum - prevCum : 0;
-          if (v < 0) v = 0;
-          if (isFinite(cum)) prevCum = cum;
-          pts.push({ t: f[0], price: p, vol: v });
+          const v = num(f[5]);
+          pts.push({ t: f[0], price: p, vol: isFinite(v) ? v : 0 });
         }
         if (pts.length > 1) {
           days = [{ date: String((j.data && j.data.date) || ''), prec: NaN, points: pts }];
@@ -156,6 +172,18 @@ function createFocusService(options) {
       if (!isFinite(prevClose) && isFinite(snap[code].prevClose)) prevClose = snap[code].prevClose;
       if (!isFinite(pct) && isFinite(snap[code].pct)) pct = snap[code].pct;
     }
+    // 外盘 5 日：快照没有昨收时退回前一交易日收盘；图表最后一天的虚线也跟着对齐
+    if (fiveForeign && days.length) {
+      if (!isFinite(prevClose) && isFinite(days[days.length - 1].prec)) {
+        prevClose = days[days.length - 1].prec;
+        if (isFinite(price) && prevClose) {
+          pct = ((price - prevClose) / prevClose) * 100;
+          change = price - prevClose;
+        }
+      }
+      if (isFinite(prevClose)) days[days.length - 1].prec = prevClose;
+    }
+    if (!isFinite(change) && isFinite(price) && isFinite(prevClose)) change = price - prevClose;
 
     const hasData = (tab === 'day' || tab === 'month') ? candles.length > 1 : days.length > 0;
     return {

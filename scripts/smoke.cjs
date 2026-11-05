@@ -90,6 +90,22 @@ const SCENARIOS = [
     config: baseConfig({ symbols: ['hf_XAU'], watchlist: ['hf_XAU'] })
   },
   {
+    name: 'focus-hf-five',
+    shot: 'focus',
+    screenshot: 'focus.png',
+    env: { TICKER_SHOT_FOCUS_TAB: 'five' },
+    expect: [/\[focus\] 切换周期 five/],
+    config: baseConfig({ symbols: ['hf_XAU'], watchlist: ['hf_XAU'] })
+  },
+  {
+    name: 'focus-hf-month',
+    shot: 'focus',
+    screenshot: 'focus.png',
+    env: { TICKER_SHOT_FOCUS_TAB: 'month' },
+    expect: [/\[focus\] 切换周期 month/],
+    config: baseConfig({ symbols: ['hf_XAU'], watchlist: ['hf_XAU'] })
+  },
+  {
     name: 'focus-day',
     shot: 'focus',
     screenshot: 'focus.png',

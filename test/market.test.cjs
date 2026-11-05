@@ -3,7 +3,12 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { createMarket } = require('../electron/data/market.cjs');
+const {
+  createMarket,
+  mapEmKlineRows,
+  buildFiveDayRows,
+  aggregateMonthlyRows
+} = require('../electron/data/market.cjs');
 
 function makeHttp(handlers) {
   const calls = [];
@@ -168,7 +173,10 @@ test('fetchMinuteSeries 解析腾讯分时，东财特殊品种走 trends2', asy
   const http = makeHttp({
     json: function (url) {
       if (url.indexOf('trends2') >= 0) {
-        return { data: { trends: ['2026-10-28 09:30,100.1,0,0,0', '2026-10-28 09:31,100.2,0,0,0'] } };
+        return { data: { trends: [
+          '2026-10-28 09:30,100.0,100.1,100.2,99.9,5,0,100.1',
+          '2026-10-28 09:31,100.1,100.2,100.3,100.0,6,0,100.2'
+        ] } };
       }
       return { data: { sh000001: { data: { data: ['0930 3000.00 1', '0931 3001.00 2'] } } } };
     }
@@ -198,4 +206,108 @@ test('fetchKlineRaw 解析腾讯 K 线，空数据时用新浪 jsonp 兜底', as
   const market2 = createMarket({ http: fallingBack });
   assert.deepEqual(await market2.fetchKlineRaw('sh000001', 'day', 10),
     [['2026-10-27', '1', '2', '3', '0.5', '100']]);
+});
+
+test('东财 K 线字符串行能解析，外盘月 K 用 klt=103 而不是日 K', async function () {
+  const urls = [];
+  const http = makeHttp({
+    json: function (url) {
+      urls.push(url);
+      return {
+        data: {
+          klines: [
+            '2026-09-30,10,11,12,9,5',
+            '2026-10-31,11,13,14,10,6',
+            '2026-11-03,13,12,15,11,7'
+          ]
+        }
+      };
+    }
+  });
+  const market = createMarket({ http: http });
+  const month = await market.fetchKlineRaw('hf_XAU', 'month', 120);
+  assert.ok(urls[0].indexOf('secid=122.XAU') >= 0);
+  assert.ok(urls[0].indexOf('klt=103') >= 0);
+  assert.equal(month.length, 3);
+  assert.deepEqual(month[2], ['2026-11-03', 13, 12, 15, 11, 7]);
+
+  assert.deepEqual(mapEmKlineRows(['2026-11-03,13,12,15,11,7', 'bad']),
+    [['2026-11-03', 13, 12, 15, 11, 7]]);
+});
+
+test('东财不可用时外盘日 K 兜底并聚合出月 K', async function () {
+  const http = makeHttp({
+    json: function (url) {
+      if (url.indexOf('eastmoney.com') >= 0) throw new Error('down');
+      return {
+        result: {
+          data: [
+            { date: '2026-09-30', open: 10, close: 11, high: 12, low: 9, volume: 5 },
+            { date: '2026-10-31', open: 11, close: 13, high: 14, low: 10, volume: 6 },
+            { date: '2026-11-03', open: 13, close: 12, high: 15, low: 11, volume: 7 }
+          ]
+        }
+      };
+    }
+  });
+  const market = createMarket({ http: http });
+  const month = await market.fetchKlineRaw('hf_XAU', 'month', 120);
+  assert.deepEqual(month, [
+    ['2026-09-30', 10, 11, 12, 9, 5],
+    ['2026-10-31', 11, 13, 14, 10, 6],
+    ['2026-11-03', 13, 12, 15, 11, 7]
+  ]);
+  assert.equal(aggregateMonthlyRows([
+    ['2026-10-01', 10, 11, 12, 9, 5],
+    ['2026-10-31', 11, 13, 14, 10, 6]
+  ])[0][3], 14);
+});
+
+test('外盘 5 日按交易日夜盘归并，只取最近 5 天', function () {
+  const rows = [
+    '2026-10-28 07:00,10,10,10,10,0',
+    '2026-10-28 23:00,11,11,11,11,0',
+    '2026-10-29 07:00,12,12,12,12,0',
+    '2026-10-29 23:00,13,13,13,13,0',
+    '2026-10-30 07:00,14,14,14,14,0',
+    '2026-10-30 23:00,15,15,15,15,0',
+    '2026-10-31 02:00,16,16,16,16,0',
+    '2026-11-02 07:00,17,17,17,17,0',
+    '2026-11-02 23:00,18,18,18,18,0',
+    '2026-11-03 07:00,19,19,19,19,0',
+    '2026-11-03 08:00,20,20,20,20,0'
+  ];
+  const days = buildFiveDayRows(rows);
+  assert.deepEqual(days.map(function (d) { return d.date; }),
+    ['2026-10-28', '2026-10-29', '2026-10-30', '2026-11-02', '2026-11-03']);
+  assert.ok(!isFinite(days[0].prec));
+  assert.equal(days[1].prec, 11);
+  assert.equal(days[0].points.length, 2);
+  assert.equal(days[1].points.length, 2);
+  assert.equal(days[2].points.length, 3);
+  assert.equal(days[4].points[1].price, 20);
+});
+
+test('fetchFiveDay 走东财 5 分钟 K 线', async function () {
+  const urls = [];
+  const http = makeHttp({
+    json: function (url) {
+      urls.push(url);
+      return {
+        data: {
+          klines: [
+            '2026-11-02 07:00,17,17,17,17,0',
+            '2026-11-02 07:05,18,18,18,18,0',
+            '2026-11-03 07:00,19,19,19,19,0',
+            '2026-11-03 07:05,20,20,20,20,0'
+          ]
+        }
+      };
+    }
+  });
+  const market = createMarket({ http: http });
+  const days = await market.fetchFiveDay('hf_XAU');
+  assert.ok(urls[0].indexOf('klt=5') >= 0);
+  assert.deepEqual(days.map(function (d) { return d.date; }), ['2026-11-02', '2026-11-03']);
+  assert.equal(days[1].points[1].price, 20);
 });

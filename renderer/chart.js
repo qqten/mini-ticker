@@ -187,13 +187,14 @@
     var date = c.days[dIdx] ? shortDate(c.days[dIdx].date) : '';
     var head = c.days.length > 1 ? (date + ' ' + t) : t;
     var chg = (isNum(c.prec) && c.prec > 0) ? (best.p - c.prec) / c.prec * 100 : NaN;
+    var lines = [
+      head,
+      '价 ' + fPrice(best.p),
+      '涨跌 ' + fChg(best.p - c.prec) + '  ' + fPct(chg)
+    ];
+    if (c.showVol) lines.push('量 ' + fVol(best.v));
     return {
-      lines: [
-        head,
-        '价 ' + fPrice(best.p),
-        '涨跌 ' + fChg(best.p - c.prec) + '  ' + fPct(chg),
-        '量 ' + fVol(best.v)
-      ],
+      lines: lines,
       x: c.X(best.x),
       y: c.Y(best.p)
     };
@@ -207,14 +208,15 @@
     i = Math.max(c.i0, Math.min(c.i1, Math.min(n - 1, i)));
     var r = c.rows[i];
     var chg = r.o > 0 ? (r.c - r.o) / r.o * 100 : NaN;
+    var lines = [
+      String(r.d || ''),
+      '开 ' + fPrice(r.o) + '   收 ' + fPrice(r.c),
+      '高 ' + fPrice(r.h) + '   低 ' + fPrice(r.l),
+      '涨跌 ' + fChg(r.c - r.o) + '  ' + fPct(chg)
+    ];
+    if (c.showVol) lines.push('量 ' + fVol(r.v));
     return {
-      lines: [
-        String(r.d || ''),
-        '开 ' + fPrice(r.o) + '   收 ' + fPrice(r.c),
-        '高 ' + fPrice(r.h) + '   低 ' + fPrice(r.l),
-        '涨跌 ' + fChg(r.c - r.o) + '  ' + fPct(chg),
-        '量 ' + fVol(r.v)
-      ],
+      lines: lines,
       x: c.Xc(i),
       y: c.Y(r.h)
     };
@@ -245,7 +247,7 @@
   var TICK_PAD = 9;   // 绘图区左右最小内缩：刻度文字就画在这条缝上（贴面板边）
   var TICK_INSET = 3; // 刻度文字距面板左/右边缘的像素
 
-  function geom(withMacd) {
+  function geom(withMacd, withVol) {
     // 内边距从样式里读，宽度就是真实可用宽度，不再用写死的 -10 去猜
     var cs = getComputedStyle(chartEl);
     function px(k) { return parseFloat(cs[k]) || 0; }
@@ -258,15 +260,17 @@
     var padR = TICK_PAD;
 
     var padT = 6, axisH = 16, gap = 7;
-    var body = H - padT - axisH - gap * (withMacd ? 2 : 1);
-    var volH = Math.round(body * (withMacd ? 0.2 : 0.24));
+    // 没有成交量（伦敦金、美元指数等）就不留成交量栏，把高度让给价格和 MACD
+    var panes = (withMacd ? 1 : 0) + (withVol ? 1 : 0);
+    var body = H - padT - axisH - gap * panes;
+    var volH = withVol ? Math.round(body * (withMacd ? 0.2 : 0.24)) : 0;
     var macdH = withMacd ? Math.round(body * 0.22) : 0;
     var priceH = body - volH - macdH;
 
     var g = {
       W: W, H: H, padL: padL, padR: padR, plotW: W - padL - padR,
       priceTop: padT, priceH: priceH, priceBot: padT + priceH,
-      volTop: padT + priceH + gap, volH: volH,
+      volTop: padT + priceH + (withVol ? gap : 0), volH: volH,
       axisY: H - 4
     };
     g.volBot = g.volTop + volH;
@@ -316,6 +320,12 @@
     }
     if (pts.length < 2) return empty('暂无分时数据');
 
+    // 伦敦金、美元指数等品种没有成交量：整张图不画成交量栏，价格区直接铺满
+    var hasVol = false;
+    for (var hv = 0; hv < pts.length; hv++) {
+      if (pts[hv].v > 0) { hasVol = true; break; }
+    }
+
     // 分时只有当天（或 5 日）这么多点，默认就整幅，没有「藏着的历史」
     defSpan = 1;
     if (!viewTouched) { view.s = 0; view.e = 1; }
@@ -346,7 +356,7 @@
     if (isNum(lastPrec) && lastPrec > 0) {
       pctTicks = [fPct(((hi - lastPrec) / lastPrec) * 100), fPct(((lo - lastPrec) / lastPrec) * 100)];
     }
-    var g = geom(false);
+    var g = geom(false, hasVol);
 
     var X = function (i) { return g.padL + ((i - xs) / (xe - xs)) * g.plotW; };
     var Y = function (v) { return g.priceBot - ((v - lo) / (hi - lo)) * g.priceH; };
@@ -378,14 +388,16 @@
 
     // 成交量柱：与上一分钟比价定色，当天第一根和昨收比
     var bw = Math.max(1, Math.min(12, (g.plotW / (xe - xs + 1)) * 0.7));
-    for (var b = 0; b < pts.length; b++) {
-      if (pts[b].x < xs - 1 || pts[b].x > xe + 1) continue;
-      var ref = pts[b].first ? pts[b].prec : pts[b - 1].p;
-      var col = pts[b].p >= ref ? T.up : T.down;
-      var y = VY(pts[b].v);
-      var h = Math.max(0.6, g.volBot - y);
-      s.push('<rect x="' + (X(pts[b].x) - bw / 2).toFixed(1) + '" y="' + y.toFixed(1) +
-        '" width="' + bw.toFixed(1) + '" height="' + h.toFixed(1) + '" fill="' + col + '" opacity=".8"/>');
+    if (hasVol) {
+      for (var b = 0; b < pts.length; b++) {
+        if (pts[b].x < xs - 1 || pts[b].x > xe + 1) continue;
+        var ref = pts[b].first ? pts[b].prec : pts[b - 1].p;
+        var col = pts[b].p >= ref ? T.up : T.down;
+        var y = VY(pts[b].v);
+        var h = Math.max(0.6, g.volBot - y);
+        s.push('<rect x="' + (X(pts[b].x) - bw / 2).toFixed(1) + '" y="' + y.toFixed(1) +
+          '" width="' + bw.toFixed(1) + '" height="' + h.toFixed(1) + '" fill="' + col + '" opacity=".8"/>');
+      }
     }
 
     // 价格线 + 均价线
@@ -418,7 +430,7 @@
     }
 
     // 成交量总量：放量区左上，别贴右边的涨跌幅刻度（会挤在一起看不清）
-    s.push(txt(g.padL + 2, g.volTop + 9, '量 ' + fVol(sumV), 'start', T.sub, 9));
+    if (hasVol) s.push(txt(g.padL + 2, g.volTop + 9, '量 ' + fVol(sumV), 'start', T.sub, 9));
 
     // 横轴：没缩放时沿用固定刻度（整点 / 整天）；缩放后按可见窗口取几个真实时间点
     if (!isZoomed()) {
@@ -467,7 +479,7 @@
     s.push(crosshairSvg(g));
     s.push('</svg>');
     chartEl.innerHTML = s.join('');
-    tipCtx = { type: 'minute', g: g, X: X, Y: Y, pts: pts, days: days, session: session, total: total, prec: p.prevClose, xs: xs, xe: xe, dataEnd: pts[pts.length - 1].x / (total - 1) };
+    tipCtx = { type: 'minute', g: g, X: X, Y: Y, pts: pts, days: days, session: session, total: total, prec: p.prevClose, xs: xs, xe: xe, showVol: hasVol, dataEnd: pts[pts.length - 1].x / (total - 1) };
   }
 
   /* ---------------- 日K / 月K（K线 + 均线 + 成交量 + MACD） ---------------- */
@@ -496,6 +508,12 @@
       });
     }
     var n = rows.length;
+
+    // 伦敦金、美元指数没有成交量数据，K 线图就不留成交量栏，MACD 紧贴价格区
+    var hasVol = false;
+    for (var hvi = 0; hvi < n; hvi++) {
+      if (rows[hvi].v > 0) { hasVol = true; break; }
+    }
 
     // 月K 120 根本来就铺得下，直接整幅；日K 默认只露最近 120 根
     defSpan = isMonth ? 1 : Math.min(1, DEF_DAY_BARS / Math.max(1, n));
@@ -534,7 +552,7 @@
     lo -= padY;
 
     // 日K 右边没有刻度，padR 只剩最小空隙，K 线能一路铺到右边缘
-    var g = geom(true);
+    var g = geom(true, hasVol);
 
     // 一根占多少像素。缩到整幅时 1200 根只有 0.25px/根，真画 1200 组 K 线
     // 既看不清又拖慢渲染，所以低于 1.6px 就按像素桶合并成一根。
@@ -578,13 +596,15 @@
     });
 
     // 成交量
-    for (var v = 0; v < bars.length; v++) {
-      var rb = bars[v];
-      var col = rb.c >= rb.o ? T.up : T.down;
-      var vy = VY(rb.v);
-      s.push('<rect x="' + (Xb(v) - cw / 2).toFixed(1) + '" y="' + vy.toFixed(1) + '" width="' +
-        cw.toFixed(1) + '" height="' + Math.max(0.6, g.volBot - vy).toFixed(1) +
-        '" fill="' + col + '" opacity=".75"/>');
+    if (hasVol) {
+      for (var v = 0; v < bars.length; v++) {
+        var rb = bars[v];
+        var col = rb.c >= rb.o ? T.up : T.down;
+        var vy = VY(rb.v);
+        s.push('<rect x="' + (Xb(v) - cw / 2).toFixed(1) + '" y="' + vy.toFixed(1) + '" width="' +
+          cw.toFixed(1) + '" height="' + Math.max(0.6, g.volBot - vy).toFixed(1) +
+          '" fill="' + col + '" opacity=".75"/>');
+      }
     }
 
     // K 线：合并后每根不足 1.6px 宽，影线就画在中轴上，
@@ -642,7 +662,7 @@
     // 刻度
     s.push(txt(TICK_INSET, g.priceTop + 9, fx(hi), 'start', T.sub));
     s.push(txt(TICK_INSET, g.priceBot - 1, fx(lo), 'start', T.sub));
-    s.push(txt(g.padL + 2, g.volTop + 9, '量 ' + fVol(sumV), 'start', T.sub, 9));
+    if (hasVol) s.push(txt(g.padL + 2, g.volTop + 9, '量 ' + fVol(sumV), 'start', T.sub, 9));
     s.push(txt(g.padL + 2, g.macdTop + 8, 'MACD(12,26,9)', 'start', T.sub, 8.5));
 
     // 均线图例
@@ -666,7 +686,7 @@
     s.push('</svg>');
     chartEl.innerHTML = s.join('');
     // 光标按原始索引换算：合并只是画的时候省事，读数不能跟着变粗
-    tipCtx = { type: 'day', g: g, Xc: Xn, Y: Y, rows: rows, step: stepRaw, n: n, xs: xs, xe: xe, i0: i0, i1: i1 };
+    tipCtx = { type: 'day', g: g, Xc: Xn, Y: Y, rows: rows, step: stepRaw, n: n, xs: xs, xe: xe, i0: i0, i1: i1, showVol: hasVol };
     // 调试用：n=总根数 span=当前比例 def=默认比例 bars=合并后画了多少根
     chartEl.dataset.dbg = 'n=' + n + ' span=' + (view.e - view.s).toFixed(4) +
       ' def=' + defSpan.toFixed(4) + ' bars=' + bars.length + ' agg=' + agg;

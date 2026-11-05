@@ -28,6 +28,89 @@ const SINA_SCALE = { day: 240, week: 1200, month: 7200 };
 
 const NAV_TTL = 30 * 60 * 1000;
 
+// 东财 K 线行：[日期, 开, 收, 高, 低, 量, 额, 振幅]
+// 接口给的是逗号分隔字符串，测试里也可能直接传数组，这里统一处理
+function emFields(row) {
+  return Array.isArray(row) ? row : String(row == null ? '' : row).split(',');
+}
+
+function mapEmKlineRows(rows) {
+  return (rows || []).map(function (r) {
+    const f = emFields(r);
+    return [String(f[0] || ''), num(f[1]), num(f[2]), num(f[3]), num(f[4]), num(f[5])];
+  }).filter(function (x) {
+    return x[0] && isFinite(x[1]) && isFinite(x[2]) && isFinite(x[3]) && isFinite(x[4]);
+  });
+}
+
+function shiftDate(dateStr, delta) {
+  const p = String(dateStr).split('-');
+  const d = new Date(Date.UTC(parseInt(p[0], 10), parseInt(p[1], 10) - 1, parseInt(p[2], 10)));
+  d.setUTCDate(d.getUTCDate() + delta);
+  return d.toISOString().slice(0, 10);
+}
+
+// 东财 5 分钟 K 线 -> 最近 5 个交易日的分时点。24 小时品种凌晨 0-5 点算前一日夜盘，
+// 否则一个交易日会被拆成两天，5 日图会多出一截。
+function buildFiveDayRows(rows) {
+  const list = (rows || []).slice().sort(function (a, b) {
+    return String(emFields(a)[0] || '').localeCompare(String(emFields(b)[0] || ''));
+  });
+  const groups = [];
+  let cur = null;
+  for (let i = 0; i < list.length; i++) {
+    const f = emFields(list[i]);
+    const m = /^(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2})/.exec(String(f[0] || ''));
+    if (!m) continue;
+    const price = num(f[2]);
+    if (!isFinite(price)) continue;
+    let date = m[1];
+    if (parseInt(m[2].slice(0, 2), 10) < 6) date = shiftDate(date, -1);
+    if (!cur || cur.date !== date) {
+      cur = { date: date, prec: NaN, points: [] };
+      groups.push(cur);
+    }
+    const v = num(f[5]);
+    cur.points.push({ t: m[2], price: price, vol: isFinite(v) ? v : 0 });
+  }
+  const days = groups.filter(function (g) { return g.points.length > 1; });
+  for (let i = 1; i < days.length; i++) {
+    const prev = days[i - 1].points;
+    days[i].prec = prev[prev.length - 1].price;
+  }
+  return days.slice(-5);
+}
+
+// 新浪/腾讯日 K 聚合成月 K（东财月 K 不可用时的兜底）
+function aggregateMonthlyRows(rows) {
+  const list = (rows || []).slice().sort(function (a, b) {
+    return String(a[0] || '').localeCompare(String(b[0] || ''));
+  });
+  const out = [];
+  let cur = null, key = '';
+  for (let i = 0; i < list.length; i++) {
+    const r = list[i];
+    const f = emFields(r);
+    const date = String(f[0] || '');
+    const ym = date.slice(0, 7);
+    if (!/^\d{4}-\d{2}$/.test(ym)) continue;
+    const o = num(f[1]), c = num(f[2]), h = num(f[3]), l = num(f[4]), v = num(f[5]);
+    if (!isFinite(o) || !isFinite(c) || !isFinite(h) || !isFinite(l)) continue;
+    if (!cur || ym !== key) {
+      key = ym;
+      cur = [date, o, c, h, l, isFinite(v) ? v : 0];
+      out.push(cur);
+    } else {
+      cur[0] = date;
+      cur[2] = c;
+      if (h > cur[3]) cur[3] = h;
+      if (l < cur[4]) cur[4] = l;
+      if (isFinite(v)) cur[5] += v;
+    }
+  }
+  return out;
+}
+
 function createMarket(options) {
   options = options || {};
   const http = options.http;
@@ -338,7 +421,7 @@ function createMarket(options) {
         '&fields1=f1,f2,f3,f4,f5,f6,f7,f8&fields2=f51,f52,f53,f54,f55&iscr=0&ndays=1';
       const j = await http.fetchJson(url, { headers: HEADERS, timeout: 4000, retries: 1, tag: 'em-minute' });
       const trends = (j && j.data && j.data.trends) || [];
-      return trends.map(function (t) { return num(String(t).split(',')[1]); }).filter(isFinite);
+      return trends.map(function (t) { return num(String(t).split(',')[2]); }).filter(isFinite);
     }
     if (process.env.TICKER_FORCE_SINA && sinaSupported(code)) {
       try {
@@ -378,8 +461,37 @@ function createMarket(options) {
     }
   }
 
+  // 东财 K 线（外盘期货 / 美元指数）。klt: 5=5分钟, 101=日, 103=月
+  async function fetchEmKlines(secid, klt, count) {
+    const url = 'https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=' + encodeURIComponent(secid) +
+      '&klt=' + klt + '&fqt=1&lmt=' + count + '&end=20500101' +
+      '&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56,f57,f58';
+    const j = await http.fetchJson(url, { headers: HEADERS, timeout: 5000, retries: 1, tag: 'em-kline' });
+    return (j && j.data && j.data.klines) || [];
+  }
+
+  // 新浪外盘期货日 K：[日期, 开, 收, 高, 低, 量]
+  async function fetchHfDailyRows(code) {
+    const sym = code.slice(3).toUpperCase();
+    const url = 'https://stock2.finance.sina.com.cn/futures/api/openapi.php/GlobalFuturesService.getGlobalFuturesDailyKLine?symbol=' + sym;
+    const j = await http.fetchJson(url, { headers: HEADERS, timeout: 5000, retries: 1, tag: 'hf-kline' });
+    const rows = (j && j.result && j.result.data) || [];
+    return rows.map(function (r) {
+      return [String(r.date || r.day || ''), num(r.open), num(r.close), num(r.high), num(r.low), num(r.volume)];
+    }).filter(function (x) {
+      return isFinite(x[1]) && isFinite(x[2]) && isFinite(x[3]) && isFinite(x[4]);
+    });
+  }
+
+  // 外盘 5 日分时：东财 5 分钟 K 线，按交易日夜盘归并后取最近 5 天
+  async function fetchFiveDay(code) {
+    const secid = EM_SECID[code] || HF_EM_SECID[code];
+    if (!secid) return [];
+    return buildFiveDayRows(await fetchEmKlines(secid, 5, 2000));
+  }
+
   // K 线原始行：[日期, 开, 收, 高, 低, 量]
-  // 美股走 usfqkline，其余走 fqkline
+  // 外盘期货 / 美元指数走东财，月 K 用 klt=103，避免日 K 冒充月 K
   async function fetchKlineRaw(code, interval, count) {
     if (process.env.TICKER_FORCE_SINA && sinaSupported(code)) {
       try {
@@ -389,17 +501,24 @@ function createMarket(options) {
         // 落到腾讯。
       }
     }
-    // 外盘期货：腾讯无 K 线，走新浪外盘日K；转成与腾讯一致的 [date,open,close,high,low,volume] 行格式
+    const emSecid = EM_SECID[code] || HF_EM_SECID[code];
+    if (emSecid) {
+      try {
+        const rows = mapEmKlineRows(await fetchEmKlines(emSecid, interval === 'month' ? 103 : 101, count));
+        if (rows.length) return rows;
+      } catch (error) {
+        // 东财不可用时，外盘继续走新浪日 K 兜底。
+      }
+      if (/^hf_/i.test(code)) {
+        const rows = await fetchHfDailyRows(code);
+        return interval === 'month' ? aggregateMonthlyRows(rows).slice(-count) : rows.slice(-count);
+      }
+      return [];
+    }
+    // 未映射的外盘期货：腾讯无 K 线，走新浪外盘日K，月 K 由日 K 聚合
     if (/^hf_/i.test(code)) {
-      const sym = code.slice(3).toUpperCase();
-      const url = 'https://stock2.finance.sina.com.cn/futures/api/openapi.php/GlobalFuturesService.getGlobalFuturesDailyKLine?symbol=' + sym;
-      const j = await http.fetchJson(url, { headers: HEADERS, timeout: 5000, retries: 1, tag: 'hf-kline' });
-      const rows = (j && j.result && j.result.data) || [];
-      return rows.map(function (r) {
-        return [String(r.date || r.day || ''), num(r.open), num(r.close), num(r.high), num(r.low), num(r.volume)];
-      }).filter(function (x) {
-        return isFinite(x[1]) && isFinite(x[2]) && isFinite(x[3]) && isFinite(x[4]);
-      }).slice(-count);
+      const rows = await fetchHfDailyRows(code);
+      return interval === 'month' ? aggregateMonthlyRows(rows).slice(-count) : rows.slice(-count);
     }
     try {
       const ep = code.slice(0, 2).toLowerCase() === 'us' ? 'usfqkline' : 'fqkline';
@@ -434,25 +553,18 @@ function createMarket(options) {
         '&fields1=f1,f2,f3,f4,f5,f6,f7,f8&fields2=f51,f52,f53,f54,f55&iscr=0&ndays=1';
       const j = await http.fetchJson(url, { headers: HEADERS, timeout: 4000, retries: 1, tag: 'em-minute' });
       const trends = (j && j.data && j.data.trends) || [];
-      return trends.map(function (t) { return num(String(t).split(',')[1]); }).filter(isFinite);
+      return trends.map(function (t) { return num(String(t).split(',')[2]); }).filter(isFinite);
     }
-    // 外盘期货（hf_ 前缀）：腾讯不提供分时/K线，走东方财富
+    // 外盘期货（hf_ 前缀）：分时走东财 trends2，日/月/年 K 统一走 fetchKlineRaw
     if (/^hf_/i.test(code)) {
       const secid = HF_EM_SECID[code];
       if (secid && period === 'minute') {
-        // 当天分时：东财 trends2 接口
         const url = 'https://push2.eastmoney.com/api/qt/stock/trends2/get?secid=' + secid +
           '&fields1=f1,f2,f3,f4,f5,f6,f7,f8&fields2=f51,f52,f53,f54,f55&iscr=0&ndays=1';
         const j = await http.fetchJson(url, { headers: HEADERS, timeout: 4000, retries: 1, tag: 'em-minute' });
         const trends = (j && j.data && j.data.trends) || [];
-        return trends.map(function (t) { return num(String(t).split(',')[1]); }).filter(isFinite);
+        return trends.map(function (t) { return num(String(t).split(',')[2]); }).filter(isFinite);
       }
-      // 日K：新浪外盘期货日K，只取最近 30 个交易日
-      const sym = code.slice(3).toUpperCase();
-      const url = 'https://stock2.finance.sina.com.cn/futures/api/openapi.php/GlobalFuturesService.getGlobalFuturesDailyKLine?symbol=' + sym;
-      const j = await http.fetchJson(url, { headers: HEADERS, timeout: 5000, retries: 1, tag: 'hf-kline' });
-      const rows = (j && j.result && j.result.data) || [];
-      return rows.slice(-30).map(function (r) { return num(r.close); }).filter(isFinite);
     }
     if (period === 'day') return closeSeries(await fetchKlineRaw(code, 'day', 120));
     if (period === 'month') return closeSeries(await fetchKlineRaw(code, 'month', 120));
@@ -531,6 +643,7 @@ function createMarket(options) {
     searchSymbols,
     fetchMinuteSeries,
     fetchKlineRaw,
+    fetchFiveDay,
     fetchSeries,
     fetchFundEstimates,
     fetchFundNav,
@@ -544,5 +657,8 @@ module.exports = {
   HEADERS,
   SINA_HEADERS,
   FUND_HEADERS,
-  QT_HOSTS
+  QT_HOSTS,
+  mapEmKlineRows,
+  buildFiveDayRows,
+  aggregateMonthlyRows
 };

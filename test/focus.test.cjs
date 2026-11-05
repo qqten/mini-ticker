@@ -73,9 +73,9 @@ function makeService(overrides) {
         data: {
           date: '20261028',
           trends: [
-            '09:30,2400,0,0,10',
-            '09:31,2405,5,0.2,25',
-            '09:32,2402,-3,-0.1,40'
+            '09:30,2400.5,2400,2401,2399,10,0,2400',
+            '09:31,2400,2405,2406,2399,15,0,2403',
+            '09:32,2405,2402,2406,2401,12,0,2402.5'
           ]
         }
       };
@@ -138,6 +138,71 @@ test('5日 payload 按日期正序并计算涨跌', async function () {
   assert.equal(data.hasData, true);
 });
 
+test('外盘 5 日走东财 5 分钟数据，横轴按最大点数并沿用快照昨收', async function () {
+  const { service, calls } = makeService({
+    market: {
+      fetchSnapshots: async function () {
+        return { hf_XAU: { name: '黄金', price: 3900, prevClose: 3950, pct: -1.27 } };
+      },
+      fetchTencentJson: async function () { throw new Error('不应走腾讯'); },
+      fetchKlineRaw: async function () { throw new Error('不应走K线'); },
+      fetchFiveDay: async function (code) {
+        calls.five = code;
+        return [
+          { date: '2026-10-30', prec: 4000, points: [
+            { t: '07:00', price: 4010, vol: 1 },
+            { t: '07:05', price: 4020, vol: 2 }
+          ] },
+          { date: '2026-11-03', prec: 4050, points: [
+            { t: '07:00', price: 3930, vol: 3 },
+            { t: '07:05', price: 3910, vol: 4 },
+            { t: '07:10', price: 3900, vol: 5 }
+          ] }
+        ];
+      }
+    }
+  });
+  const data = await service.payload('hf_XAU', 'five');
+  assert.equal(calls.five, 'hf_XAU');
+  // 5 分钟粒度每天最多 3 个点，横轴就按 3 排，不该用 1440 把每天压扁
+  assert.equal(data.session, 3);
+  assert.equal(data.days.length, 2);
+  assert.equal(data.price, 3900);
+  assert.equal(data.prevClose, 3950);
+  assert.equal(data.pct, -1.27);
+  assert.ok(Math.abs(data.change - (3900 - 3950)) < 1e-9);
+  // 最后一天的昨收虚线跟快照（昨结）对齐
+  assert.equal(data.days[1].prec, 3950);
+  assert.equal(data.hasData, true);
+});
+
+test('外盘 5 日快照缺昨收时退回前一交易日收盘', async function () {
+  const { service } = makeService({
+    market: {
+      fetchSnapshots: async function () { return { hf_XAU: { price: 3900 } }; },
+      fetchTencentJson: async function () { throw new Error('不应走腾讯'); },
+      fetchKlineRaw: async function () { throw new Error('不应走K线'); },
+      fetchFiveDay: async function () {
+        return [
+          { date: '2026-11-02', prec: 3980, points: [
+            { t: '07:00', price: 3990, vol: 1 },
+            { t: '07:05', price: 4000, vol: 2 }
+          ] },
+          { date: '2026-11-03', prec: 3880, points: [
+            { t: '07:00', price: 3890, vol: 3 },
+            { t: '07:05', price: 3900, vol: 4 }
+          ] }
+        ];
+      }
+    }
+  });
+  const data = await service.payload('hf_XAU', 'five');
+  assert.equal(data.prevClose, 3880);
+  assert.ok(Math.abs(data.pct - ((3900 - 3880) / 3880) * 100) < 1e-9);
+  assert.ok(Math.abs(data.change - 20) < 1e-9);
+  assert.equal(data.days[1].prec, 3880);
+});
+
 test('日K payload 拉满 1200 根历史并过滤坏行', async function () {
   const { service, calls } = makeService();
   const data = await service.payload('sh600519', 'day');
@@ -172,10 +237,40 @@ test('外盘聚焦走东财 trends2，并用快照补昨收', async function () 
   assert.equal(data.prevClose, 2400);
   assert.equal(data.pct, 0.08);
   assert.equal(data.days[0].points.length, 3);
+  assert.equal(data.days[0].points[1].price, 2405);
   assert.equal(data.days[0].points[1].vol, 15);
   assert.equal(data.hasData, true);
   assert.ok(calls.em[0][0].indexOf('trends2/get?secid=') >= 0);
   assert.equal(calls.em[0][1].headers, HEADERS);
+});
+
+test('外盘分时没有成交量时 vol 为 0（伦敦金 / 美元指数）', async function () {
+  const urls = [];
+  const { service } = makeService({
+    market: {
+      fetchSnapshots: async function () { return { hf_XAU: { name: '黄金', price: 4138.73, prevClose: 4060.13, pct: 1.94 } }; },
+      fetchTencentJson: async function () { throw new Error('不应走腾讯'); },
+      fetchKlineRaw: async function () { throw new Error('不应走K线'); }
+    },
+    http: {
+      fetchJson: async function (url) {
+        urls.push(url);
+        return {
+          data: {
+            date: '20261105',
+            trends: [
+              '2026-11-05 07:00,4063.13,4063.13,4063.13,4063.13,0,0.00,0.000',
+              '2026-11-05 11:45,4139.71,4138.73,4140.41,4138.39,0,0.00,0.000'
+            ]
+          }
+        };
+      }
+    }
+  });
+  const data = await service.payload('hf_XAU', 'minute');
+  assert.equal(data.price, 4138.73);
+  assert.deepEqual(data.days[0].points.map(function (p) { return p.vol; }), [0, 0]);
+  assert.ok(urls[0].indexOf('f56') >= 0);
 });
 
 test('payload 命中缓存直到 TTL 过期，peek 只读缓存', async function () {
