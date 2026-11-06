@@ -159,11 +159,48 @@ test('applySettingsPatch 规范化快捷键，并只在全局键变化时要求�
   assert.equal(through.patch.shortcuts.clickThrough, 'Ctrl+Alt+P');
 });
 
+test('applySettingsPatch 支持多分组、空组，并派生当前组 symbols', function () {
+  const result = applySettingsPatch(current(), {
+    groups: [
+      { id: 'a', name: '指数', symbols: ['sh000001', 'sz399001'] },
+      { id: 'b', name: '外盘', symbols: ['hf_XAU', 'sh000001'] },
+      { id: 'c', name: '空组', symbols: [] }
+    ],
+    activeGroupId: 'b',
+    watchlist: ['sh000001', 'hf_XAU', 'sz399001']
+  });
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.patch.groups.map(function (g) { return g.name; }),
+    ['指数', '外盘', '空组']);
+  assert.equal(result.patch.activeGroupId, 'b');
+  assert.deepEqual(result.patch.symbols, ['hf_XAU', 'sh000001']);
+  assert.deepEqual(result.patch.watchlist, ['sh000001', 'hf_XAU', 'sz399001']);
+});
+
+test('applySettingsPatch 当前组非法时回退第一个组，且至少保留一个组', function () {
+  const result = applySettingsPatch(current(), {
+    groups: [{ id: 'a', name: '指数', symbols: ['sh000001'] }],
+    activeGroupId: 'missing'
+  });
+  assert.equal(result.patch.activeGroupId, 'a');
+
+  const none = applySettingsPatch(current(), { groups: [] });
+  assert.equal(none.ok, false);
+  assert.equal(none.msg, '至少要保留一个分组');
+
+  const allInvalid = applySettingsPatch(current(), {
+    groups: [{ id: 'a', name: 'x', symbols: ['bad code'] }],
+    activeGroupId: 'a'
+  });
+  assert.equal(allInvalid.ok, true);
+  assert.deepEqual(allInvalid.patch.groups[0].symbols, []);
+});
+
 test('applySettingsPatch 只返回设置面板负责的字段', function () {
   const result = applySettingsPatch(current(), { symbols: ['sh000001'] });
   assert.deepEqual(Object.keys(result.patch).sort(), [
-    'alert', 'alwaysOnTop', 'autoExit', 'autoStart', 'backdrop', 'backdropOpacity',
-    'baseline', 'focusChartSide', 'interval', 'locked', 'period', 'probeIntervalMs', 'shortcuts',
-    'showName', 'symbols', 'textMode', 'watchlist', 'width'
+    'activeGroupId', 'alert', 'alwaysOnTop', 'autoExit', 'autoStart', 'backdrop', 'backdropOpacity',
+    'baseline', 'focusChartSide', 'groups', 'interval', 'locked', 'period', 'probeIntervalMs',
+    'shortcuts', 'showName', 'symbols', 'textMode', 'watchlist', 'width'
   ]);
 });

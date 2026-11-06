@@ -64,6 +64,14 @@ const FOCUS_CHART_SIDES = ['auto', 'left', 'right'];
 
 const DEFAULT_CONFIG = {
   symbols: ['sh000001', 'sz399001', 'sz399006', 'sh000688'],
+  // 自选分组：默认只有一个「默认」组，旧配置升级时 symbols 会原样迁进来。
+  // symbols 始终是当前分组（activeGroupId）的镜像，方便沿用旧代码。
+  groups: [{
+    id: 'default',
+    name: '默认',
+    symbols: ['sh000001', 'sz399001', 'sz399006', 'sh000688']
+  }],
+  activeGroupId: 'default',
   watchlist: DEFAULT_WATCHLIST,
   period: 'minute',
   interval: 3000,

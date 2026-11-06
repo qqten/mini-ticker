@@ -120,7 +120,7 @@ body[data-text="dark"] {
    但不能太长——否则临界区来回切时会看到颜色慢慢渐变再反向渐变，反而更晃。
    text-shadow 必须一起过渡：描边光晕是黑↔白反向变的，只淡颜色会让字在切换
    的 120ms 里"糊"一下（深字配白晕）。 */
-.name, .chg, .pct, .spark polyline, .spark .baseline, #period-label, #sort-btn, #f-name {
+.name, .chg, .pct, .spark polyline, .spark .baseline, #period-label, #group-btn, #sort-btn, #f-name {
   transition: color .12s ease, text-shadow .12s ease, stroke .12s ease, filter .12s ease;
 }
 
@@ -140,6 +140,28 @@ body[data-text="dark"].backdrop {
   height: 15px;
   flex: 0 0 auto;
 }
+
+#group-btn {
+  margin-right: auto;
+  max-width: 46%;
+  padding: 0 4px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  font-family: inherit;
+  font-size: 10px;
+  line-height: 12px;
+  letter-spacing: .08em;
+  color: var(--sub);
+  opacity: .8;
+  text-shadow: var(--shadow);
+  cursor: pointer;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+#group-btn:hover { opacity: 1; color: var(--text); }
 
 #period-label {
   font-size: 10px;
@@ -199,6 +221,63 @@ body[data-text="dark"].backdrop {
 
 #pin-btn:hover { opacity: 1; }
 body.pinned #pin-btn { opacity: 1; fill: var(--up); }
+
+/* 分组下拉：只列组名，浮在窗口上方，点外面自动收起 */
+#group-menu {
+  position: fixed;
+  z-index: 9999;
+  display: none;
+  min-width: 92px;
+  max-width: 200px;
+  max-height: 60vh;
+  overflow-y: auto;
+  padding: 4px;
+  border-radius: 6px;
+  border: 1px solid rgba(140, 152, 170, .25);
+  background: rgba(20, 23, 29, .96);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, .35);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+
+body[data-text="dark"] #group-menu {
+  border-color: rgba(30, 40, 55, .18);
+  background: rgba(246, 248, 251, .97);
+}
+
+.gm-item {
+  display: block;
+  width: 100%;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--sub);
+  font-family: inherit;
+  font-size: 11px;
+  line-height: 16px;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.gm-item:hover { background: rgba(128, 140, 160, .18); color: var(--text); }
+.gm-item.on { color: var(--text); }
+.gm-item.on::before { content: "✓ "; }
+
+/* 分组为空时列表中央的提示 */
+.empty-group {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 32px;
+  font-size: 11px;
+  color: var(--sub);
+  opacity: .7;
+}
 
 #app {
   padding: 6px 8px;

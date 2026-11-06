@@ -232,6 +232,63 @@ test('migrateConfig 首次启动接管老配置，只跑一次', function () {
   }
 });
 
+test('normalizeConfig 把旧 symbols 迁进「默认」组并同步当前组', function () {
+  const cfg = normalizeConfig({ symbols: ['sh600519', '001186'] });
+  assert.equal(cfg.groups.length, 1);
+  assert.equal(cfg.groups[0].id, 'default');
+  assert.equal(cfg.groups[0].name, '默认');
+  assert.deepEqual(cfg.groups[0].symbols, ['sh600519', '001186']);
+  assert.equal(cfg.activeGroupId, 'default');
+  assert.deepEqual(cfg.symbols, ['sh600519', '001186']);
+});
+
+test('normalizeConfig 保留分组、回退非法当前组并合并候选池', function () {
+  const cfg = normalizeConfig({
+    groups: [
+      { id: 'idx', name: '指数', symbols: ['sh000001', 'sz399001'] },
+      { id: 'hf', name: '外盘', symbols: ['hf_XAU', 'sh000001'] },
+      { id: 'empty', name: '空组', symbols: [] }
+    ],
+    activeGroupId: 'nope',
+    watchlist: ['sh000001']
+  });
+  assert.equal(cfg.groups.length, 3);
+  assert.equal(cfg.activeGroupId, 'idx');
+  assert.deepEqual(cfg.symbols, ['sh000001', 'sz399001']);
+  // 候选池保留原顺序，并把各组独有标的并进来
+  assert.deepEqual(cfg.watchlist, ['sh000001', 'sz399001', 'hf_XAU']);
+});
+
+test('normalizeConfig 允许当前分组为空', function () {
+  const cfg = normalizeConfig({
+    groups: [
+      { id: 'a', name: '有货', symbols: ['sh000001'] },
+      { id: 'b', name: '空组', symbols: [] }
+    ],
+    activeGroupId: 'b',
+    watchlist: ['sh000001']
+  });
+  assert.deepEqual(cfg.symbols, []);
+  assert.equal(cfg.activeGroupId, 'b');
+  assert.deepEqual(cfg.groups[1].symbols, []);
+});
+
+test('normalizeConfig 清洗重复分组 id、空名称和非法代码', function () {
+  const cfg = normalizeConfig({
+    groups: [
+      { id: 'dup', name: '  一  ', symbols: ['sh000001', 'bad code', 'sh000001'] },
+      { id: 'dup', name: '', symbols: ['hf_XAU'] }
+    ],
+    activeGroupId: 'dup'
+  });
+  assert.equal(cfg.groups[0].id, 'dup');
+  assert.equal(cfg.groups[1].id, 'dup-2');
+  assert.equal(cfg.groups[0].name, '一');
+  assert.equal(cfg.groups[1].name, '分组');
+  assert.deepEqual(cfg.groups[0].symbols, ['sh000001']);
+  assert.deepEqual(cfg.groups[1].symbols, ['hf_XAU']);
+});
+
 test('migrateConfig 忽略没有 symbols 的候选文件', function () {
   const dir = tempDir();
   const dataDir = path.join(dir, 'data');

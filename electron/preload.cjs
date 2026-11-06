@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld('ticker', {
   openMenu: function () { ipcRenderer.send('open-menu'); },
   openSettings: function () { ipcRenderer.send('open-settings'); },
   setPeriod: function (p) { ipcRenderer.send('set-period', p); },
+  setGroup: function (id) { ipcRenderer.send('set-group', id); },
   save: function (patch) { ipcRenderer.send('save-config', patch); },
   onForceRefresh: function (fn) { ipcRenderer.on('force-refresh', fn); },
   onRefitHeight: function (fn) { ipcRenderer.on('refit-height', function () { fn(); }); },

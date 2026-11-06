@@ -28,6 +28,21 @@
 
       <section data-cat="symbols">
         <h2>标的 <span class="count" id="count"></span></h2>
+        <div class="group-bar">
+          <span class="fl">分组</span>
+          <select id="group-select"></select>
+          <button id="group-add" class="ghost tiny" type="button">新建</button>
+          <button id="group-rename" class="ghost tiny" type="button">重命名</button>
+          <button id="group-del" class="ghost tiny" type="button">删除</button>
+          <button id="group-up" class="ghost tiny" type="button" title="分组上移">↑</button>
+          <button id="group-down" class="ghost tiny" type="button" title="分组下移">↓</button>
+          <label class="check"><input type="checkbox" id="show-all" /><span>全部标的</span></label>
+        </div>
+        <div id="group-edit" class="group-edit" hidden>
+          <input id="group-name" type="text" maxlength="24" placeholder="分组名称" />
+          <button id="group-edit-ok" class="primary tiny" type="button">确定</button>
+          <button id="group-edit-cancel" class="ghost tiny" type="button">取消</button>
+        </div>
         <div class="add-row">
           <input id="code-input" type="text" spellcheck="false" autocomplete="off"
                  placeholder="输入名称 / 拼音 / 代码，如 茅台、gzmt、贵州茅台" />
@@ -36,7 +51,7 @@
         </div>
         <div id="msg" class="msg"></div>
         <ul id="symbol-list" class="list"></ul>
-        <p class="hint">输入中文名、拼音首字母或代码都能搜到，回车选第一条，↑↓ 挑，点一下直接加<br />勾选 = 在浮窗里显示，列表顺序就是显示顺序</p>
+        <p class="hint" id="symbol-hint"></p>
       </section>
 
       <section data-cat="quotes">

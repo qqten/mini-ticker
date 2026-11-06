@@ -10,7 +10,8 @@ const {
   migrateConfig,
   loadConfig,
   saveConfig: writeConfigFile,
-  normalizeShortcuts
+  normalizeShortcuts,
+  activeGroup
 } = require('./core/config.cjs');
 const { createHttp } = require('./data/http.cjs');
 const { createMarket } = require('./data/market.cjs');
@@ -356,6 +357,16 @@ function createWindow() {
             ).catch(function () {});
           }, 5600);
         }
+        // 调试：TICKER_SHOT_SETTINGS_EVAL="表达式" 在设置面板里跑一段 JS 并写进日志，
+        // 用来验证分组增删改 / 标签 / 拖拽排序 / 保存这条链路
+        if (process.env.TICKER_SHOT_SETTINGS_EVAL) {
+          setTimeout(function () {
+            if (!settingsWin || settingsWin.isDestroyed()) return;
+            settingsWin.webContents.executeJavaScript(String(process.env.TICKER_SHOT_SETTINGS_EVAL))
+              .then(function (r) { logLine('[settings-eval]', typeof r === 'string' ? r : JSON.stringify(r)); })
+              .catch(function (e) { logLine('[settings-eval]', 'fail ' + e.message); });
+          }, 5200);
+        }
       }
       if (which === 'focus') {
         // 调试：TICKER_SHOT_FOCUS_SIDE=right|left 先把窗口贴到屏幕边，验证展开方向
@@ -426,6 +437,11 @@ function createWindow() {
             logLine('[focus]', '调试拖分界线 ' + sx + ' -> ' + to);
           }, 3400);
         }
+      }
+
+      // 调试：TICKER_SHOT_MENU_CHECK=1 模拟右键菜单「检查更新」
+      if (process.env.TICKER_SHOT_MENU_CHECK) {
+        setTimeout(function () { checkForUpdates(true, true); }, 3000);
       }
 
       // 调试：TICKER_SHOT_EVAL="表达式" 在窗口里跑一段 JS 并写进日志，排查前端状态用
@@ -717,7 +733,9 @@ function createWindow() {
         const file = which === 'settings' ? 'settings.png' : which === 'focus' ? 'focus.png' : 'self.png';
         fs.writeFileSync(path.join(dir, file), png);
         app.quit();
-      }, which === 'settings' ? 7000 : which === 'focus' ? 6500 : 5000);
+      }, which === 'settings'
+        ? (process.env.TICKER_SHOT_SETTINGS_EVAL ? 11000 : 7000)
+        : which === 'focus' ? 6500 : 5000);
     });
   }
 
@@ -829,9 +847,10 @@ let skipResizeUntil = 0;      // 程序化改尺寸期间，别当成用户拖�
 // 而不是背后更长的 watchlist —— 否则高亮行会跟着跑到看不见的地方
 function focusList() {
   const shown = (config.symbols || []).filter(Boolean);
-  const base = shown.length
-    ? shown.slice()
-    : ((config.watchlist && config.watchlist.length) ? config.watchlist.slice() : []);
+  // 空分组就应该是空列表：不能回退到候选池，否则浮窗显示「暂无标的」，
+  // 聚焦图表里却还能翻到一堆没显示的标的。
+  if (!shown.length) return [];
+  const base = shown.slice();
   // 开了涨跌幅排序时，↑↓ 和「第几个/共几个」要跟着屏幕上的顺序走。
   // 只在两份清单是同一批标的时才替换，避免刚改完自选、行情还没刷新时错位。
   const displayCodes = quoteService.getDisplayCodes();
@@ -935,6 +954,11 @@ function scheduleFocusBounds(b) {
 function setFocus(on) {
   if (!win || win.isDestroyed()) return;
   on = !!on;
+  // 当前分组为空时不展开图表，否则会拿到一个不在列表里的默认代码去请求数据
+  if (on && !(config.symbols || []).filter(Boolean).length) {
+    logLine('[focus]', '当前分组为空，忽略展开');
+    return;
+  }
 
   // 收起淡出还没结束就再次展开：窗口还在展开后的尺寸，直接让图表淡回来
   if (on && focusClosing) {
@@ -1522,14 +1546,42 @@ function setPeriod(p) {
   setAndBroadcast({ period: p }, true);
 }
 
+// 聚焦图表开着时，让图表和当前分组保持一致：组空了就收起，
+// 当前标的被移出本组就切到本组第一个。
+function syncFocusGroup() {
+  if (!focusOn) return;
+  const list = focusList();
+  if (!list.length) {
+    setFocus(false);
+    return;
+  }
+  if (list.indexOf(focusCode) < 0) focusCode = list[0];
+  pushFocusState();
+}
+
+// 切换自选分组：symbols 是当前组的镜像，行情和聚焦图表都跟着它走。
+function setGroup(id) {
+  if (!id || id === config.activeGroupId) return;
+  const group = (config.groups || []).filter(function (g) { return g.id === id; })[0];
+  if (!group) return;
+  config.activeGroupId = group.id;
+  config.symbols = group.symbols.slice();
+  setAndBroadcast({ activeGroupId: group.id, symbols: config.symbols }, true);
+  logLine('[group]', '切换分组 ' + group.name + '（' + config.symbols.length + ' 个标的）');
+  syncFocusGroup();
+}
+
 function toggleSymbol(code, on) {
-  const list = config.symbols.slice();
+  const group = activeGroup(config);
+  if (!group) return;
+  const list = group.symbols.slice();
   const i = list.indexOf(code);
   const changed = (on && i < 0) || (!on && i >= 0);
   if (!changed) return;
   if (on) list.push(code); else list.splice(i, 1);
-  if (list.length === 0) return; // 至少留一个标的
-  setAndBroadcast({ symbols: list }, true);
+  group.symbols = list;
+  if (group.id === config.activeGroupId) config.symbols = list.slice();
+  setAndBroadcast({ groups: config.groups, symbols: config.symbols }, true);
 }
 
 
@@ -1544,6 +1596,8 @@ ipcMain.handle('get-state', function () {
     period: config.period,
     interval: config.interval,
     symbols: config.symbols,
+    groups: (config.groups || []).map(function (g) { return { id: g.id, name: g.name }; }),
+    activeGroupId: config.activeGroupId,
     // 这三个以前漏了：冷启动时浮窗拿不到，只能退回默认值
     sparkWidth: config.sparkWidth,
     sortMode: config.sortMode,
@@ -1556,7 +1610,8 @@ ipcMain.handle('get-state', function () {
 ipcMain.handle('get-quotes', async function () {
   try {
     const list = await fetchAll();
-    const ok = list.some(function (x) { return x.ok; });
+    // 空分组不是「行情失败」：返回空列表让渲染层显示空状态，而不是保留旧行。
+    const ok = list.length === 0 || list.some(function (x) { return x.ok; });
     return { ok: ok, list: list, period: config.period, at: Date.now() };
   } catch (e) {
     return { ok: false, error: e.message, list: [], period: config.period, at: Date.now() };
@@ -1946,6 +2001,10 @@ ipcMain.handle('settings-get', async function () {
 
   return {
     symbols: config.symbols.slice(),
+    groups: (config.groups || []).map(function (g) {
+      return { id: g.id, name: g.name, symbols: g.symbols.slice() };
+    }),
+    activeGroupId: config.activeGroupId,
     watchlist: config.watchlist.slice(),
     names: names,
     period: config.period,
@@ -2017,6 +2076,9 @@ ipcMain.handle('settings-save', async function (e, patch) {
 
   setAndBroadcast(result.patch, true);
 
+  // 分组/当前组可能被改过：聚焦图表开的要跟着切到新组，组空了就收起
+  syncFocusGroup();
+
   // 图表位置改了且当前正展开着：先淡出收起，再按新位置重新展开一次
   if (config.focusChartSide !== prevFocusSide) reapplyFocusSide();
 
@@ -2076,6 +2138,10 @@ ipcMain.on('set-period', function (e, p) {
   if (PERIODS.indexOf(p) >= 0) setPeriod(p);
 });
 
+ipcMain.on('set-group', function (e, id) {
+  setGroup(id);
+});
+
 ipcMain.on('settings-close', function () {
   if (settingsWin && !settingsWin.isDestroyed()) settingsWin.close();
 });
@@ -2119,6 +2185,33 @@ function pushUpdate(patch) {
   const payload = Object.assign({}, updateState);
   if (win && !win.isDestroyed()) win.webContents.send('update-state', payload);
   if (settingsWin && !settingsWin.isDestroyed()) settingsWin.webContents.send('update-state', payload);
+}
+
+// 右键菜单手动检查时设置面板通常是关着的，状态只发到设置窗口用户根本看不到。
+// 这里在「已是最新 / 发现新版 / 检查失败」这些终态补一条系统通知。
+let manualNotice = false;
+
+// 用「窗口是否存在」判断就够了：设置面板开着时它自己会显示状态，
+// isVisible() 在部分 Windows 环境下并不可靠（窗口明明开着却返回 false）
+function settingsWindowOpen() {
+  return !!(settingsWin && !settingsWin.isDestroyed());
+}
+
+function notifyUpdate(title, body) {
+  try {
+    new Notification({ title: title, body: body }).show();
+    logLine('[update]', '已通知：' + title);
+  } catch (e) {
+    logLine('[update]', '通知失败：' + shortErr(e));
+  }
+}
+
+// manualNotice 在 checkForUpdates 里已经按来源决定过了：
+// 设置面板自己发起的检查不弹通知，右键菜单发起的一律弹。
+function settleManualNotice(title, body) {
+  if (!manualNotice) return;
+  manualNotice = false;
+  notifyUpdate(title, body);
 }
 
 // 网络错误的 message 里带着整段 HTTP 响应头，动辄好几 KB，
@@ -2267,10 +2360,12 @@ function initUpdater() {
       available: info.version,
       message: '发现 v' + info.version + '，正在后台下载'
     });
+    settleManualNotice('发现新版本 v' + info.version, '正在后台下载，完成后会提示重启');
   });
   autoUpdater.on('update-not-available', function () {
     rememberFeed();
     pushUpdate({ status: 'current', message: '' });
+    settleManualNotice('已是最新版本', '当前 v' + app.getVersion());
   });
   autoUpdater.on('download-progress', function (p) {
     pushUpdate({ status: 'downloading', progress: Math.round(p.percent || 0) });
@@ -2296,6 +2391,7 @@ function initUpdater() {
     if (feedRetryTimer) return;
     if (!rotateFeed()) {
       logLine('[update]', '所有更新源都试过了，本轮放弃');
+      settleManualNotice('检查更新失败', shortErr(e));
       return;
     }
     feedRetryTimer = setTimeout(function () {
@@ -2311,9 +2407,13 @@ function initUpdater() {
   }, 25000);
 }
 
-function checkForUpdates(manual) {
+// fromMenu: 右键菜单发起的检查，结果一律用系统通知反馈（设置面板可能开着但不在「更新」页）
+function checkForUpdates(manual, fromMenu) {
+  manualNotice = false;
   if (!autoUpdater) {
     if (manual) {
+      logLine('[update]', '手动检查' + (fromMenu ? '（右键菜单）' : '（设置面板）') +
+        '：当前版本不支持自动更新');
       try {
         new Notification({
           title: '当前版本不支持自动更新',
@@ -2331,6 +2431,12 @@ function checkForUpdates(manual) {
     askRestart(updateState.available);
     return;
   }
+  // 右键菜单手动检查、或者设置面板没开时，结果只能靠系统通知展示
+  manualNotice = !!manual && (!!fromMenu || !settingsWindowOpen());
+  if (manual) {
+    logLine('[update]', '手动检查' + (fromMenu ? '（右键菜单）' : '（设置面板）') +
+      (manualNotice ? '，结果用系统通知' : ''));
+  }
   // 新的一轮：从上次成功的源重新排起，别接着上一轮的失败位置往下走
   if (!process.env.TICKER_UPDATE_FEED) {
     buildFeedOrder();
@@ -2346,7 +2452,7 @@ function checkForUpdates(manual) {
 function buildMainMenu() {
   return Menu.buildFromTemplate([
     { label: '设置…', accelerator: 'CmdOrCtrl+,', click: function () { openSettings(); } },
-    { label: '检查更新…', click: function () { checkForUpdates(true); } },
+    { label: '检查更新…', click: function () { checkForUpdates(true, true); } },
     { type: 'separator' },
     { label: '退出', click: function () { app.quit(); } }
   ]);

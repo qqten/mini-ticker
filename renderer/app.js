@@ -3,9 +3,10 @@
 
   var app = document.getElementById('app');
   var head = document.getElementById('head');
-  head.innerHTML = '<button id="sort-btn" type="button" title="按涨跌幅排序：点一下 涨幅从高到低，再点从低到高，第三下恢复自选顺序">涨幅</button><span id="period-label"></span><svg id="pin-btn" width="10" height="12" viewBox="0 0 10 12" title="固定窗口（点击穿透，不可拖动）"><path d="M5 0C2.8 0 1 1.8 1 4c0 1.5.8 2.8 2 3.5V11l2-1.5V7.5c1.2-.7 2-2 2-3.5 0-2.2-1.8-4-2-4z"/></svg>';
+  head.innerHTML = '<button id="group-btn" type="button"></button><button id="sort-btn" type="button" title="按涨跌幅排序：点一下 涨幅从高到低，再点从低到高，第三下恢复自选顺序">涨幅</button><span id="period-label"></span><svg id="pin-btn" width="10" height="12" viewBox="0 0 10 12" title="固定窗口（点击穿透，不可拖动）"><path d="M5 0C2.8 0 1 1.8 1 4c0 1.5.8 2.8 2 3.5V11l2-1.5V7.5c1.2-.7 2-2 2-3.5 0-2.2-1.8-4-2-4z"/></svg>';
   var periodLabel = document.getElementById('period-label');
   var sortBtn = document.getElementById('sort-btn');
+  var groupBtn = document.getElementById('group-btn');
   var rowMap = {};
   var PERIOD_LABEL = { minute: '分时', day: '日线', month: '月线', year: '年线' };
   var timer = null;
@@ -19,6 +20,81 @@
   var SORT_ORDER = ['off', 'pct-desc', 'pct-asc'];
   var SORT_LABEL = { off: '涨幅', 'pct-desc': '涨幅▼', 'pct-asc': '涨幅▲' };
   var sortMode = 'off';
+
+  /* ---- 自选分组：顶部组名下拉 ---- */
+  var groups = [];
+  var activeGroupId = '';
+  var groupMenu = document.createElement('div');
+  groupMenu.id = 'group-menu';
+  document.body.appendChild(groupMenu);
+
+  function currentGroup() {
+    for (var i = 0; i < groups.length; i++) {
+      if (groups[i].id === activeGroupId) return groups[i];
+    }
+    return groups[0] || null;
+  }
+
+  function closeGroupMenu() {
+    groupMenu.style.display = 'none';
+  }
+
+  function paintGroup() {
+    if (!groupBtn) return;
+    var g = currentGroup();
+    groupBtn.textContent = (g ? g.name : '自选') + ' ▾';
+    groupBtn.title = '当前分组：' + (g ? g.name : '自选') + '，点击切换';
+
+    groupMenu.innerHTML = '';
+    groups.forEach(function (item) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'gm-item' + (item.id === activeGroupId ? ' on' : '');
+      b.textContent = item.name;
+      b.addEventListener('click', function (e) {
+        e.stopPropagation();
+        closeGroupMenu();
+        if (item.id !== activeGroupId) window.ticker.setGroup(item.id);
+      });
+      groupMenu.appendChild(b);
+    });
+  }
+
+  function openGroupMenu() {
+    if (!groups.length) return;
+    groupMenu.style.display = 'block';
+    var r = groupBtn.getBoundingClientRect();
+    var mw = groupMenu.offsetWidth;
+    var mh = groupMenu.offsetHeight;
+    var left = Math.min(Math.max(4, r.left), window.innerWidth - mw - 4);
+    var top = r.bottom + 3;
+    if (top + mh > window.innerHeight - 4) top = Math.max(4, r.top - mh - 3);
+    groupMenu.style.left = Math.round(left) + 'px';
+    groupMenu.style.top = Math.round(top) + 'px';
+  }
+
+  function toggleGroupMenu() {
+    if (groupMenu.style.display === 'block') closeGroupMenu();
+    else openGroupMenu();
+  }
+
+  if (groupBtn) {
+    groupBtn.addEventListener('click', function (e) {
+      e.stopPropagation();
+      toggleGroupMenu();
+    });
+  }
+
+  document.addEventListener('click', function (e) {
+    if (groupMenu.style.display !== 'block') return;
+    if (e.target === groupBtn) return;
+    if (e.target.closest && e.target.closest('#group-menu')) return;
+    closeGroupMenu();
+  });
+
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') closeGroupMenu();
+  });
 
   // 右端那条 short line 是宽度抓手：画在 SVG 里，天然贴着折线右边缘，不参与布局也就不会错位
   var SPARK_SVG =
@@ -146,6 +222,16 @@
 
   function render(list) {
     lastList = list;
+    // 空分组：清掉旧行，显示空状态；否则切到空组时会残留上一组的行情。
+    if (!list.length) {
+      Object.keys(rowMap).forEach(function (k) { delete rowMap[k]; });
+      app.innerHTML = '<div class="empty-group">该分组暂无标的</div>';
+      syncHeight();
+      return;
+    }
+    var emptyEl = app.querySelector('.empty-group');
+    if (emptyEl) emptyEl.parentNode.removeChild(emptyEl);
+
     for (var i = 0; i < list.length; i++) {
       var item = list[i];
       var row = ensureRow(item.code);
@@ -269,6 +355,9 @@
     document.body.classList.toggle('noname', s.showName === false);
     showBaseline = s.baseline !== false;
     if (s.period) currentPeriod = s.period;
+    if (Array.isArray(s.groups)) groups = s.groups;
+    if (s.activeGroupId) activeGroupId = s.activeGroupId;
+    paintGroup();
     if (s.shortcuts) rebuildShortcuts(s.shortcuts);
     if (s.sortMode && SORT_ORDER.indexOf(s.sortMode) >= 0 && s.sortMode !== sortMode) {
       sortMode = s.sortMode;
@@ -339,7 +428,8 @@
   document.addEventListener('pointerdown', function (e) {
     if (e.button !== 0) return;
     if (pinned) return; // 固定模式不响应拖动
-    if (e.target === pinBtn || e.target === sortBtn || e.target === periodLabel) return;
+    if (e.target === pinBtn || e.target === sortBtn || e.target === periodLabel || e.target === groupBtn) return;
+    if (e.target.closest && e.target.closest('#group-menu')) return;
     if (nearEdge(e)) return;             // 窗口四边留给系统缩放
     // 图表区：只有顶部那条（票名 / 缩放倍率 / 周期按钮旁边）能按住拖窗口；
     // 图表本体留给滚轮缩放、拖动平移和十字光标，别抢它的鼠标。
@@ -452,8 +542,9 @@
   document.addEventListener('click', function (e) {
     var t = e.target;
     if (suppressClick) { suppressClick = false; return; }
-    if (t.closest && (t.closest('#focus') || t.closest('#splitter'))) return;
-    if (t === pinBtn || t === sortBtn || t === periodLabel) return;
+    // 顶部整条都是窗口拖动区：点空白处只拖窗口，不该顺手展开图表
+    if (t.closest && (t.closest('#head') || t.closest('#focus') || t.closest('#splitter') || t.closest('#group-menu'))) return;
+    if (t === pinBtn || t === sortBtn || t === periodLabel || t === groupBtn) return;
     // 拖着窗口跑（起点和落点差得多）不算点击，别顺手展开 / 换标的
     if (downAt && (Math.abs(e.screenX - downAt.sx) > 3 || Math.abs(e.screenY - downAt.sy) > 3 ||
       Math.abs(e.clientX - downAt.x) > 4 || Math.abs(e.clientY - downAt.y) > 4)) return;

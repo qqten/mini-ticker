@@ -1,6 +1,21 @@
 (function () {
-  var state = { symbols: [], watchlist: [], names: {} };
+  var state = {
+    groups: [{ id: 'default', name: '默认', symbols: [] }],
+    activeGroupId: 'default',
+    watchlist: [],
+    names: {},
+    showAll: false
+  };
+  var groupEditMode = '';
+  var dragCode = '';
+  var MAX_GROUPS = 32;
   var $ = function (id) { return document.getElementById(id); };
+
+  function esc(s) {
+    return String(s).replace(/[&<>"]/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+    });
+  }
 
   function setMsg(text, kind) {
     var el = $('msg');
@@ -14,24 +29,135 @@
     el.className = 'foot-msg' + (kind ? ' ' + kind : '');
   }
 
+  function activeGroup() {
+    for (var i = 0; i < state.groups.length; i++) {
+      if (state.groups[i].id === state.activeGroupId) return state.groups[i];
+    }
+    return state.groups[0] || null;
+  }
+
+  function groupById(id) {
+    for (var i = 0; i < state.groups.length; i++) {
+      if (state.groups[i].id === id) return state.groups[i];
+    }
+    return null;
+  }
+
+  function allCodes() {
+    var out = [];
+    function push(c) {
+      if (c && out.indexOf(c) < 0) out.push(c);
+    }
+    state.watchlist.forEach(push);
+    state.groups.forEach(function (g) { g.symbols.forEach(push); });
+    return out;
+  }
+
   function updateCount() {
-    $('count').textContent = state.symbols.length ? '· 已选 ' + state.symbols.length + ' 个' : '';
+    var g = activeGroup();
+    if (state.showAll) {
+      $('count').textContent = '· 全部 ' + allCodes().length + ' 个';
+    } else {
+      $('count').textContent = g ? '· ' + g.name + ' ' + g.symbols.length + ' 个' : '';
+    }
+  }
+
+  function updateGroupHint() {
+    var g = activeGroup();
+    var el = $('symbol-hint');
+    if (!el) return;
+    if (state.showAll) {
+      el.innerHTML = '「全部标的」用于管理归属：点行内分组标签加入 / 移出分组；这里的 ✕ 会从候选池和所有分组彻底删除。<br />' +
+        '新增标的、新建 / 重命名 / 删除分组请先切回具体分组。';
+    } else {
+      el.innerHTML = '当前分组：<b>' + esc(g ? g.name : '-') + '</b>。拖动行可调整本组顺序；点行内分组标签可加入 / 移出其它分组；✕ 只把标的移出本组。<br />' +
+        '输入中文名、拼音首字母或代码都能搜到，回车选第一条，↑↓ 挑，点一下直接加。';
+    }
+  }
+
+  function renderGroupSelect() {
+    var sel = $('group-select');
+    sel.innerHTML = '';
+    state.groups.forEach(function (g) {
+      var o = document.createElement('option');
+      o.value = g.id;
+      o.textContent = g.name;
+      sel.appendChild(o);
+    });
+    sel.value = state.activeGroupId;
+    sel.disabled = state.showAll;
+    $('group-add').disabled = state.showAll || state.groups.length >= MAX_GROUPS;
+    $('group-rename').disabled = state.showAll;
+    $('group-del').disabled = state.showAll || state.groups.length <= 1;
+    var i = state.groups.indexOf(activeGroup());
+    $('group-up').disabled = state.showAll || i <= 0;
+    $('group-down').disabled = state.showAll || i < 0 || i >= state.groups.length - 1;
+    $('show-all').checked = state.showAll;
+    // 「全部标的」没有明确的归属分组，先切回具体分组才能新增
+    $('add-btn').disabled = state.showAll;
+    $('code-input').disabled = state.showAll;
+    updateCount();
+    updateGroupHint();
+  }
+
+  function makeTag(code, g) {
+    var on = g.symbols.indexOf(code) >= 0;
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'tag' + (on ? ' on' : '');
+    b.textContent = g.name;
+    b.title = on ? '从「' + g.name + '」移出' : '加入「' + g.name + '」';
+    b.addEventListener('click', function (e) {
+      e.stopPropagation();
+      toggleGroup(code, g.id, !on);
+    });
+    return b;
   }
 
   function renderList(scrollToNew) {
     var ul = $('symbol-list');
     ul.innerHTML = '';
 
-    state.watchlist.forEach(function (code) {
-      var li = document.createElement('li');
+    var codes = state.showAll
+      ? allCodes()
+      : (activeGroup() ? activeGroup().symbols.slice() : []);
 
-      var pick = document.createElement('label');
-      pick.className = 'pick';
-      var cb = document.createElement('input');
-      cb.type = 'checkbox';
-      cb.checked = state.symbols.indexOf(code) >= 0;
-      cb.addEventListener('change', function () { toggle(code, cb.checked); });
-      pick.appendChild(cb);
+    codes.forEach(function (code) {
+      var li = document.createElement('li');
+      li.className = 'grp-row' + (state.showAll ? ' showall' : '');
+      li.dataset.code = code;
+
+      if (!state.showAll) {
+        li.draggable = true;
+        var handle = document.createElement('span');
+        handle.className = 'drag-handle';
+        handle.textContent = '⋮⋮';
+        handle.title = '拖动调整本组顺序';
+        li.appendChild(handle);
+
+        li.addEventListener('dragstart', function (e) {
+          dragCode = code;
+          li.classList.add('dragging');
+          e.dataTransfer.effectAllowed = 'move';
+          try { e.dataTransfer.setData('text/plain', code); } catch (err) {}
+        });
+        li.addEventListener('dragend', function () {
+          dragCode = '';
+          li.classList.remove('dragging');
+        });
+        li.addEventListener('dragover', function (e) {
+          if (!dragCode || dragCode === code) return;
+          e.preventDefault();
+          e.dataTransfer.dropEffect = 'move';
+          li.classList.add('drop-target');
+        });
+        li.addEventListener('dragleave', function () { li.classList.remove('drop-target'); });
+        li.addEventListener('drop', function (e) {
+          e.preventDefault();
+          li.classList.remove('drop-target');
+          moveCode(dragCode, code);
+        });
+      }
 
       var nm = document.createElement('span');
       nm.className = 'nm';
@@ -44,17 +170,21 @@
       var del = document.createElement('button');
       del.className = 'del';
       del.textContent = '✕';
-      del.title = '从候选列表移除';
+      del.title = state.showAll ? '从候选池和所有分组彻底删除' : '从当前分组移出';
       del.addEventListener('click', function () { remove(code); });
 
-      li.appendChild(pick);
+      var tags = document.createElement('span');
+      tags.className = 'tags';
+      state.groups.forEach(function (g) { tags.appendChild(makeTag(code, g)); });
+
       li.appendChild(nm);
       li.appendChild(cd);
       li.appendChild(del);
+      li.appendChild(tags);
       ul.appendChild(li);
     });
 
-    updateCount();
+    renderGroupSelect();
 
     // 新加的滚到可见，不然列表一长就看不见自己刚加的那条
     if (scrollToNew && ul.lastElementChild) {
@@ -62,16 +192,119 @@
     }
   }
 
-  function toggle(code, on) {
-    var i = state.symbols.indexOf(code);
-    if (on && i < 0) state.symbols.push(code);
-    if (!on && i >= 0) state.symbols.splice(i, 1);
-    updateCount();
+  function moveCode(from, to) {
+    var g = activeGroup();
+    if (!g || !from || !to || from === to) return;
+    var a = g.symbols.indexOf(from);
+    var b = g.symbols.indexOf(to);
+    if (a < 0 || b < 0) return;
+    g.symbols.splice(a, 1);
+    if (a < b) b--;
+    g.symbols.splice(b, 0, from);
+    dragCode = '';
+    renderList();
+  }
+
+  function toggleGroup(code, groupId, on) {
+    var g = groupById(groupId);
+    if (!g) return;
+    var i = g.symbols.indexOf(code);
+    if (on && i < 0) {
+      g.symbols.push(code);
+      if (state.watchlist.indexOf(code) < 0) state.watchlist.push(code);
+    }
+    if (!on && i >= 0) g.symbols.splice(i, 1);
+    renderList();
   }
 
   function remove(code) {
-    state.watchlist = state.watchlist.filter(function (c) { return c !== code; });
-    state.symbols = state.symbols.filter(function (c) { return c !== code; });
+    if (state.showAll) {
+      var name = state.names[code] || code;
+      if (!window.confirm('从候选池和所有分组里彻底删除「' + name + '」？')) return;
+      state.watchlist = state.watchlist.filter(function (c) { return c !== code; });
+      state.groups.forEach(function (g) {
+        g.symbols = g.symbols.filter(function (c) { return c !== code; });
+      });
+    } else {
+      var g = activeGroup();
+      if (!g) return;
+      g.symbols = g.symbols.filter(function (c) { return c !== code; });
+    }
+    renderList();
+  }
+
+  function newGroupId() {
+    var used = {};
+    state.groups.forEach(function (g) { used[g.id] = true; });
+    var n = 1;
+    while (used['g' + n]) n++;
+    return 'g' + n;
+  }
+
+  function beginGroupEdit(mode) {
+    groupEditMode = mode;
+    var box = $('group-edit');
+    var inp = $('group-name');
+    box.hidden = false;
+    inp.value = mode === 'rename' && activeGroup() ? activeGroup().name : '';
+    inp.focus();
+    inp.select();
+  }
+
+  function cancelGroupEdit() {
+    groupEditMode = '';
+    $('group-edit').hidden = true;
+    $('group-name').value = '';
+  }
+
+  function commitGroupEdit() {
+    var name = $('group-name').value.replace(/\s+/g, ' ').trim().slice(0, 24);
+    if (!name) {
+      setMsg('分组名称不能为空', 'err');
+      return;
+    }
+    if (groupEditMode === 'add') {
+      if (state.groups.length >= MAX_GROUPS) {
+        setMsg('最多只能建 ' + MAX_GROUPS + ' 个分组', 'err');
+        return;
+      }
+      var id = newGroupId();
+      state.groups.push({ id: id, name: name, symbols: [] });
+      state.activeGroupId = id;
+      state.showAll = false;
+      setMsg('已新建分组：' + name, 'ok');
+    } else if (groupEditMode === 'rename') {
+      var g = activeGroup();
+      if (g) g.name = name;
+    }
+    cancelGroupEdit();
+    renderList();
+  }
+
+  function deleteGroup() {
+    if (state.groups.length <= 1) {
+      setMsg('至少要保留一个分组', 'err');
+      return;
+    }
+    var g = activeGroup();
+    if (!g) return;
+    if (!window.confirm('删除分组「' + g.name + '」？组内标的仍会保留在候选池和其它分组中。')) return;
+    var i = state.groups.indexOf(g);
+    state.groups.splice(i, 1);
+    var next = state.groups[Math.max(0, i - 1)];
+    state.activeGroupId = next.id;
+    state.showAll = false;
+    setMsg('已删除分组：' + g.name, 'ok');
+    renderList();
+  }
+
+  function moveGroup(dir) {
+    var g = activeGroup();
+    var i = state.groups.indexOf(g);
+    var j = i + dir;
+    if (i < 0 || j < 0 || j >= state.groups.length) return;
+    state.groups.splice(i, 1);
+    state.groups.splice(j, 0, g);
     renderList();
   }
 
@@ -84,19 +317,23 @@
     setMsg('查询中…', 'info');
 
     return window.ticker.validateSymbol(code).then(function (r) {
-      $('add-btn').disabled = false;
+      $('add-btn').disabled = state.showAll;
       if (!r.ok) { setMsg(r.msg, 'err'); return; }
 
+      var g = activeGroup();
+      if (!g) { setMsg('请先新建一个分组', 'err'); return; }
       state.names[r.code] = r.name || hintName || r.code;
       var existed = state.watchlist.indexOf(r.code) >= 0;
       if (!existed) state.watchlist.push(r.code);
-      if (state.symbols.indexOf(r.code) < 0) state.symbols.push(r.code);
+      if (g.symbols.indexOf(r.code) < 0) g.symbols.push(r.code);
 
       $('code-input').value = '';
-      setMsg((existed ? '已在列表里，已勾选：' : '已添加：') + state.names[r.code] + '（' + r.code + '）', 'ok');
+      setMsg((existed ? '已在候选池，已加入「' : '已加入「') + g.name + '」：' +
+        state.names[r.code] + '（' + r.code + '）', 'ok');
+      state.showAll = false;
       renderList(true);
     }).catch(function (e) {
-      $('add-btn').disabled = false;
+      $('add-btn').disabled = state.showAll;
       setMsg('出错：' + e.message, 'err');
     });
   }
@@ -107,7 +344,7 @@
     setMsg('搜索中…', 'info');
 
     window.ticker.searchSymbol(q).then(function (r) {
-      $('add-btn').disabled = false;
+      $('add-btn').disabled = state.showAll;
       var list = r.list || [];
       var hit = null;
 
@@ -121,12 +358,16 @@
       if (!hit) { setMsg('没搜到「' + q + '」', 'err'); return; }
       addByCode(hit.code, hit.name);
     }).catch(function (e) {
-      $('add-btn').disabled = false;
+      $('add-btn').disabled = state.showAll;
       setMsg('搜索失败：' + e.message, 'err');
     });
   }
 
   function add() {
+    if (state.showAll) {
+      setMsg('请先切回一个分组再添加标的', 'err');
+      return;
+    }
     var q = $('code-input').value.trim();
     if (!q) return;
     hideSuggest();
@@ -363,14 +604,26 @@
       ready: 'v' + updState.available + ' 已下载', error: '检查失败'
     };
     stateEl.textContent = labels[st] || st;
-    btn.disabled = (st === 'checking' || st === 'downloading');
+    // available 阶段已经在后台准备下载了，再点一次只会重复发起检查
+    btn.disabled = (st === 'checking' || st === 'available' || st === 'downloading');
 
     if (st === 'ready') {
       btn.textContent = '重启更新';
       hintEl.textContent = '点击立即重启并安装 v' + updState.available;
     } else if (st === 'error') {
       btn.textContent = '重试';
-      hintEl.textContent = (updState.message || '').slice(0, 120) + '（可在日志查看详情）';
+      hintEl.textContent = updState.message
+        ? updState.message.slice(0, 120) + '（可在日志查看详情）'
+        : '可在日志查看详情';
+    } else if (st === 'checking') {
+      btn.textContent = '检查中…';
+      hintEl.textContent = '';
+    } else if (st === 'available') {
+      btn.textContent = '准备下载…';
+      hintEl.textContent = '发现 v' + updState.available + '，正在后台下载…';
+    } else if (st === 'downloading') {
+      btn.textContent = '下载中…';
+      hintEl.textContent = '正在后台下载，完成后会提示重启';
     } else {
       btn.textContent = st === 'current' ? '重新检查' : '检查更新';
       hintEl.textContent = st === 'current' ? '当前 v' + state.version + '，点击重新检查' : '';
@@ -429,9 +682,16 @@
     var textModeEl = document.querySelector('input[name="textMode"]:checked');
     var focusSideEl = document.querySelector('input[name="focusChartSide"]:checked');
 
+    var g = activeGroup();
+    if (!state.groups.length || !g) { setMsg('至少要保留一个分组', 'err'); return; }
+
     var patch = {
-      symbols: state.symbols,
-      watchlist: state.watchlist,
+      symbols: g.symbols.slice(),
+      groups: state.groups.map(function (x) {
+        return { id: x.id, name: x.name, symbols: x.symbols.slice() };
+      }),
+      activeGroupId: state.activeGroupId,
+      watchlist: state.watchlist.slice(),
       period: periodEl ? periodEl.value : 'minute',
       interval: parseInt($('interval').value, 10),
       textMode: textModeEl ? textModeEl.value : 'auto',
@@ -460,8 +720,6 @@
       }
     };
 
-    if (!patch.symbols.length) { setMsg('至少要勾选一个标的', 'err'); return; }
-
     setFoot('保存中…');
     window.ticker.saveSettings(patch).then(function (r) {
       if (r && r.ok) {
@@ -487,8 +745,15 @@
 
   /* ---- 初始化 ---- */
   window.ticker.getSettings().then(function (d) {
-    state.symbols = d.symbols.slice();
-    state.watchlist = d.watchlist.slice();
+    var groups = (d.groups && d.groups.length)
+      ? d.groups
+      : [{ id: 'default', name: '默认', symbols: (d.symbols || []).slice() }];
+    state.groups = groups.map(function (g) {
+      return { id: g.id, name: g.name, symbols: (g.symbols || []).slice() };
+    });
+    state.activeGroupId = d.activeGroupId || state.groups[0].id;
+    if (!groupById(state.activeGroupId)) state.activeGroupId = state.groups[0].id;
+    state.watchlist = (d.watchlist || []).slice();
     state.names = d.names || {};
 
     var p = document.querySelector('input[name="period"][value="' + d.period + '"]');
@@ -553,6 +818,30 @@
     $('code-input').focus();
     $('symbol-list').scrollTop = 0;
     requestAnimationFrame(function () { $('symbol-list').scrollTop = 0; });
+  });
+
+  /* ---- 分组事件 ---- */
+  $('group-select').addEventListener('change', function () {
+    state.activeGroupId = this.value;
+    state.showAll = false;
+    renderList();
+  });
+  $('show-all').addEventListener('change', function () {
+    state.showAll = this.checked;
+    renderList();
+  });
+  $('group-add').addEventListener('click', function () { beginGroupEdit('add'); });
+  $('group-rename').addEventListener('click', function () {
+    if (activeGroup()) beginGroupEdit('rename');
+  });
+  $('group-del').addEventListener('click', deleteGroup);
+  $('group-up').addEventListener('click', function () { moveGroup(-1); });
+  $('group-down').addEventListener('click', function () { moveGroup(1); });
+  $('group-edit-ok').addEventListener('click', commitGroupEdit);
+  $('group-edit-cancel').addEventListener('click', cancelGroupEdit);
+  $('group-name').addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') { e.preventDefault(); commitGroupEdit(); }
+    else if (e.key === 'Escape') { e.stopPropagation(); cancelGroupEdit(); }
   });
 
   /* ---- 事件 ---- */

@@ -11,10 +11,78 @@ const {
   FOCUS_CHART_SIDES
 } = require('./constants.cjs');
 const { sameList, clampInt } = require('./utils.cjs');
+const { isValidCode } = require('./symbols.cjs');
 const { readJson, writeJsonAtomic, backupJson } = require('./atomic-json.cjs');
 
 // 配置结构版本。以后加字段/改语义时在这里递增，并在 normalizeConfig 里迁移。
-const SCHEMA_VERSION = 2;
+// 3: 引入自选分组（groups / activeGroupId），旧 symbols 迁移进「默认」组。
+const SCHEMA_VERSION = 3;
+
+const MAX_GROUPS = 32;
+const GROUP_NAME_MAX = 24;
+const FALLBACK_GROUP_NAME = '默认';
+
+function cleanGroupName(value) {
+  const s = typeof value === 'string' ? value.replace(/\s+/g, ' ').trim() : '';
+  return (s || '分组').slice(0, GROUP_NAME_MAX);
+}
+
+function cleanGroupId(value, used) {
+  const raw = typeof value === 'string' ? value.trim().replace(/[^a-zA-Z0-9_-]/g, '') : '';
+  const base = (raw || 'g').slice(0, 32);
+  let id = base;
+  let n = 2;
+  while (used.has(id)) {
+    id = base + '-' + n;
+    n++;
+  }
+  used.add(id);
+  return id;
+}
+
+function cleanCodes(list) {
+  const out = [];
+  (Array.isArray(list) ? list : []).forEach(function (c) {
+    if (isValidCode(c) && out.indexOf(c) < 0) out.push(c);
+  });
+  return out;
+}
+
+// 只做清洗，不补默认分组：设置面板保存时用它判断「是否一个分组都不剩」。
+function sanitizeGroups(list) {
+  const used = new Set();
+  const out = [];
+  (Array.isArray(list) ? list : []).slice(0, MAX_GROUPS).forEach(function (g) {
+    if (!g || typeof g !== 'object' || Array.isArray(g)) return;
+    out.push({
+      id: cleanGroupId(g.id, used),
+      name: cleanGroupName(g.name),
+      symbols: cleanCodes(g.symbols)
+    });
+  });
+  return out;
+}
+
+// 读配置时用：没有 groups 的旧配置把 symbols 原样迁进「默认」组。
+function normalizeGroups(raw) {
+  const groups = sanitizeGroups(raw && raw.groups);
+  if (groups.length) return groups;
+  let symbols = cleanCodes(raw && raw.symbols);
+  if (!symbols.length) symbols = DEFAULT_CONFIG.symbols.slice();
+  return [{ id: 'default', name: FALLBACK_GROUP_NAME, symbols: symbols }];
+}
+
+function groupById(cfg, id) {
+  const groups = (cfg && cfg.groups) || [];
+  for (let i = 0; i < groups.length; i++) {
+    if (groups[i].id === id) return groups[i];
+  }
+  return null;
+}
+
+function activeGroup(cfg) {
+  return groupById(cfg, cfg && cfg.activeGroupId) || ((cfg && cfg.groups && cfg.groups[0]) || null);
+}
 
 // 快捷键格式校验：修饰符(Ctrl/Alt/Shift)+ 主键，如 Ctrl+1 / Ctrl+Alt+F / Ctrl+Shift+R
 const SHORTCUT_KEY_RE = /^(F\d{1,2}|[0-9]|[a-zA-Z]|Space|Enter|Escape|Tab|ArrowUp|ArrowDown|ArrowLeft|ArrowRight|Home|End|PageUp|PageDown|Backspace|Delete)$/;
@@ -54,12 +122,21 @@ function normalizeConfig(raw) {
   raw = (raw && typeof raw === 'object' && !Array.isArray(raw)) ? raw : {};
   const cfg = Object.assign({}, DEFAULT_CONFIG, raw);
 
-  if (!Array.isArray(cfg.symbols) || cfg.symbols.length === 0) {
-    cfg.symbols = DEFAULT_CONFIG.symbols.slice();
-  }
-  if (!Array.isArray(cfg.watchlist) || cfg.watchlist.length === 0) {
-    cfg.watchlist = DEFAULT_WATCHLIST.slice();
-  }
+  // 分组：旧配置没有 groups 时由 normalizeGroups 用 symbols 建一个「默认」组。
+  cfg.groups = normalizeGroups(raw);
+  const wantedGroup = typeof raw.activeGroupId === 'string' ? raw.activeGroupId : '';
+  cfg.activeGroupId = groupById(cfg, wantedGroup) ? wantedGroup : cfg.groups[0].id;
+  // symbols 继续作为「当前分组」的镜像：浮窗、行情、聚焦图表都还按它取数。
+  cfg.symbols = activeGroup(cfg).symbols.slice();
+
+  const watchlist = cleanCodes(raw.watchlist);
+  if (!watchlist.length) watchlist.push.apply(watchlist, DEFAULT_WATCHLIST);
+  cfg.groups.forEach(function (g) {
+    g.symbols.forEach(function (c) {
+      if (watchlist.indexOf(c) < 0) watchlist.push(c);
+    });
+  });
+  cfg.watchlist = watchlist;
 
   if (PERIODS.indexOf(cfg.period) < 0) cfg.period = 'minute';
   if (TEXT_MODES.indexOf(cfg.textMode) < 0) cfg.textMode = 'auto';
@@ -195,7 +272,10 @@ function pickConfigFrom(candidates) {
 function isFreshDefault(cfg) {
   const normalized = normalizeConfig(cfg);
   return sameList(normalized.symbols, DEFAULT_CONFIG.symbols) &&
-    sameList(normalized.watchlist, DEFAULT_WATCHLIST);
+    sameList(normalized.watchlist, DEFAULT_WATCHLIST) &&
+    normalized.groups.length === 1 &&
+    normalized.groups[0].id === 'default' &&
+    normalized.groups[0].name === FALLBACK_GROUP_NAME;
 }
 
 // 首次启动：把老位置的配置接过来。只跑一次，结果记在 .config-migrated。
@@ -235,9 +315,15 @@ function migrateConfig(options) {
 
 module.exports = {
   SCHEMA_VERSION,
+  MAX_GROUPS,
+  GROUP_NAME_MAX,
   isValidTime,
   validShortcut,
   normalizeShortcuts,
+  sanitizeGroups,
+  normalizeGroups,
+  groupById,
+  activeGroup,
   normalizeConfig,
   loadConfig,
   saveConfig,

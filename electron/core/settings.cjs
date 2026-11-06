@@ -3,7 +3,7 @@
 const { PERIODS, TEXT_MODES, FOCUS_CHART_SIDES } = require('./constants.cjs');
 const { isValidCode } = require('./symbols.cjs');
 const { clampInt } = require('./utils.cjs');
-const { isValidTime, normalizeShortcuts } = require('./config.cjs');
+const { isValidTime, normalizeShortcuts, sanitizeGroups } = require('./config.cjs');
 
 function patchTime(value, fallback) {
   return isValidTime(value) ? value : fallback;
@@ -17,19 +17,44 @@ function applySettingsPatch(current, raw) {
     return { ok: false, msg: '数据无效' };
   }
 
-  const symbols = (Array.isArray(raw.symbols) ? raw.symbols : []).filter(isValidCode);
-  if (symbols.length === 0) {
-    return { ok: false, msg: '至少要勾选一个标的' };
+  // 新设置面板会传完整的 groups；旧客户端只传 symbols，这里兼容成「默认」组。
+  // 分组允许为空（浮窗会显示空状态），但至少要保留一个分组。
+  let groups;
+  if (raw.groups !== undefined) {
+    groups = sanitizeGroups(raw.groups);
+    if (groups.length === 0) {
+      return { ok: false, msg: '至少要保留一个分组' };
+    }
+  } else {
+    const legacy = (Array.isArray(raw.symbols) ? raw.symbols : []).filter(isValidCode);
+    if (legacy.length === 0) {
+      return { ok: false, msg: '至少要勾选一个标的' };
+    }
+    groups = [{ id: 'default', name: '默认', symbols: legacy }];
   }
 
-  const watchlist = (Array.isArray(raw.watchlist) ? raw.watchlist : []).filter(isValidCode);
-  symbols.forEach(function (code) {
-    if (watchlist.indexOf(code) < 0) watchlist.push(code);
+  let activeGroupId = typeof raw.activeGroupId === 'string' ? raw.activeGroupId : '';
+  if (!groups.some(function (g) { return g.id === activeGroupId; })) {
+    activeGroupId = groups[0].id;
+  }
+  const active = groups.filter(function (g) { return g.id === activeGroupId; })[0];
+  const symbols = active.symbols.slice();
+
+  const watchlist = [];
+  (Array.isArray(raw.watchlist) ? raw.watchlist : []).forEach(function (c) {
+    if (isValidCode(c) && watchlist.indexOf(c) < 0) watchlist.push(c);
+  });
+  groups.forEach(function (g) {
+    g.symbols.forEach(function (code) {
+      if (watchlist.indexOf(code) < 0) watchlist.push(code);
+    });
   });
 
   const shortcuts = normalizeShortcuts(raw.shortcuts);
   const patch = {
     symbols: symbols,
+    groups: groups,
+    activeGroupId: activeGroupId,
     watchlist: watchlist,
     period: PERIODS.indexOf(raw.period) >= 0 ? raw.period : current.period,
     interval: clampInt(raw.interval, current.interval, 1000, 60000),
