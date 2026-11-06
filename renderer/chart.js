@@ -142,10 +142,20 @@
       '</g>';
   }
 
+  function setMaLegend(v) {
+    if (!v) return;
+    [['ma5', 'MA5'], ['ma10', 'MA10'], ['ma20', 'MA20']].forEach(function (p) {
+      var el = chartEl.querySelector('#f-' + p[0]);
+      if (el) el.textContent = p[1] + ' ' + fPrice(v[p[0]]);
+    });
+  }
+
   function hideTip() {
     tip.style.display = 'none';
     var cross = chartEl.querySelector('#f-cross');
     if (cross) cross.setAttribute('opacity', '0');
+    // 光标离开后均线数值回到最新一根，不要停在刚才悬停的那天
+    if (tipCtx && tipCtx.type === 'day') setMaLegend(tipCtx.maDefault);
   }
 
   function showTip(info, mx, my) {
@@ -182,7 +192,7 @@
     var i = c.xs + ((sx - c.g.padL) / c.g.plotW) * (c.xe - c.xs);
     i = Math.max(0, Math.min(c.total - 1, i));
     var best = nearestPt(c.pts, i);
-    var dIdx = Math.floor(best.x / c.session);
+    var dIdx = isNum(best.day) ? best.day : Math.floor(best.x / c.session);
     var t = fmtTime(best.t || '');
     var date = c.days[dIdx] ? shortDate(c.days[dIdx].date) : '';
     var head = c.days.length > 1 ? (date + ' ' + t) : t;
@@ -215,6 +225,7 @@
     i = Math.max(base, Math.min(last, i));
     i = Math.max(0, Math.min(n - 1, i));
     var r = c.rows[i];
+    setMaLegend(r);
     var chg = r.o > 0 ? (r.c - r.o) / r.o * 100 : NaN;
     var lines = [
       String(r.d || ''),
@@ -309,24 +320,36 @@
     var T = theme();
 
     var session = p.session || 242;
-    var total = session * days.length;
+    // 5 日图每天占一个固定槽位。最后一天是盘中实时数据，靠左排、右边留白；
+    // 前面的完整交易日如果开头缺了几根（延迟开盘 / 数据源少给），就靠右补齐，
+    // 否则前一天结尾会比后一天开头短一截，折线跨过去就多出一段假斜线。
+    var multi = days.length > 1;
+    var dayStart = [];
+    var dayOffset = [];
     var pts = [];
 
     for (var d = 0; d < days.length; d++) {
       var arr = days[d].points || [];
       var prec = days[d].prec;
+      var base = multi ? d * session : 0;
+      var off = 0;
+      if (multi && d < days.length - 1 && arr.length < session) off = session - arr.length;
+      dayStart.push(base);
+      dayOffset.push(off);
       for (var i = 0; i < arr.length; i++) {
         pts.push({
-          x: d * session + i,
+          x: base + off + i,
           p: arr[i].price,
           v: arr[i].vol,
           a: arr[i].avg,
           prec: prec,
           first: i === 0,
+          day: d,
           t: arr[i].t || ''
         });
       }
     }
+    var total = multi ? session * days.length : session;
     if (pts.length < 2) return empty('暂无分时数据');
 
     // 伦敦金、美元指数等品种没有成交量：整张图不画成交量栏，价格区直接铺满
@@ -377,8 +400,9 @@
     var leftEdge = g.padL, rightEdge = g.padL + g.plotW;
     for (var dd = 0; dd < days.length; dd++) {
       var pc = days[dd].prec;
-      var dx0 = dd * session;
-      var dx1 = dd * session + Math.max(1, (days[dd].points || []).length - 1);
+      var dayN = (days[dd].points || []).length;
+      var dx0 = dayStart[dd] + dayOffset[dd];
+      var dx1 = dx0 + Math.max(0, dayN - 1);
       if (dx1 < xs || dx0 > xe) continue;
       if (isNum(pc) && pc > 0) {
         var yb = Y(pc);
@@ -409,20 +433,31 @@
       }
     }
 
-    // 价格线 + 均价线
-    var linePts = [], avgPts = [];
+    // 价格线 + 均价线：按 x 连续性分段。前一天结尾和后一天开头之间有缺口的，
+    // 直接断开，不再用一条斜线把两段不相邻的行情硬连起来。
+    var lineSegs = [], avgSegs = [], lineSeg = [], avgSeg = [];
+    function flushSeg() {
+      if (lineSeg.length > 1) lineSegs.push(lineSeg);
+      if (avgSeg.length > 1) avgSegs.push(avgSeg);
+      lineSeg = [];
+      avgSeg = [];
+    }
     for (var n = 0; n < pts.length; n++) {
       if (pts[n].x < xs - 1 || pts[n].x > xe + 1) continue;
+      if (lineSeg.length && pts[n].x !== pts[n - 1].x + 1) flushSeg();
       var xx = X(pts[n].x).toFixed(1);
-      linePts.push(xx + ',' + Y(pts[n].p).toFixed(1));
-      if (isNum(pts[n].a)) avgPts.push(xx + ',' + Y(pts[n].a).toFixed(1));
+      lineSeg.push(xx + ',' + Y(pts[n].p).toFixed(1));
+      if (isNum(pts[n].a)) avgSeg.push(xx + ',' + Y(pts[n].a).toFixed(1));
     }
-    if (avgPts.length > 1) {
-      s.push('<polyline points="' + avgPts.join(' ') + '" fill="none" stroke="' + T.avg +
+    flushSeg();
+    avgSegs.forEach(function (seg) {
+      s.push('<polyline points="' + seg.join(' ') + '" fill="none" stroke="' + T.avg +
         '" stroke-width="1" opacity=".9"/>');
-    }
-    s.push('<polyline points="' + linePts.join(' ') + '" fill="none" stroke="' + T.line +
-      '" stroke-width="1.3" stroke-linejoin="round"/>');
+    });
+    lineSegs.forEach(function (seg) {
+      s.push('<polyline points="' + seg.join(' ') + '" fill="none" stroke="' + T.line +
+        '" stroke-width="1.3" stroke-linejoin="round"/>');
+    });
 
     // 价格刻度（左）：贴在面板左边缘，画在图上
     s.push(txt(TICK_INSET, g.priceTop + 9, fx(hi), 'start', T.sub));
@@ -445,7 +480,8 @@
     if (!isZoomed()) {
       if (days.length > 1) {
         for (var q = 0; q < days.length; q++) {
-          var cx = X(q * session + Math.floor(session / 2));
+          var qn = (days[q].points || []).length;
+          var cx = X(dayStart[q] + dayOffset[q] + Math.floor(Math.max(0, qn - 1) / 2));
           s.push(axisLabel(cx, g.axisY, shortDate(days[q].date), g.W, T.sub));
         }
       } else {
@@ -464,7 +500,7 @@
       var lbls = [];
       for (var z = 0; z < nLbl; z++) {
         var zp = nearestPt(pts, xs + ((xe - xs) * z) / (nLbl - 1));
-        var zd = days[Math.floor(zp.x / session)];
+        var zd = days[isNum(zp.day) ? zp.day : 0];
         var zs2 = days.length > 1
           ? shortDate(zd && zd.date) + ' ' + fmtTime(zp.t)
           : fmtTime(zp.t);
@@ -680,10 +716,21 @@
     if (hasVol) s.push(txt(g.padL + 2, g.volTop + 9, '量 ' + fVol(sumV), 'start', T.sub, 9));
     s.push(txt(g.padL + 2, g.macdTop + 8, 'MACD(12,26,9)', 'start', T.sub, 8.5));
 
-    // 均线图例
-    s.push(txt(g.padL + g.plotW - 112, g.priceTop + 9, 'MA5', 'start', T.avg, 9));
-    s.push(txt(g.padL + g.plotW - 80, g.priceTop + 9, 'MA10', 'start', T.ma10, 9));
-    s.push(txt(g.padL + g.plotW - 44, g.priceTop + 9, 'MA20', 'start', T.ma20, 9));
+    // 均线图例：贴右侧显示具体数值，光标移动时跟着变成当天的值
+    var legendVals = bars.length ? bars[bars.length - 1] : null;
+    var legendDefs = [
+      { k: 'ma5', name: 'MA5', color: T.avg },
+      { k: 'ma10', name: 'MA10', color: T.ma10 },
+      { k: 'ma20', name: 'MA20', color: T.ma20 }
+    ];
+    var legend = '<text x="' + (g.padL + g.plotW).toFixed(1) + '" y="' + (g.priceTop + 9).toFixed(1) +
+      '" font-size="9" text-anchor="end">';
+    legendDefs.forEach(function (it, n2) {
+      legend += '<tspan' + (n2 ? ' dx="8"' : '') + ' id="f-' + it.k + '" fill="' + it.color + '">' +
+        it.name + ' ' + fPrice(legendVals ? legendVals[it.k] : NaN) + '</tspan>';
+    });
+    legend += '</text>';
+    s.push(legend);
 
     // 横轴日期：按可见根数决定放几个，缩得很近时少放几个免得糊成一片
     var visN = xe - xs + 1;
@@ -703,7 +750,12 @@
     // 光标按实际柱子网格定位：合并只是画的时候省事，提示不能跟着偏一根
     tipCtx = { type: 'day', g: g, Y: Y, rows: rows, step: stepRaw, barStep: step,
       barI0: i0, barAgg: agg, barCount: bars.length,
-      n: n, xs: xs, xe: xe, i0: i0, i1: i1, showVol: hasVol };
+      n: n, xs: xs, xe: xe, i0: i0, i1: i1, showVol: hasVol,
+      maDefault: {
+        ma5: legendVals ? legendVals.ma5 : NaN,
+        ma10: legendVals ? legendVals.ma10 : NaN,
+        ma20: legendVals ? legendVals.ma20 : NaN
+      } };
     // 调试用：n=总根数 span=当前比例 def=默认比例 bars=合并后画了多少根
     chartEl.dataset.dbg = 'n=' + n + ' span=' + (view.e - view.s).toFixed(4) +
       ' def=' + defSpan.toFixed(4) + ' bars=' + bars.length + ' agg=' + agg;
