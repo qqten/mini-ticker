@@ -679,7 +679,6 @@
 
   function save() {
     var periodEl = document.querySelector('input[name="period"]:checked');
-    var textModeEl = document.querySelector('input[name="textMode"]:checked');
     var focusSideEl = document.querySelector('input[name="focusChartSide"]:checked');
 
     var g = activeGroup();
@@ -694,17 +693,12 @@
       watchlist: state.watchlist.slice(),
       period: periodEl ? periodEl.value : 'minute',
       interval: parseInt($('interval').value, 10),
-      textMode: textModeEl ? textModeEl.value : 'auto',
       focusChartSide: focusSideEl ? focusSideEl.value : 'auto',
       backdrop: $('backdrop').checked,
       backdropOpacity: parseInt($('backdropOpacity').value, 10),
       probeIntervalMs: parseInt($('probeIntervalSec').value, 10) * 1000,
-      sparkWidth: parseInt($('sparkWidth').value, 10),
       showName: $('showName').checked,
       baseline: $('baseline').checked,
-      alwaysOnTop: $('alwaysOnTop').checked,
-      locked: $('locked').checked,
-      width: parseInt($('width').value, 10),
       shortcuts: state.shortcuts,
       alert: {
         enabled: $('alertOn').checked,
@@ -736,11 +730,9 @@
     });
   }
 
-  // 选「自动」时采样间隔才有意义，选固定配色时把它置灰
-  function syncTextModeUi() {
-    var el = document.querySelector('input[name="textMode"]:checked');
-    var on = !el || el.value === 'auto';
-    $('probeIntervalSec').disabled = !on;
+  // 只有「自动」配色才会去采样背景，固定配色时采样间隔没有意义
+  function syncProbeUi(mode) {
+    $('probeIntervalSec').disabled = (mode || 'auto') !== 'auto';
   }
 
   /* ---- 初始化 ---- */
@@ -777,23 +769,14 @@
     $('backdropOpacity').value = d.backdropOpacity != null ? d.backdropOpacity : 40;
     $('backdropOpacity-val').textContent = $('backdropOpacity').value;
     $('backdropOpacity').disabled = !$('backdrop').checked;
-    var tm = document.querySelector('input[name="textMode"][value="' + (d.textMode || 'auto') + '"]');
-    if (tm) tm.checked = true;
-    syncTextModeUi();
+    syncProbeUi(d.textMode);
     const pis = Math.round((d.probeIntervalMs != null ? d.probeIntervalMs : 4000) / 1000);
     $('probeIntervalSec').value = pis;
     $('probeIntervalSec-val').textContent = pis;
-    $('sparkWidth').value = d.sparkWidth != null ? d.sparkWidth : 120;
-    $('sparkWidth-val').textContent = $('sparkWidth').value;
     $('showName').checked = d.showName !== false;
     $('baseline').checked = d.baseline !== false;
-    $('alwaysOnTop').checked = !!d.alwaysOnTop;
-    $('locked').checked = !!d.locked;
     var fcs = document.querySelector('input[name="focusChartSide"][value="' + (d.focusChartSide || 'auto') + '"]');
     if (fcs) fcs.checked = true;
-
-    $('width').value = d.width;
-    $('width-val').textContent = d.width;
 
     $('alertOn').checked = !(d.alert && d.alert.enabled === false);
     $('alertTime').value = (d.alert && d.alert.time) || '14:30';
@@ -815,9 +798,19 @@
     renderList();
 
     // 打开时把焦点放到输入框，方便直接敲代码；列表回滚到顶部
-    $('code-input').focus();
+    var inputEl = $('code-input');
+    inputEl.focus();
+    // 窗口是「画完首屏才显示」的，隐藏状态下 focus() 不生效，等第一次拿到焦点时补一次
+    window.addEventListener('focus', function () { inputEl.focus(); }, { once: true });
     $('symbol-list').scrollTop = 0;
     requestAnimationFrame(function () { $('symbol-list').scrollTop = 0; });
+
+    // 首屏已经画完，通知主进程放窗口出来（窗口在收到这个之前是隐藏的，
+    // 免得用户先看到一个空壳再等列表刷出来）
+    if (window.ticker.settingsReady) window.ticker.settingsReady();
+  }).catch(function () {
+    // 读配置失败也要把窗口显示出来，否则用户面对的是「点了设置没反应」
+    if (window.ticker.settingsReady) window.ticker.settingsReady();
   });
 
   /* ---- 分组事件 ---- */
@@ -891,11 +884,6 @@
 
   $('save').addEventListener('click', save);
   $('cancel').addEventListener('click', function () { window.ticker.closeSettings(); });
-  $('width').addEventListener('input', function () {
-    $('width-val').textContent = this.value;
-    // 实时预览浮窗宽度；设置窗口关闭时主进程会按 config.width 统一还原
-    window.ticker.previewWidth(parseInt(this.value, 10));
-  });
   $('backdropOpacity').addEventListener('input', function () {
     $('backdropOpacity-val').textContent = this.value;
     // 衬底浓度实时生效：通过 save-config 即时应用到浮窗，同时落盘
@@ -905,23 +893,10 @@
     $('probeIntervalSec-val').textContent = this.value;
     window.ticker.save({ probeIntervalMs: parseInt(this.value, 10) * 1000 });
   });
-  $('sparkWidth').addEventListener('input', function () {
-    $('sparkWidth-val').textContent = this.value;
-    window.ticker.save({ sparkWidth: parseInt(this.value, 10) });
-  });
   $('backdrop').addEventListener('change', function () {
     $('backdropOpacity').disabled = !this.checked;
     window.ticker.save({ backdrop: this.checked });
   });
-  // 配色三选一：点了立刻生效，不用等"保存并应用"
-  var textModeRadios = document.querySelectorAll('input[name="textMode"]');
-  for (var ti = 0; ti < textModeRadios.length; ti++) {
-    textModeRadios[ti].addEventListener('change', function () {
-      if (!this.checked) return;
-      syncTextModeUi();
-      window.ticker.save({ textMode: this.value });
-    });
-  }
   // 聚焦图表方位同理：点了立刻生效并落盘，正在聚焦时窗口会当场重排
   var focusSideRadios = document.querySelectorAll('input[name="focusChartSide"]');
   for (var fi = 0; fi < focusSideRadios.length; fi++) {
@@ -938,6 +913,25 @@
   $('autoStartTime').addEventListener('change', function () { refreshTaskHint(); });
   $('autoExitOn').addEventListener('change', function () { refreshExitHint(); });
   $('autoExitTime').addEventListener('change', function () { refreshExitHint(); });
+
+  /* ---- 晚到的补充数据 ---- */
+  // 名称是异步补的：只改已有行的文本，不重建列表，免得列表闪一下还丢滚动位置
+  function paintNames(names) {
+    if (!names) return;
+    Object.keys(names).forEach(function (code) { state.names[code] = names[code]; });
+    var rows = $('symbol-list').children;
+    for (var i = 0; i < rows.length; i++) {
+      var code = rows[i].dataset.code;
+      var nm = rows[i].querySelector('.nm');
+      if (code && nm && state.names[code]) nm.textContent = state.names[code];
+    }
+  }
+  if (window.ticker.onSettingsNames) {
+    window.ticker.onSettingsNames(paintNames);
+  }
+  if (window.ticker.onAutostartStatus) {
+    window.ticker.onAutostartStatus(function (v) { refreshTaskHint(!!v); });
+  }
 
   document.addEventListener('keydown', function (e) {
     // 正在录入快捷键时不触发全局快捷键

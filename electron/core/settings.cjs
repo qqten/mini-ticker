@@ -11,7 +11,8 @@ function patchTime(value, fallback) {
 
 // 设置面板保存的唯一入口：所有范围/格式校验只在这里做，
 // main 只负责把结果写回 config 并执行副作用（重启探针、重装计划任务等）。
-// 注意：保持和原 settings-save 一样的「全量 patch」语义——缺省的布尔字段按 false 处理。
+// 注意：保持和原 settings-save 一样的「全量 patch」语义——缺省的布尔字段按 false 处理，
+// 只有始终置顶 / 锁定位置除外（面板已不提供这两个开关，缺省沿用当前值）。
 function applySettingsPatch(current, raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
     return { ok: false, msg: '数据无效' };
@@ -67,8 +68,10 @@ function applySettingsPatch(current, raw) {
     probeIntervalMs: clampInt(raw.probeIntervalMs, current.probeIntervalMs, 1000, 15000),
     showName: raw.showName !== false,
     baseline: raw.baseline !== false,
-    alwaysOnTop: !!raw.alwaysOnTop,
-    locked: !!raw.locked,
+    // 面板里已经没有「始终置顶 / 锁定位置」这两个开关了，缺省时沿用当前值，
+    // 否则每次保存都会把它们重置成 false（窗口就不再置顶）。
+    alwaysOnTop: raw.alwaysOnTop === undefined ? !!current.alwaysOnTop : !!raw.alwaysOnTop,
+    locked: raw.locked === undefined ? !!current.locked : !!raw.locked,
     width: clampInt(raw.width, current.width, 220, 640),
     alert: {
       enabled: !(raw.alert && raw.alert.enabled === false),

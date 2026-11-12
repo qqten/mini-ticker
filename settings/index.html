@@ -79,16 +79,6 @@
 
       <section data-cat="appearance">
         <h2>外观</h2>
-        <div class="field">
-          <span class="fl">文字配色</span>
-          <div class="seg">
-            <label><input type="radio" name="textMode" value="auto" /><span>自动</span></label>
-            <label><input type="radio" name="textMode" value="light" /><span>亮色字</span></label>
-            <label><input type="radio" name="textMode" value="dark" /><span>暗色字</span></label>
-          </div>
-        </div>
-        <p class="hint">自动：实时采样窗口背后的画面，背景亮转暗色字、背景暗转亮色字。<br />
-          如果自动判定在你这台机器上不对（比如多屏、远程桌面、纯黑壁纸），直接选亮色字或暗色字锁定。</p>
         <div class="checks">
           <label class="check"><input type="checkbox" id="backdrop" /><span>加一层淡衬底</span></label>
           <label class="check"><input type="checkbox" id="showName" /><span>显示名称</span></label>
@@ -100,40 +90,25 @@
           <b id="backdropOpacity-val">40</b>
         </div>
         <div class="field">
-          <span class="fl">亮暗采样间隔</span>
+          <span class="fl">亮暗采样</span>
           <input type="range" id="probeIntervalSec" min="1" max="10" step="1" />
           <b id="probeIntervalSec-val">4</b>
         </div>
-        <p class="hint">单位：秒。值越小切换越灵敏，但更耗资源；拖动浮窗时自动暂停采样。选「自动」时这一项才生效。</p>
-        <div class="field">
-          <span class="fl">折线宽度</span>
-          <input type="range" id="sparkWidth" min="40" max="300" step="10" />
-          <b id="sparkWidth-val">120</b>
-        </div>
-        <p class="hint">也可以直接在浮窗里左右拖动折线本身调整；窗口太窄时会自动收窄，优先保住名称。</p>
+        <p class="hint">单位：秒。值越小切换越灵敏，但更耗资源；拖动浮窗时自动暂停采样。<br />
+          文字颜色始终按窗口背后的实际画面自动切换：背景亮用暗色字，背景暗用亮色字。</p>
       </section>
 
       <section data-cat="appearance">
-        <h2>窗口</h2>
-        <div class="checks">
-          <label class="check"><input type="checkbox" id="alwaysOnTop" /><span>始终置顶</span></label>
-          <label class="check"><input type="checkbox" id="locked" /><span>锁定位置（禁止拖动）</span></label>
-        </div>
+        <h2>聚焦图表</h2>
         <div class="field">
-          <span class="fl">宽度</span>
-          <input type="range" id="width" min="220" max="640" step="10" />
-          <b id="width-val">320</b>
-        </div>
-        <p class="hint">也可以直接把鼠标移到浮窗左右边缘拖拽，松手即记住宽度。</p>
-        <div class="field">
-          <span class="fl">聚焦图表</span>
+          <span class="fl">位置</span>
           <div class="seg">
             <label><input type="radio" name="focusChartSide" value="auto" /><span>自动</span></label>
             <label><input type="radio" name="focusChartSide" value="left" /><span>图表在左</span></label>
             <label><input type="radio" name="focusChartSide" value="right" /><span>图表在右</span></label>
           </div>
         </div>
-        <p class="hint">默认自动：浮窗靠近屏幕右侧时保持列表贴边、图表出现在列表左侧；靠近左侧时图表出现在右侧。也可以固定图表在列表左 / 右，那一侧放不下时会自动换到另一侧。</p>
+        <p class="hint">默认自动：浮窗靠近屏幕右侧时保持列表贴边、图表出现在列表左侧；靠近左侧时图表出现在右侧。也可以固定图表在列表左 / 右：那一侧放不下时窗口整体平移、列表跟着让位，图表保持完整宽度。</p>
       </section>
 
       <section data-cat="hotkeys">

@@ -792,10 +792,24 @@ function createWindow() {
   });
 }
 
+// 设置窗口等页面把列表画好再露出来：先 show 一个空壳、数据随后刷出来的观感很像卡顿。
+// 渲染层画完第一屏会发 settings-ready，这里才显示；万一渲染出错，兜底 1.5 秒也照常显示。
+let settingsShowTimer = null;
+let settingsOpenedAt = 0;
+function showSettingsWindow() {
+  if (settingsShowTimer) { clearTimeout(settingsShowTimer); settingsShowTimer = null; }
+  if (!settingsWin || settingsWin.isDestroyed()) return;
+  if (!settingsWin.isVisible()) settingsWin.show();
+  settingsWin.focus();
+  if (settingsOpenedAt) {
+    logLine('[settings]', '面板就绪 ' + (Date.now() - settingsOpenedAt) + 'ms');
+    settingsOpenedAt = 0;
+  }
+}
+
 function openSettings() {
   if (settingsWin && !settingsWin.isDestroyed()) {
-    settingsWin.show();
-    settingsWin.focus();
+    showSettingsWindow();
     return;
   }
   const area = screen.getPrimaryDisplay().workAreaSize;
@@ -808,6 +822,7 @@ function openSettings() {
     minHeight: 480,
     title: '盯盘设置',
     backgroundColor: '#14171d',
+    show: false,
     autoHideMenuBar: true,
     maximizable: false,
     webPreferences: {
@@ -817,11 +832,15 @@ function openSettings() {
     }
   });
   settingsWin.loadFile(path.join(RES_DIR, 'settings', 'index.html'));
+  settingsOpenedAt = Date.now();
+  if (settingsShowTimer) clearTimeout(settingsShowTimer);
+  settingsShowTimer = setTimeout(showSettingsWindow, 1500);
   // 设置面板关闭时，主窗口宽度回到 config.width：
   // 没点保存 → 滑块预览没写进 config，自然还原到原始宽度；
   // 点了保存 → config.width 已是新值，保持新宽度。
   settingsWin.on('closed', function () {
     settingsWin = null;
+    settingsOpenedAt = 0;
     if (win && !win.isDestroyed() && !focusOn) {
       // 聚焦展开时保持当前尺寸（列表+图表栏），收起时再回 config.width
       const w = Math.max(220, Math.min(640, Math.round(config.width || 320)));
@@ -829,6 +848,9 @@ function openSettings() {
     }
   });
 }
+
+// 渲染层第一屏画完的握手：见 openSettings 里的说明
+ipcMain.on('settings-ready', function () { showSettingsWindow(); });
 
 /* ---------------- 聚焦图表：单标的分时 / 5日 / 日K ---------------- */
 
@@ -1978,26 +2000,16 @@ function startScheduledTradingCheck() {
 
 /* ---------------- 设置面板 ---------------- */
 
-ipcMain.handle('settings-get', async function () {
+// 打开设置面板要「点开就有列表」，所以这里只读内存里的配置 + 已经学到的名称，
+// 立刻返回。名称补全（要发网络请求）和计划任务状态（要拉起 PowerShell）都挪到
+// 后台跑，回来再推给面板，别让一次 IPC 往返挡住首屏渲染。
+function collectSettings() {
   const codes = [];
   (config.watchlist || []).forEach(function (c) { if (codes.indexOf(c) < 0) codes.push(c); });
   (config.symbols || []).forEach(function (c) { if (codes.indexOf(c) < 0) codes.push(c); });
 
   const names = {};
   codes.forEach(function (c) { if (NAMES[c]) names[c] = NAMES[c]; });
-  try {
-    const snap = await fetchSnapshots(codes);
-    Object.keys(snap).forEach(function (k) {
-      if (snap[k] && snap[k].name) names[k] = snap[k].name;
-    });
-  } catch (e) {}
-
-  // 打开面板时现场问一次计划任务状态：缓存可能还没查完，用户也可能在别处删过任务
-  let installed = taskInstalledCache;
-  try {
-    installed = await new Promise(function (res) { autoStartInstalled(res); });
-    taskInstalledCache = installed;
-  } catch (e) {}
 
   return {
     symbols: config.symbols.slice(),
@@ -2023,13 +2035,57 @@ ipcMain.handle('settings-get', async function () {
     autoExit: Object.assign({}, config.autoExit),
     autoStart: Object.assign({}, config.autoStart),
     shortcuts: normalizeShortcuts(config.shortcuts),
-    taskInstalled: installed,
+    taskInstalled: taskInstalledCache,
     update: Object.assign({}, updateState),
     updaterOn: UPDATER_ON,
     isPortable: IS_PORTABLE,
     version: app.getVersion()
   };
+}
+
+// 后台补数据：30 秒内只跑一次，避免反复开关面板把行情接口打爆
+let settingsExtraAt = 0;
+function refreshSettingsExtras() {
+  if (Date.now() - settingsExtraAt < 30000) return;
+  settingsExtraAt = Date.now();
+
+  const codes = [];
+  (config.watchlist || []).forEach(function (c) { if (codes.indexOf(c) < 0) codes.push(c); });
+  (config.symbols || []).forEach(function (c) { if (codes.indexOf(c) < 0) codes.push(c); });
+  if (!codes.length) return;
+
+  fetchSnapshots(codes).then(function (snap) {
+    const learned = {};
+    Object.keys(snap).forEach(function (code) {
+      const n = snap[code] && snap[code].name;
+      if (!n || n === code) return;
+      // 学到就记住：下次打开面板直接命中本地表，不用再等网络
+      if (NAMES[code] !== n) {
+        NAMES[code] = n;
+        learned[code] = n;
+      }
+    });
+    if (!Object.keys(learned).length) return;
+    if (settingsWin && !settingsWin.isDestroyed()) {
+      settingsWin.webContents.send('settings-names', learned);
+    }
+  }).catch(function () {});
+
+  // 计划任务状态：查一次 schtasks 要冷启动 PowerShell，几百毫秒起步
+  autoStartInstalled(function (ok) {
+    taskInstalledCache = ok;
+    if (settingsWin && !settingsWin.isDestroyed()) {
+      settingsWin.webContents.send('autostart-status', ok);
+    }
+  });
+}
+
+ipcMain.handle('settings-get', function () {
+  const data = collectSettings();
+  refreshSettingsExtras();
+  return data;
 });
+
 
 ipcMain.handle('validate-symbol', async function (e, raw) {
   const code = String(raw || '').trim();

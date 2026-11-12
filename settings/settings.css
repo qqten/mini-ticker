@@ -319,6 +319,19 @@ button.tiny { height: 26px; padding: 0 10px; font-size: 12px; border-radius: 6px
   background: var(--card);
 }
 
+/* 列表自己也是滚动容器：不写样式就是 Chromium 默认的浅色滚动条，
+   在深色面板上就是一条刺眼的白条（还带上下箭头）。跟 .suggest 保持同一套皮肤。 */
+.list::-webkit-scrollbar { width: 8px; }
+.list::-webkit-scrollbar-button { display: none; height: 0; }
+.list::-webkit-scrollbar-track { background: transparent; }
+.list::-webkit-scrollbar-thumb {
+  background: #2c3340;
+  border-radius: 4px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+.list:hover::-webkit-scrollbar-thumb { background: #3a4354; background-clip: padding-box; }
+
 .list:empty { display: none; }
 
 .list li {

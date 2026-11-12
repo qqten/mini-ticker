@@ -40,6 +40,11 @@ contextBridge.exposeInMainWorld('ticker', {
   previewWidth: function (w) { ipcRenderer.send('preview-width', w); },
   setPinned: function (on) { ipcRenderer.send('set-pinned', on); },
   setPinZone: function (on) { ipcRenderer.send('set-pin-zone', on); },
+  // 面板打开后的补充数据（名称 / 计划任务状态），晚一点到，不挡首屏渲染
+  onSettingsNames: function (fn) { ipcRenderer.on('settings-names', function (e, m) { fn(m); }); },
+  onAutostartStatus: function (fn) { ipcRenderer.on('autostart-status', function (e, v) { fn(v); }); },
+  // 首屏画完的通知：主进程收到才把设置窗口显示出来
+  settingsReady: function () { ipcRenderer.send('settings-ready'); },
 
   // 更新
   checkUpdate: function () { ipcRenderer.send('check-update'); },

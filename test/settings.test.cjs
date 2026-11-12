@@ -95,8 +95,9 @@ test('applySettingsPatch 保留原有布尔字段语义', function () {
   const cur = current();
   const off = applySettingsPatch(cur, { symbols: ['sh000001'] });
   assert.equal(off.patch.backdrop, false);
-  assert.equal(off.patch.alwaysOnTop, false);
-  assert.equal(off.patch.locked, false);
+  // 置顶 / 锁定：面板已不提供开关，缺省必须沿用当前值，不能被重置成 false
+  assert.equal(off.patch.alwaysOnTop, !!cur.alwaysOnTop);
+  assert.equal(off.patch.locked, !!cur.locked);
   assert.equal(off.patch.showName, true);
   assert.equal(off.patch.baseline, true);
   assert.equal(off.patch.alert.enabled, true);
