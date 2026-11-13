@@ -48,6 +48,30 @@ const HF_EM_SECID = {
   hf_XPT: '102.PL00Y'
 };
 
+// 指数 → 东财 secid：只用来取「分时级别 K 线」。
+// 腾讯的分钟 K 只给当天一天的数据（m5 常常只有 1~2 根），要往回翻几天必须走东财。
+// 这里按 code 前缀兜底：sh/sz/bj 股票用 市场号.代码，港股/美股指数单独列。
+const INDEX_EM_SECID = {
+  sh000001: '1.000001',
+  sz399001: '0.399001',
+  sz399006: '0.399006',
+  sh000688: '1.000688',
+  sh000300: '1.000300',
+  sh000016: '1.000016',
+  sh000905: '1.000905',
+  sh000852: '1.000852',
+  bj899050: '0.899050',
+  hkHSI: '100.HSI',
+  // 恒生科技在东财是 124 市场，不是港股的 100
+  hkHSTECH: '124.HSTECH',
+  hkHSCEI: '100.HSCEI',
+  usDJI: '100.DJIA',
+  // 纳斯达克综合指数在东财是 100.NDX（IXIC 那个代码查不到任何 K 线）
+  usIXIC: '100.NDX',
+  usINX: '100.SPX',
+  usNDX: '100.NDX100'
+};
+
 const DEFAULT_WATCHLIST = [
   'sh000001', 'sz399001', 'sz399006', 'sh000688', 'sh000300', 'sh000016',
   'sh000905', 'sh000852', 'bj899050', 'hkHSI', 'hkHSTECH', 'usDJI', 'usIXIC', 'usINX'
@@ -55,6 +79,24 @@ const DEFAULT_WATCHLIST = [
 
 const PERIODS = ['minute', 'day', 'month', 'year'];
 const PERIOD_LABEL = { minute: '分时', day: '日线', month: '月线', year: '年线' };
+
+// 聚焦图表「分时」旁边那个下拉能选的分钟级别，全部可选值在这里。
+// 设置里勾选哪几个，图表头部就显示哪几个；没勾选的在界面上不出现。
+const FOCUS_INTERVALS = [1, 5, 15, 30, 60];
+const FOCUS_INTERVAL_LABEL = { 1: '1分', 5: '5分', 15: '15分', 30: '30分', 60: '60分' };
+// 默认显示哪些级别：5/15/30/60 分钟最常用，1 分钟数据量太大（东财一次只给 320 根，约一天半），默认不显示
+const DEFAULT_FOCUS_INTERVALS = [5, 15, 30, 60];
+
+// 浮窗左上角的指数条：默认显示上证指数，点开可切换这四只，
+// 选中后同时展开对应指数走势图。顺序就是下拉里的顺序。
+const TOP_INDEX_CODES = ['sh000001', 'sz399001', 'sz399006', 'sh000688'];
+// 顶部和下拉统一用正式名称，不再缩写
+const TOP_INDEX_TITLE = {
+  sh000001: '上证指数',
+  sz399001: '深证成指',
+  sz399006: '创业板指',
+  sh000688: '科创50'
+};
 
 // 文字配色：light = 亮色文字（配深背景），dark = 暗色文字（配浅背景），auto = 跟随窗口背后的实际画面
 const TEXT_MODES = ['light', 'dark', 'auto'];
@@ -74,6 +116,11 @@ const DEFAULT_CONFIG = {
   activeGroupId: 'default',
   watchlist: DEFAULT_WATCHLIST,
   period: 'minute',
+  // 聚焦图表「分时」旁边下拉里能选的分钟级别（顺序即下拉顺序）。
+  // 设置里勾选哪几个，图表头部就显示哪几个；空列表时退回默认的 5/15/30/60。
+  focusIntervals: DEFAULT_FOCUS_INTERVALS,
+  // 上一次在下拉里选中的级别（打开新图表时沿用它）
+  focusInterval: 5,
   interval: 3000,
   probeIntervalMs: 4000,
   alert: { enabled: true, time: '14:30' },
@@ -91,6 +138,9 @@ const DEFAULT_CONFIG = {
   baseline: true,
   // 列表排序：off 按自选顺序 / pct-desc 涨幅从高到低 / pct-asc 从低到高
   sortMode: 'off',
+  // 左上角分组名右侧的指数条：显示点位 / 涨跌幅，点开可切换指数并展开走势图
+  showTopIndex: true,
+  topIndex: 'sh000001',
   // 上次更新成功的源（gitee / ghfast / github），下次优先用它
   updateFeed: '',
   alwaysOnTop: true,
@@ -136,9 +186,15 @@ module.exports = {
   NAMES,
   EM_SECID,
   HF_EM_SECID,
+  INDEX_EM_SECID,
   DEFAULT_WATCHLIST,
   PERIODS,
   PERIOD_LABEL,
+  FOCUS_INTERVALS,
+  FOCUS_INTERVAL_LABEL,
+  DEFAULT_FOCUS_INTERVALS,
+  TOP_INDEX_CODES,
+  TOP_INDEX_TITLE,
   TEXT_MODES,
   FOCUS_CHART_SIDES,
   DEFAULT_CONFIG,

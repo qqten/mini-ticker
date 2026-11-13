@@ -20,9 +20,14 @@
       <span id="f-name">--</span>
       <span id="f-zoom"></span>
       <span id="f-tabs">
+        <!-- 分时级别下拉放在「分时」左边：点开选 5/15/30/60 分钟，选完立刻换图 -->
+        <span id="f-level" role="button" tabindex="0" title="分时级别">
+          <span id="f-level-cur">5分</span><span class="caret">▾</span>
+        </span>
         <button type="button" data-tab="minute">分时</button>
         <button type="button" data-tab="five">5日</button>
         <button type="button" data-tab="day">日K</button>
+        <button type="button" data-tab="week">周K</button>
         <button type="button" data-tab="month">月K</button>
       </span>
     </div>
@@ -31,6 +36,9 @@
     <div class="edge-arrow" id="edge-l" aria-hidden="true"></div>
     <div class="edge-arrow" id="edge-r" aria-hidden="true"></div>
   </div>
+  <!-- 分时级别下拉。必须挂在 body 上：聚焦栏 #focus 带 transform 动画 + overflow:hidden，
+       放在里面会让 position:fixed 以它为参照系并被裁掉（和 #group-menu 同理） -->
+  <div id="f-level-menu" role="menu"></div>
   <script src="app.js"></script>
   <script src="chart.js"></script>
 </body>

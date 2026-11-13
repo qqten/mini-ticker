@@ -92,6 +92,7 @@ body.splitting * {
 
   /* 图表线条：亮字模式（深色桌面） */
   --chart-line: #4bb2ff;
+  --chart-index: #f4f7fb;
   --chart-avg: #f2c14e;
   --chart-ma10: #8fb4ff;
   --chart-ma20: #cf98f5;
@@ -109,6 +110,7 @@ body[data-text="dark"] {
 
   /* 图表线条：暗字模式（浅色桌面），压低亮度保证在浅背景上可读 */
   --chart-line: #0b63c4;
+  --chart-index: #10151c;
   --chart-avg: #9a6a05;
   --chart-ma10: #2f56c8;
   --chart-ma20: #7b3bb0;
@@ -135,15 +137,38 @@ body[data-text="dark"].backdrop {
 /* 当前周期标识：右上角一行小字，不占按钮、不抢视线 */
 #head {
   display: flex;
+  align-items: center;
   justify-content: flex-end;
   padding: 3px 9px 0;
   height: 15px;
   flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+/* 右侧三个控件绝不压缩、绝不换行：窗口再窄也优先保住它们 */
+#sort-btn, #period-label, #pin-btn {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+/* 左侧一组：分组名 + 指数条。吃掉右排控件之外的所有空间，
+   空间不够时由指数条收缩，分组名始终保持完整 */
+#head-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-right: auto;
+  min-width: 0;
+  flex: 1 1 auto;
 }
 
 #group-btn {
-  margin-right: auto;
-  max-width: 46%;
+  margin-right: 0;
+  min-width: 0;
+  /* 顶部空间不够时优先保住分组名，不让它被指数条挤掉 */
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
   padding: 0 4px;
   border: 0;
   border-radius: 4px;
@@ -162,6 +187,73 @@ body[data-text="dark"].backdrop {
 }
 
 #group-btn:hover { opacity: 1; color: var(--text); }
+
+#group-btn .gname {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#group-btn .gcaret { opacity: .55; font-size: 9px; }
+body.compact #group-btn .gcaret { display: none; }
+body.compact #head-left { gap: 5px; }
+
+/* 分组名右侧的指数条：短名 + 点位 + 涨跌幅，点一下出下拉 */
+#index-quote {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  /* 指数条让出空间：名字先省略，点位和涨跌幅尽量保住 */
+  flex: 0 1 auto;
+  padding: 0 3px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  font-family: inherit;
+  font-size: 10px;
+  line-height: 12px;
+  color: var(--sub);
+  text-shadow: var(--shadow);
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  transition: background .15s ease, color .15s ease;
+}
+
+#index-quote:hover {
+  background: rgba(128, 140, 160, .18);
+  color: var(--text);
+}
+
+#index-quote .iq-name {
+  opacity: .85;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#index-quote .iq-val {
+  flex: 0 0 auto;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+#index-quote .iq-pct {
+  flex: 0 0 auto;
+  font-variant-numeric: tabular-nums;
+  opacity: .95;
+}
+#index-quote .caret { flex: 0 0 auto; opacity: .55; font-size: 9px; }
+
+/* 名字已被挤到只剩一个省略号时直接隐藏，别让顶部出现「上…」 */
+body.index-name-hidden #index-quote .iq-name { display: none; }
+/* 涨跌幅被挤出按钮外时整段隐藏，避免只剩半截「+0.」 */
+body.index-pct-hidden #index-quote .iq-pct { display: none; }
+
+/* 窗口窄的时候收紧间距，点位和涨跌幅优先保住 */
+body.compact #index-quote { gap: 3px; }
+body.tight #index-quote .caret { display: none; }
+/* 极窄时指数名让位给分组名，点位和涨跌幅仍完整，全名留在 title / 下拉里 */
+body.tight #index-quote .iq-name { display: none; }
 
 #period-label {
   font-size: 10px;
@@ -266,6 +358,59 @@ body[data-text="dark"] #group-menu {
 .gm-item:hover { background: rgba(128, 140, 160, .18); color: var(--text); }
 .gm-item.on { color: var(--text); }
 .gm-item.on::before { content: "✓ "; }
+
+/* 指数下拉：每行「名称 + 点位 + 涨跌幅」，点一行就换顶部指数并展开走势 */
+#index-menu {
+  position: fixed;
+  z-index: 9999;
+  display: none;
+  min-width: 176px;
+  padding: 4px;
+  border-radius: 6px;
+  border: 1px solid rgba(140, 152, 170, .25);
+  background: rgba(20, 23, 29, .96);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, .35);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+
+body[data-text="dark"] #index-menu {
+  border-color: rgba(30, 40, 55, .18);
+  background: rgba(246, 248, 251, .97);
+}
+
+.im-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--sub);
+  font-family: inherit;
+  font-size: 11px;
+  line-height: 16px;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.im-item:hover { background: rgba(128, 140, 160, .18); color: var(--text); }
+.im-item.on { color: var(--text); }
+.im-item.on .nm::before { content: "✓ "; }
+.im-item .nm { flex: 1 1 auto; }
+.im-item .val {
+  flex: 0 0 auto;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.im-item .pct {
+  flex: 0 0 54px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
 
 /* 分组为空时列表中央的提示 */
 .empty-group {
@@ -553,7 +698,7 @@ body[data-text="dark"] #f-zoom { background: rgba(24, 32, 44, .09); }
 #f-tabs button {
   background: transparent;
   border: 0;
-  padding: 1px 6px;
+  padding: 1px 5px;
   border-radius: 4px;
   white-space: nowrap;
   color: var(--sub);
@@ -564,6 +709,8 @@ body[data-text="dark"] #f-zoom { background: rgba(24, 32, 44, .09); }
   cursor: pointer;
   text-shadow: var(--shadow);
   transition: opacity .15s ease, color .15s ease;
+  /* 六个周期挤在同一行：图表栏窄的时候允许压缩，但不换行 */
+  flex: 0 0 auto;
 }
 
 #f-tabs button:hover { opacity: .85; }
@@ -572,6 +719,90 @@ body[data-text="dark"] #f-zoom { background: rgba(24, 32, 44, .09); }
   opacity: 1;
   color: var(--text);
   background: rgba(128, 140, 160, .2);
+}
+
+/* 分时级别下拉：紧挨在「分时」左边，平时只是一小段文字，点开才出菜单 */
+#f-level {
+  /* 比周期按钮略窄一点，免得六个周期按钮被挤到换行 */
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 1px 5px;
+  margin-right: 1px;
+  border-radius: 4px;
+  color: var(--sub);
+  font-size: 10px;
+  line-height: 14px;
+  opacity: .5;
+  cursor: pointer;
+  white-space: nowrap;
+  text-shadow: var(--shadow);
+  font-variant-numeric: tabular-nums;
+  transition: opacity .15s ease, color .15s ease;
+  /* 头部整体是拖窗口手柄，这里要能点 */
+  -webkit-app-region: no-drag;
+}
+
+#f-level:hover { opacity: .9; }
+
+/* 选中级别在画分钟 K 时点亮；下拉展开时也点亮，让人知道菜单是它开出来的 */
+#f-level.on,
+#f-level.open {
+  opacity: 1;
+  color: var(--text);
+  background: rgba(128, 140, 160, .2);
+}
+
+#f-level .caret {
+  font-size: 8px;
+  opacity: .7;
+  transform: translateY(-1px);
+}
+
+/* 下拉菜单：挂在 body 上，fixed 以视口为参照（放在 #focus 里会被它的 transform 动画带偏、还被裁掉） */
+#f-level-menu {
+  display: none;
+  position: fixed;
+  /* 和 #group-menu 一个层级：浮在图表和列表之上 */
+  z-index: 9999;
+  min-width: 56px;
+  padding: 3px;
+  border-radius: 7px;
+  background: rgba(20, 24, 31, .78);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, .45);
+  -webkit-app-region: no-drag;
+}
+
+body[data-text="dark"] #f-level-menu {
+  background: rgba(248, 250, 253, .82);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, .18);
+}
+
+#f-level-menu .lm-item {
+  display: block;
+  width: 100%;
+  padding: 3px 9px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--sub);
+  font-family: inherit;
+  font-size: 11px;
+  line-height: 16px;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+  font-variant-numeric: tabular-nums;
+}
+
+#f-level-menu .lm-item:hover { background: rgba(128, 140, 160, .22); color: var(--text); }
+
+#f-level-menu .lm-item.on {
+  color: var(--text);
+  background: rgba(128, 140, 160, .28);
 }
 
 #chart {

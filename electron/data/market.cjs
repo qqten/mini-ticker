@@ -9,7 +9,7 @@ const {
   sinaSymbol,
   unescapeUnicode
 } = require('../core/symbols.cjs');
-const { NAMES, EM_SECID, HF_EM_SECID, TYPE_LABEL } = require('../core/constants.cjs');
+const { NAMES, EM_SECID, HF_EM_SECID, INDEX_EM_SECID, TYPE_LABEL } = require('../core/constants.cjs');
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36';
 
@@ -23,8 +23,26 @@ const QT_HOSTS = [
   'https://proxy.finance.qq.com/ifzqgtimg'
 ];
 
-// 新浪 K 线周期：240=日 1200=周 7200=月
-const SINA_SCALE = { day: 240, week: 1200, month: 7200 };
+// 新浪 K 线周期：5/15/30/60=分钟，240=日 1200=周 7200=月
+const SINA_SCALE = { m5: 5, m15: 15, m30: 30, m60: 60, day: 240, week: 1200, month: 7200 };
+
+// 分钟级 K 线周期 → 腾讯 fqkline 的 key 后缀（m5 / m15 / m30 / m60）与东财 klt（5 / 15 / 30 / 60）。
+// 腾讯把分钟 K 放在块内的 qfqm5 这种字段里，东财用 klt 区分，两边对不上时按这两张表转。
+const MIN_INTERVAL = { m5: 5, m15: 15, m30: 30, m60: 60 };
+
+function isMinInterval(interval) {
+  return Object.prototype.hasOwnProperty.call(MIN_INTERVAL, interval);
+}
+
+// 分钟 K 的东财 secid：外盘期货用 HF_EM_SECID，指数/个股用 INDEX_EM_SECID，
+// 其余 A 股按前缀推市场号（sh=1 / sz=0 / bj=0）。推不出来就返回空串，走腾讯。
+function minuteEmSecid(code) {
+  if (EM_SECID[code] || HF_EM_SECID[code]) return EM_SECID[code] || HF_EM_SECID[code];
+  if (INDEX_EM_SECID[code]) return INDEX_EM_SECID[code];
+  const m = /^(sh|sz|bj)(\d{6})$/.exec(code);
+  if (!m) return '';
+  return (m[1] === 'sh' ? '1.' : '0.') + m[2];
+}
 
 const NAV_TTL = 30 * 60 * 1000;
 
@@ -83,21 +101,45 @@ function buildFiveDayRows(rows) {
 
 // 新浪/腾讯日 K 聚合成月 K（东财月 K 不可用时的兜底）
 function aggregateMonthlyRows(rows) {
+  return aggregateRows(rows, function (date) {
+    const ym = date.slice(0, 7);
+    return /^\d{4}-\d{2}$/.test(ym) ? ym : '';
+  });
+}
+
+// 日 K 聚合成周 K：按 ISO 周归一，跨年的那一周不会被切成两段。
+// 新浪外盘 / 兜底日 K 没有周 K 接口时用它。
+function aggregateWeeklyRows(rows) {
+  return aggregateRows(rows, function (date) {
+    const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(date);
+    if (!m) return '';
+    const d = new Date(Date.UTC(parseInt(m[1], 10), parseInt(m[2], 10) - 1, parseInt(m[3], 10)));
+    // 归到本周四所在的年份 + 周数，ISO 8601 的做法：跨年周按多数天数归属于哪一年
+    const day = d.getUTCDay() || 7;
+    d.setUTCDate(d.getUTCDate() + 4 - day);
+    const year = d.getUTCFullYear();
+    const week = Math.ceil(((d - Date.UTC(year, 0, 1)) / 86400000 + 1) / 7);
+    return year + '-W' + (week < 10 ? '0' + week : week);
+  });
+}
+
+// 通用聚合：同一 key 内开取首根、收取尾根、高取最大、低取最小、量累加。
+// key 返回空串的行直接丢掉（坏日期）。
+function aggregateRows(rows, keyOf) {
   const list = (rows || []).slice().sort(function (a, b) {
-    return String(a[0] || '').localeCompare(String(b[0] || ''));
+    return String(emFields(a)[0] || '').localeCompare(String(emFields(b)[0] || ''));
   });
   const out = [];
   let cur = null, key = '';
   for (let i = 0; i < list.length; i++) {
-    const r = list[i];
-    const f = emFields(r);
+    const f = emFields(list[i]);
     const date = String(f[0] || '');
-    const ym = date.slice(0, 7);
-    if (!/^\d{4}-\d{2}$/.test(ym)) continue;
+    const k = keyOf(date);
+    if (!k) continue;
     const o = num(f[1]), c = num(f[2]), h = num(f[3]), l = num(f[4]), v = num(f[5]);
     if (!isFinite(o) || !isFinite(c) || !isFinite(h) || !isFinite(l)) continue;
-    if (!cur || ym !== key) {
-      key = ym;
+    if (!cur || k !== key) {
+      key = k;
       cur = [date, o, c, h, l, isFinite(v) ? v : 0];
       out.push(cur);
     } else {
@@ -491,8 +533,22 @@ function createMarket(options) {
   }
 
   // K 线原始行：[日期, 开, 收, 高, 低, 量]
-  // 外盘期货 / 美元指数走东财，月 K 用 klt=103，避免日 K 冒充月 K
+  // 周期：m5/m15/m30/m60（分时级别 K）、day、week、month。
+  // 外盘期货 / 美元指数走东财，月 K 用 klt=103、周 K 用 klt=102，避免日 K 冒充。
   async function fetchKlineRaw(code, interval, count) {
+    // 分钟 K 优先走东财：腾讯的 m5/m15 只返回当天（常常就 1~2 根），
+    // 往回翻几天必须换东财，它一次能给 320 根，港股 / 美股指数也都覆盖。
+    if (isMinInterval(interval)) {
+      const secid = minuteEmSecid(code);
+      if (secid) {
+        try {
+          const rows = mapEmKlineRows(await fetchEmKlines(secid, MIN_INTERVAL[interval], count));
+          if (rows.length) return rows;
+        } catch (error) {
+          // 东财不可用：落到下面的腾讯 / 新浪兜底。
+        }
+      }
+    }
     if (process.env.TICKER_FORCE_SINA && sinaSupported(code)) {
       try {
         const alt = await fetchSinaKline(code, interval, count);
@@ -504,31 +560,29 @@ function createMarket(options) {
     const emSecid = EM_SECID[code] || HF_EM_SECID[code];
     if (emSecid) {
       try {
-        const rows = mapEmKlineRows(await fetchEmKlines(emSecid, interval === 'month' ? 103 : 101, count));
+        const rows = mapEmKlineRows(await fetchEmKlines(emSecid, emKltOf(interval), count));
         if (rows.length) return rows;
       } catch (error) {
         // 东财不可用时，外盘继续走新浪日 K 兜底。
       }
       if (/^hf_/i.test(code)) {
         const rows = await fetchHfDailyRows(code);
+        if (isMinInterval(interval) || interval === 'week') return aggregateRowsShape(rows, interval, count);
         return interval === 'month' ? aggregateMonthlyRows(rows).slice(-count) : rows.slice(-count);
       }
       return [];
     }
-    // 未映射的外盘期货：腾讯无 K 线，走新浪外盘日K，月 K 由日 K 聚合
+    // 未映射的外盘期货：腾讯无 K 线，走新浪外盘日K，周/月 K 由日 K 聚合
     if (/^hf_/i.test(code)) {
       const rows = await fetchHfDailyRows(code);
+      if (isMinInterval(interval) || interval === 'week') return aggregateRowsShape(rows, interval, count);
       return interval === 'month' ? aggregateMonthlyRows(rows).slice(-count) : rows.slice(-count);
     }
     try {
-      const ep = code.slice(0, 2).toLowerCase() === 'us' ? 'usfqkline' : 'fqkline';
-      const url = '/appstock/app/' + ep + '/get?param=' +
-        code + ',' + interval + ',,,' + count + ',qfq';
-      const j = await fetchTencentJson(url);
-      const block = j && j.data && j.data[code];
-      const arr = block ? (block['qfq' + interval] || block[interval] || []) : [];
-      if (Array.isArray(arr) && arr.length) return arr;
+      const rows = await fetchTencentKlineRows(code, interval, count);
+      if (rows.length) return rows;
       if (!sinaSupported(code)) return [];
+      // 周 K / 分钟 K 新浪都支持自己的 scale，日 K 兜底同样可用
       const alt = await fetchSinaKline(code, interval, count);
       if (alt.length) {
         noteSinaFallback();
@@ -544,6 +598,36 @@ function createMarket(options) {
       }
       throw error;
     }
+  }
+
+  // 分钟 K 没有日 K 可聚合的兜底：直接返回空，让上层显示「暂无 K 线数据」
+  function aggregateRowsShape(rows, interval, count) {
+    if (interval === 'week') return aggregateWeeklyRows(rows).slice(-count);
+    return rows.slice(-count);
+  }
+
+  function emKltOf(interval) {
+    if (isMinInterval(interval)) return MIN_INTERVAL[interval];
+    if (interval === 'week') return 102;
+    if (interval === 'month') return 103;
+    return 101;
+  }
+
+  // 腾讯 fqkline / usfqkline：周期字段名各不一样，按块里的候选 key 依次取。
+  // 分钟 K 用 qfqm5 / m5 这种命名，新浪与腾讯的字段顺序保持一致（开收高低量）。
+  async function fetchTencentKlineRows(code, interval, count) {
+    const ep = code.slice(0, 2).toLowerCase() === 'us' ? 'usfqkline' : 'fqkline';
+    const url = '/appstock/app/' + ep + '/get?param=' +
+      code + ',' + interval + ',,,' + count + ',qfq';
+    const j = await fetchTencentJson(url);
+    const block = j && j.data && j.data[code];
+    if (!block) return [];
+    const keys = ['qfq' + interval, interval];
+    for (let i = 0; i < keys.length; i++) {
+      const arr = block[keys[i]];
+      if (Array.isArray(arr) && arr.length) return arr;
+    }
+    return [];
   }
 
   async function fetchSeries(code, period) {
@@ -660,5 +744,10 @@ module.exports = {
   QT_HOSTS,
   mapEmKlineRows,
   buildFiveDayRows,
-  aggregateMonthlyRows
+  aggregateMonthlyRows,
+  aggregateWeeklyRows,
+  aggregateRows,
+  isMinInterval,
+  MIN_INTERVAL,
+  SINA_SCALE
 };

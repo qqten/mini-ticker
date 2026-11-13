@@ -3,7 +3,7 @@ const path = require('path');
 const fs = require('fs');
 const { execFile } = require('child_process');
 
-const { NAMES, PERIODS } = require('./core/constants.cjs');
+const { NAMES, PERIODS, FOCUS_INTERVALS, FOCUS_INTERVAL_LABEL, DEFAULT_FOCUS_INTERVALS, TOP_INDEX_CODES, TOP_INDEX_TITLE } = require('./core/constants.cjs');
 const { pad2 } = require('./core/utils.cjs');
 const { isValidCode, isFundCode } = require('./core/symbols.cjs');
 const {
@@ -17,7 +17,7 @@ const { createHttp } = require('./data/http.cjs');
 const { createMarket } = require('./data/market.cjs');
 const { createFundMinuteStore } = require('./data/fund-minutes.cjs');
 const { createQuoteService } = require('./data/quote-service.cjs');
-const { createFocusService, FOCUS_TABS } = require('./data/focus.cjs');
+const { createFocusService, FOCUS_TABS, FOCUS_MIN_TAB, clampInterval } = require('./data/focus.cjs');
 const { applySettingsPatch } = require('./core/settings.cjs');
 const { clampRect, snapRect, rectInside, focusExpandBox, collapseRect, pickRememberedPosition } = require('./core/window-layout.cjs');
 
@@ -99,6 +99,40 @@ const fetchFundNav = market.fetchFundNav;
 
 function fetchAll() {
   return quoteService.fetchAll();
+}
+
+// 左上角指数条：四只指数的快照。当前分组里已经拉到的直接复用，
+// 缺的再补一次批量请求，避免每个轮询周期都重复打接口。
+const TOP_INDEX_SET = new Set(TOP_INDEX_CODES);
+
+function topIndexItem(code, src) {
+  return {
+    code: code,
+    name: (src && src.name) || TOP_INDEX_TITLE[code] || NAMES[code] || code,
+    price: src ? src.price : NaN,
+    pct: src ? src.pct : NaN,
+    change: src ? src.change : NaN,
+    prevClose: src ? src.prevClose : NaN
+  };
+}
+
+async function fetchTopIndexItems(list) {
+  const have = {};
+  (list || []).forEach(function (it) {
+    if (it && TOP_INDEX_SET.has(it.code)) have[it.code] = it;
+  });
+  const missing = TOP_INDEX_CODES.filter(function (c) { return !have[c]; });
+  let snap = {};
+  if (missing.length) {
+    try {
+      snap = await fetchSnapshots(missing);
+    } catch (error) {
+      snap = {};
+    }
+  }
+  return TOP_INDEX_CODES.map(function (c) {
+    return topIndexItem(c, have[c] || snap[c]);
+  });
 }
 
 let win = null;
@@ -857,6 +891,8 @@ ipcMain.on('settings-ready', function () { showSettingsWindow(); });
 // 聚焦不是另开窗口：直接把浮窗本身加宽加高，上面照旧是自选列表，下面挂图表。
 let focusOn = false;
 let focusCode = '';
+// 从左上角指数条打开的图表：该指数不一定在当前分组里，允许 focusList 之外单独聚焦。
+let focusExternalCode = '';
 let focusTab = 'minute';
 let focusHotkeyAcc = '';
 let focusRestore = null;      // 展开前的窗口位置尺寸，收起时原样还原
@@ -883,14 +919,27 @@ function focusList() {
   return base;
 }
 
+// 图表「分时」下拉里显示哪些级别：取设置里勾选的列表，配置坏掉时退回默认四档
+function focusLevels() {
+  const want = Array.isArray(config.focusIntervals) ? config.focusIntervals : [];
+  const out = FOCUS_INTERVALS.filter(function (n) { return want.indexOf(n) >= 0; });
+  return out.length ? out : DEFAULT_FOCUS_INTERVALS.slice();
+}
+
 function focusMeta() {
   const list = focusList();
-  const hit = focusService.peek(focusCode, focusTab);
+  const hit = focusService.peek(focusCode, focusTab, config.focusInterval);
+  // 下拉里只列设置里勾选过的级别；选中项必须在列表里，否则下拉会显示成空白
+  const levels = focusLevels();
   return {
     on: focusOn,
     code: focusCode,
     tab: focusTab,
     tabs: FOCUS_TABS,
+    // 「分时」左边的下拉：可选级别 + 当前选中级别 + 显示文案
+    levels: levels,
+    focusInterval: levels.indexOf(config.focusInterval) >= 0 ? config.focusInterval : levels[0],
+    intervalLabel: FOCUS_INTERVAL_LABEL,
     list: list,
     index: list.indexOf(focusCode),
     total: list.length,
@@ -976,8 +1025,9 @@ function scheduleFocusBounds(b) {
 function setFocus(on) {
   if (!win || win.isDestroyed()) return;
   on = !!on;
-  // 当前分组为空时不展开图表，否则会拿到一个不在列表里的默认代码去请求数据
-  if (on && !(config.symbols || []).filter(Boolean).length) {
+  // 当前分组为空时不展开图表，否则会拿到一个不在列表里的默认代码去请求数据；
+  // 从顶部指数条打开的图表不受分组限制。
+  if (on && !focusExternalCode && !(config.symbols || []).filter(Boolean).length) {
     logLine('[focus]', '当前分组为空，忽略展开');
     return;
   }
@@ -997,7 +1047,9 @@ function setFocus(on) {
 
   if (on) {
     const list = focusList();
-    if (!focusCode || list.indexOf(focusCode) < 0) {
+    if (focusExternalCode) {
+      focusCode = focusExternalCode;
+    } else if (!focusCode || list.indexOf(focusCode) < 0) {
       const first = (config.symbols || []).filter(function (c) { return list.indexOf(c) >= 0; })[0];
       focusCode = first || list[0] || 'sh000001';
     }
@@ -1027,6 +1079,7 @@ function setFocus(on) {
   }
 
   focusOn = false;
+  focusExternalCode = '';
   if (focusRestore) {
     focusClosing = true;
     skipResizeUntil = Date.now() + 600;
@@ -1087,6 +1140,14 @@ function focusStep(dir) {
   if (!focusOn) return;
   const list = focusList();
   if (!list.length) return;
+  // 从指数条打开的图表不在自选列表里：按一次方向键先回到列表首 / 尾，避免序号算出 -1。
+  if (focusExternalCode) {
+    focusExternalCode = '';
+    focusCode = list[dir > 0 ? 0 : list.length - 1];
+    logLine('[focus]', '从顶部指数回到自选 ' + focusCode);
+    pushFocusState();
+    return;
+  }
   let i = list.indexOf(focusCode);
   if (i < 0) i = 0;
   i = (i + (dir > 0 ? 1 : -1) + list.length) % list.length;
@@ -1105,16 +1166,28 @@ function focusSelect(code) {
   }
   const list = focusList();
   if (list.indexOf(code) < 0) return;
+  focusExternalCode = '';
   focusCode = code;
   logLine('[focus]', '点选标的 ' + code);
   pushFocusState();
 }
 
-function focusSetTab(tab) {
+function focusSetTab(tab, interval) {
   if (!focusOn) return;
-  if (FOCUS_TABS.indexOf(tab) < 0 || tab === focusTab) return;
+  if (FOCUS_TABS.indexOf(tab) < 0 && tab !== FOCUS_MIN_TAB) return;
+  // 下拉里选级别：只接受设置里勾选过的档位，点到没启用的档位就当没点
+  const levels = focusLevels();
+  const nextMin = interval == null ? null : clampInterval(interval);
+  const minChanged = tab === FOCUS_MIN_TAB && nextMin !== null &&
+    levels.indexOf(nextMin) >= 0 && nextMin !== config.focusInterval;
+  if (tab === FOCUS_MIN_TAB && nextMin !== null && levels.indexOf(nextMin) < 0) return;
+  if (tab === focusTab && !minChanged) return;
+  if (minChanged) {
+    config.focusInterval = nextMin;
+    saveConfig();
+  }
   focusTab = tab;
-  logLine('[focus]', '切换周期 ' + tab);
+  logLine('[focus]', '切换周期 ' + tab + (tab === FOCUS_MIN_TAB ? ' ' + config.focusInterval + '分钟' : ''));
   pushFocusState();
 }
 
@@ -1572,6 +1645,11 @@ function setPeriod(p) {
 // 当前标的被移出本组就切到本组第一个。
 function syncFocusGroup() {
   if (!focusOn) return;
+  // 指数条打开的图表不属于当前分组，切换 / 清空分组时保持原样。
+  if (focusExternalCode) {
+    pushFocusState();
+    return;
+  }
   const list = focusList();
   if (!list.length) {
     setFocus(false);
@@ -1623,6 +1701,8 @@ ipcMain.handle('get-state', function () {
     // 这三个以前漏了：冷启动时浮窗拿不到，只能退回默认值
     sparkWidth: config.sparkWidth,
     sortMode: config.sortMode,
+    showTopIndex: config.showTopIndex !== false,
+    topIndex: config.topIndex,
     locked: !!config.locked,
     alwaysOnTop: !!config.alwaysOnTop,
     shortcuts: normalizeShortcuts(config.shortcuts)
@@ -1632,11 +1712,21 @@ ipcMain.handle('get-state', function () {
 ipcMain.handle('get-quotes', async function () {
   try {
     const list = await fetchAll();
+    // 左上角指数条：关闭开关时连快照都不拉，省一次请求。
+    const indices = config.showTopIndex ? await fetchTopIndexItems(list) : [];
     // 空分组不是「行情失败」：返回空列表让渲染层显示空状态，而不是保留旧行。
     const ok = list.length === 0 || list.some(function (x) { return x.ok; });
-    return { ok: ok, list: list, period: config.period, at: Date.now() };
+    return {
+      ok: ok, list: list, period: config.period, at: Date.now(),
+      indices: indices,
+      showTopIndex: config.showTopIndex !== false,
+      topIndex: config.topIndex
+    };
   } catch (e) {
-    return { ok: false, error: e.message, list: [], period: config.period, at: Date.now() };
+    return {
+      ok: false, error: e.message, list: [], period: config.period, at: Date.now(),
+      indices: [], showTopIndex: config.showTopIndex !== false, topIndex: config.topIndex
+    };
   }
 });
 
@@ -2020,6 +2110,11 @@ function collectSettings() {
     watchlist: config.watchlist.slice(),
     names: names,
     period: config.period,
+    // 分时级别：全部可选值 + 当前勾选的列表 + 下拉当前选中的那一档
+    focusIntervals: focusLevels(),
+    focusInterval: config.focusInterval,
+    focusIntervalOptions: FOCUS_INTERVALS,
+    focusIntervalLabel: FOCUS_INTERVAL_LABEL,
     interval: config.interval,
     textMode: config.textMode,
     focusChartSide: config.focusChartSide || 'auto',
@@ -2028,6 +2123,8 @@ function collectSettings() {
     probeIntervalMs: config.probeIntervalMs != null ? config.probeIntervalMs : 4000,
     showName: config.showName !== false,
     baseline: config.baseline !== false,
+    showTopIndex: config.showTopIndex !== false,
+    topIndex: config.topIndex,
     alwaysOnTop: !!config.alwaysOnTop,
     locked: !!config.locked,
     width: config.width,
@@ -2168,7 +2265,7 @@ ipcMain.handle('focus-state', function () { return focusMeta(); });
 
 ipcMain.handle('focus-data', async function () {
   try {
-    const data = await focusService.payload(focusCode, focusTab);
+    const data = await focusService.payload(focusCode, focusTab, config.focusInterval);
     return Object.assign({ ok: true }, data);
   } catch (e) {
     logLine('[focus]', '取数失败 ' + focusCode + ' (' + focusTab + ')：' + e.message);
@@ -2177,13 +2274,16 @@ ipcMain.handle('focus-data', async function () {
 });
 
 ipcMain.on('focus-open', function (e, code) {
-  if (code && focusList().indexOf(code) >= 0) focusCode = code;
+  if (code && focusList().indexOf(code) >= 0) {
+    focusCode = code;
+    focusExternalCode = '';
+  }
   setFocus(true);
 });
 ipcMain.on('focus-toggle', function () { toggleFocus(); });
 ipcMain.on('focus-step', function (e, dir) { focusStep(dir); });
 ipcMain.on('focus-select', function (e, code) { focusSelect(code); });
-ipcMain.on('focus-tab', function (e, tab) { focusSetTab(tab); });
+ipcMain.on('focus-tab', function (e, tab, interval) { focusSetTab(tab, interval); });
 ipcMain.on('focus-split', function (e, leftW) {
   if (!isFinite(leftW)) return;
   focusSetSplit(leftW);
@@ -2196,6 +2296,34 @@ ipcMain.on('set-period', function (e, p) {
 
 ipcMain.on('set-group', function (e, id) {
   setGroup(id);
+});
+
+// 点顶部指数下拉：记住选择，并把图表切到这只指数（不受当前分组限制）。
+// 图表已经停在这只指数上时，再点一次就当收起图表，和点同一行 / Ctrl+Alt+F 一致。
+ipcMain.on('select-index', function (e, code) {
+  if (TOP_INDEX_CODES.indexOf(code) < 0) return;
+  const changed = config.topIndex !== code;
+  config.topIndex = code;
+  if (changed) saveConfig();
+  if (focusOn && focusCode === code) {
+    logLine('[index]', '再次点击当前指数，收起走势图 ' + code);
+    setFocus(false);
+    broadcast();
+    return;
+  }
+  focusCode = code;
+  // 指数正好在当前分组里就按普通自选处理，↑↓ 可以从它继续翻；
+  // 不在分组里（或分组为空）才走「单独聚焦」分支。
+  focusExternalCode = focusList().indexOf(code) >= 0 ? '' : code;
+  if (!win || win.isDestroyed()) return;
+  if (!focusOn) {
+    setFocus(true);
+  } else {
+    pushFocusState();
+    win.focus();
+  }
+  broadcast();
+  logLine('[index]', '顶部指数切换为 ' + code + '，展开走势图');
 });
 
 ipcMain.on('settings-close', function () {

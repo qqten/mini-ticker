@@ -677,8 +677,58 @@
     }
   }
 
+  /* ---- 分时级别：勾选图表「分时」下拉里能选到哪几档 ---- */
+  var FOCUS_INTERVALS_ALL = [1, 5, 15, 30, 60];
+  var FOCUS_INTERVAL_LABELS = { 1: '1分', 5: '5分', 15: '15分', 30: '30分', 60: '60分' };
+
+  // 渲染成一组复选框；至少留一项，全部取消时把刚点的那个勾回来并提示
+  function initFocusInterval(d) {
+    var box = $('focusIntervalChecks');
+    if (!box) return;
+    var all = Array.isArray(d.focusIntervalOptions) && d.focusIntervalOptions.length
+      ? d.focusIntervalOptions
+      : FOCUS_INTERVALS_ALL;
+    var checked = Array.isArray(d.focusIntervals) ? d.focusIntervals.slice() : FOCUS_INTERVALS_ALL.slice();
+    if (!checked.length) checked = all.slice();
+    var label = d.focusIntervalLabel || FOCUS_INTERVAL_LABELS;
+
+    box.innerHTML = '';
+    all.forEach(function (n) {
+      var lab = document.createElement('label');
+      lab.className = 'check';
+      var cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.value = String(n);
+      cb.checked = checked.indexOf(n) >= 0;
+      var sp = document.createElement('span');
+      sp.textContent = label[n] || n + '分';
+      lab.appendChild(cb);
+      lab.appendChild(sp);
+      cb.addEventListener('change', function () {
+        if (selectedFocusIntervals().length) return;
+        // 一个都不剩下拉就空了：把这一项勾回去，别让用户保存出一个空列表
+        cb.checked = true;
+        setFoot('至少要勾选一个分时级别', 'err');
+      });
+      box.appendChild(lab);
+    });
+  }
+
+  // 按固定顺序取当前勾选的级别（DOM 顺序就是 1/5/15/30/60）
+  function selectedFocusIntervals() {
+    var box = $('focusIntervalChecks');
+    if (!box) return FOCUS_INTERVALS_ALL.slice();
+    var out = [];
+    var cbs = box.querySelectorAll('input[type="checkbox"]');
+    for (var i = 0; i < cbs.length; i++) {
+      if (cbs[i].checked) out.push(parseInt(cbs[i].value, 10));
+    }
+    return out;
+  }
+
   function save() {
     var periodEl = document.querySelector('input[name="period"]:checked');
+    var textModeEl = document.querySelector('input[name="textMode"]:checked');
     var focusSideEl = document.querySelector('input[name="focusChartSide"]:checked');
 
     var g = activeGroup();
@@ -692,13 +742,16 @@
       activeGroupId: state.activeGroupId,
       watchlist: state.watchlist.slice(),
       period: periodEl ? periodEl.value : 'minute',
+      focusIntervals: selectedFocusIntervals(),
       interval: parseInt($('interval').value, 10),
+      textMode: textModeEl ? textModeEl.value : 'auto',
       focusChartSide: focusSideEl ? focusSideEl.value : 'auto',
       backdrop: $('backdrop').checked,
       backdropOpacity: parseInt($('backdropOpacity').value, 10),
       probeIntervalMs: parseInt($('probeIntervalSec').value, 10) * 1000,
       showName: $('showName').checked,
       baseline: $('baseline').checked,
+      showTopIndex: $('showTopIndex').checked,
       shortcuts: state.shortcuts,
       alert: {
         enabled: $('alertOn').checked,
@@ -751,6 +804,8 @@
     var p = document.querySelector('input[name="period"][value="' + d.period + '"]');
     if (p) p.checked = true;
 
+    initFocusInterval(d);
+
     var sel = $('interval');
     var v = String(d.interval);
     var found = false;
@@ -769,12 +824,15 @@
     $('backdropOpacity').value = d.backdropOpacity != null ? d.backdropOpacity : 40;
     $('backdropOpacity-val').textContent = $('backdropOpacity').value;
     $('backdropOpacity').disabled = !$('backdrop').checked;
+    var tm = document.querySelector('input[name="textMode"][value="' + (d.textMode || 'auto') + '"]');
+    if (tm) tm.checked = true;
     syncProbeUi(d.textMode);
     const pis = Math.round((d.probeIntervalMs != null ? d.probeIntervalMs : 4000) / 1000);
     $('probeIntervalSec').value = pis;
     $('probeIntervalSec-val').textContent = pis;
     $('showName').checked = d.showName !== false;
     $('baseline').checked = d.baseline !== false;
+    $('showTopIndex').checked = d.showTopIndex !== false;
     var fcs = document.querySelector('input[name="focusChartSide"][value="' + (d.focusChartSide || 'auto') + '"]');
     if (fcs) fcs.checked = true;
 
@@ -897,6 +955,15 @@
     $('backdropOpacity').disabled = !this.checked;
     window.ticker.save({ backdrop: this.checked });
   });
+  // 主题色三选一：点了立刻生效，不用等「保存并应用」
+  var textModeRadios = document.querySelectorAll('input[name="textMode"]');
+  for (var ti = 0; ti < textModeRadios.length; ti++) {
+    textModeRadios[ti].addEventListener('change', function () {
+      if (!this.checked) return;
+      syncProbeUi(this.value);
+      window.ticker.save({ textMode: this.value });
+    });
+  }
   // 聚焦图表方位同理：点了立刻生效并落盘，正在聚焦时窗口会当场重排
   var focusSideRadios = document.querySelectorAll('input[name="focusChartSide"]');
   for (var fi = 0; fi < focusSideRadios.length; fi++) {

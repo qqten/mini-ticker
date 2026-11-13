@@ -3,10 +3,20 @@
 
   var app = document.getElementById('app');
   var head = document.getElementById('head');
-  head.innerHTML = '<button id="group-btn" type="button"></button><button id="sort-btn" type="button" title="按涨跌幅排序：点一下 涨幅从高到低，再点从低到高，第三下恢复自选顺序">涨幅</button><span id="period-label"></span><svg id="pin-btn" width="10" height="12" viewBox="0 0 10 12" title="固定窗口（点击穿透，不可拖动）"><path d="M5 0C2.8 0 1 1.8 1 4c0 1.5.8 2.8 2 3.5V11l2-1.5V7.5c1.2-.7 2-2 2-3.5 0-2.2-1.8-4-2-4z"/></svg>';
+  head.innerHTML = '<div id="head-left">' +
+    '<button id="group-btn" type="button"></button>' +
+    '<button id="index-quote" type="button" title="点击切换指数并展开走势">' +
+      '<span class="iq-name"></span><span class="iq-val"></span><span class="iq-pct"></span><span class="caret">▾</span>' +
+    '</button>' +
+    '</div>' +
+    '<button id="sort-btn" type="button" title="按涨跌幅排序：点一下 涨幅从高到低，再点从低到高，第三下恢复自选顺序">涨幅</button><span id="period-label"></span><svg id="pin-btn" width="10" height="12" viewBox="0 0 10 12" title="固定窗口（点击穿透，不可拖动）"><path d="M5 0C2.8 0 1 1.8 1 4c0 1.5.8 2.8 2 3.5V11l2-1.5V7.5c1.2-.7 2-2 2-3.5 0-2.2-1.8-4-2-4z"/></svg>';
   var periodLabel = document.getElementById('period-label');
   var sortBtn = document.getElementById('sort-btn');
   var groupBtn = document.getElementById('group-btn');
+  var indexBtn = document.getElementById('index-quote');
+  var indexNameEl = indexBtn ? indexBtn.querySelector('.iq-name') : null;
+  var indexValEl = indexBtn ? indexBtn.querySelector('.iq-val') : null;
+  var indexPctEl = indexBtn ? indexBtn.querySelector('.iq-pct') : null;
   var rowMap = {};
   var PERIOD_LABEL = { minute: '分时', day: '日线', month: '月线', year: '年线' };
   var timer = null;
@@ -28,6 +38,154 @@
   groupMenu.id = 'group-menu';
   document.body.appendChild(groupMenu);
 
+  /* ---- 左上角指数条：数值 + 涨跌幅，点开切换指数 ---- */
+  var topIndex = 'sh000001';
+  var showTopIndex = true;
+  var indexQuotes = [];
+  // 图表当前展开在哪只标的上：顶部指数按钮据此决定「展开」还是「收起」
+  var focusOn = false;
+  var focusCode = '';
+  var TOP_INDEX_LABEL = {
+    sh000001: '上证指数', sz399001: '深证成指', sz399006: '创业板指', sh000688: '科创50'
+  };
+  var TOP_INDEX_MENU_LABEL = TOP_INDEX_LABEL;
+  var indexMenu = document.createElement('div');
+  indexMenu.id = 'index-menu';
+  document.body.appendChild(indexMenu);
+
+  function indexQuoteOf(code) {
+    for (var i = 0; i < indexQuotes.length; i++) {
+      if (indexQuotes[i] && indexQuotes[i].code === code) return indexQuotes[i];
+    }
+    return null;
+  }
+
+  function closeIndexMenu() {
+    indexMenu.style.display = 'none';
+  }
+
+  // 顶部只放「短名 + 点位 + 涨跌幅」，完整名称留在 title / 下拉里
+  function paintIndex() {
+    if (!indexBtn) return;
+    var on = showTopIndex !== false;
+    indexBtn.style.display = on ? '' : 'none';
+    if (!on) { closeIndexMenu(); return; }
+
+    var item = indexQuoteOf(topIndex);
+    var label = TOP_INDEX_LABEL[topIndex] || (item && item.name) || '上证指数';
+    var price = item && isFinite(item.price) ? fmtPrice(item.price, false) : '--';
+    var pct = item && isFinite(item.pct) ? item.pct : NaN;
+
+    if (indexNameEl) indexNameEl.textContent = label;
+    if (indexValEl) indexValEl.textContent = price;
+    if (indexPctEl) {
+      indexPctEl.textContent = item ? fmtPct(pct) : '--';
+      indexPctEl.className = 'iq-pct ' + clsOf(pct);
+    }
+    // 图表已经停在这只指数上时，按钮的语义变成「收起走势」
+    var focused = focusOn && focusCode === topIndex;
+    indexBtn.title = (item && item.name ? item.name : label) + ' ' + price + ' ' +
+      (item ? fmtPct(pct) : '') +
+      (focused ? '，点击收起走势' : '，点击切换指数并展开走势');
+    fitTopIndex();
+  }
+
+  // 顶部空间不够时分组名优先完整；指数名只剩一个省略号就收起来，
+  // 涨跌幅被挤出按钮外也整段隐藏，避免露出半截数字。
+  function fitTopIndex() {
+    if (!indexNameEl || !indexBtn || showTopIndex === false) return;
+    document.body.classList.remove('index-name-hidden', 'index-pct-hidden');
+    if (indexNameEl.clientWidth < 20) document.body.classList.add('index-name-hidden');
+    if (indexPctEl && indexPctEl.clientWidth > 0) {
+      if (indexPctEl.getBoundingClientRect().right > indexBtn.getBoundingClientRect().right - 1) {
+        document.body.classList.add('index-pct-hidden');
+      }
+    }
+  }
+
+  function renderIndexMenu() {
+    indexMenu.innerHTML = '';
+    var codes = ['sh000001', 'sz399001', 'sz399006', 'sh000688'];
+    codes.forEach(function (code) {
+      var item = indexQuoteOf(code);
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'im-item' + (code === topIndex ? ' on' : '');
+
+      var nm = document.createElement('span');
+      nm.className = 'nm';
+      nm.textContent = TOP_INDEX_MENU_LABEL[code] || code;
+
+      var val = document.createElement('span');
+      val.className = 'val';
+      val.textContent = item && isFinite(item.price) ? fmtPrice(item.price, false) : '--';
+
+      var pct = document.createElement('span');
+      var pv = item && isFinite(item.pct) ? item.pct : NaN;
+      pct.className = 'pct ' + clsOf(pv);
+      pct.textContent = item ? fmtPct(pv) : '--';
+
+      b.appendChild(nm);
+      b.appendChild(val);
+      b.appendChild(pct);
+      b.addEventListener('click', function (e) {
+        e.stopPropagation();
+        closeIndexMenu();
+        // 先本地更新，主进程广播回来之前顶部数字就能立刻切过去
+        topIndex = code;
+        paintIndex();
+        // 不管是不是同一只都发一次：同一只也代表「展开走势图」
+        window.ticker.selectIndex(code);
+      });
+      indexMenu.appendChild(b);
+    });
+  }
+
+  function openIndexMenu() {
+    if (!indexBtn || showTopIndex === false) return;
+    renderIndexMenu();
+    indexMenu.style.display = 'block';
+    var r = indexBtn.getBoundingClientRect();
+    var mw = indexMenu.offsetWidth;
+    var mh = indexMenu.offsetHeight;
+    var left = Math.min(Math.max(4, r.left), window.innerWidth - mw - 4);
+    var top = r.bottom + 3;
+    if (top + mh > window.innerHeight - 4) top = Math.max(4, r.top - mh - 3);
+    indexMenu.style.left = Math.round(left) + 'px';
+    indexMenu.style.top = Math.round(top) + 'px';
+  }
+
+  function toggleIndexMenu() {
+    if (indexMenu.style.display === 'block') closeIndexMenu();
+    else openIndexMenu();
+  }
+
+  if (indexBtn) {
+    indexBtn.addEventListener('click', function (e) {
+      e.stopPropagation();
+      // 图表正停在这只指数上：再点一次顶部指数就收起图表，不再弹下拉
+      if (focusOn && focusCode === topIndex) {
+        closeIndexMenu();
+        window.ticker.focusClose();
+        return;
+      }
+      toggleIndexMenu();
+    });
+  }
+
+  function applyFocusMeta(s) {
+    focusOn = !!(s && s.on);
+    focusCode = (s && s.code) || '';
+    paintIndex();
+  }
+  if (window.ticker.onFocusState) {
+    window.ticker.onFocusState(applyFocusMeta);
+    // 初始状态：页面加载时图表可能已经展开（比如上次没收起），先把语义对齐
+    if (window.ticker.focusGet) {
+      window.ticker.focusGet().then(applyFocusMeta).catch(function () {});
+    }
+  }
+
   function currentGroup() {
     for (var i = 0; i < groups.length; i++) {
       if (groups[i].id === activeGroupId) return groups[i];
@@ -42,8 +200,13 @@
   function paintGroup() {
     if (!groupBtn) return;
     var g = currentGroup();
-    groupBtn.textContent = (g ? g.name : '自选') + ' ▾';
-    groupBtn.title = '当前分组：' + (g ? g.name : '自选') + '，点击切换';
+    var name = g ? g.name : '自选';
+    // 拆成「名字 + 箭头」两段：窗口窄的时候只收箭头，给名字多留一个字
+    if (!groupBtn.querySelector('.gname')) {
+      groupBtn.innerHTML = '<span class="gname"></span><span class="gcaret"> ▾</span>';
+    }
+    groupBtn.querySelector('.gname').textContent = name;
+    groupBtn.title = '当前分组：' + name + '，点击切换';
 
     groupMenu.innerHTML = '';
     groups.forEach(function (item) {
@@ -86,14 +249,20 @@
   }
 
   document.addEventListener('click', function (e) {
-    if (groupMenu.style.display !== 'block') return;
-    if (e.target === groupBtn) return;
-    if (e.target.closest && e.target.closest('#group-menu')) return;
-    closeGroupMenu();
+    var t = e.target;
+    if (groupMenu.style.display === 'block') {
+      if (t !== groupBtn && !(t.closest && t.closest('#group-menu'))) closeGroupMenu();
+    }
+    if (indexMenu.style.display === 'block') {
+      if (t !== indexBtn && !(t.closest && t.closest('#index-menu'))) closeIndexMenu();
+    }
   });
 
   document.addEventListener('keydown', function (e) {
-    if (e.key === 'Escape') closeGroupMenu();
+    if (e.key === 'Escape') {
+      closeGroupMenu();
+      closeIndexMenu();
+    }
   });
 
   // 右端那条 short line 是宽度抓手：画在 SVG 里，天然贴着折线右边缘，不参与布局也就不会错位
@@ -293,6 +462,11 @@
           currentPeriod = res.period;
           updatePeriodLabel();
         }
+        // 左上角指数条：每次轮询一起带回来，下拉打开时直接用最新一批
+        if (Array.isArray(res.indices)) indexQuotes = res.indices;
+        if (typeof res.showTopIndex === 'boolean') showTopIndex = res.showTopIndex;
+        if (res.topIndex) topIndex = res.topIndex;
+        paintIndex();
         document.body.classList.remove('stale');
         render(res.list || []);
       } else {
@@ -357,7 +531,10 @@
     if (s.period) currentPeriod = s.period;
     if (Array.isArray(s.groups)) groups = s.groups;
     if (s.activeGroupId) activeGroupId = s.activeGroupId;
+    if (s.topIndex) topIndex = s.topIndex;
+    if (typeof s.showTopIndex === 'boolean') showTopIndex = s.showTopIndex;
     paintGroup();
+    paintIndex();
     if (s.shortcuts) rebuildShortcuts(s.shortcuts);
     if (s.sortMode && SORT_ORDER.indexOf(s.sortMode) >= 0 && s.sortMode !== sortMode) {
       sortMode = s.sortMode;
@@ -428,8 +605,10 @@
   document.addEventListener('pointerdown', function (e) {
     if (e.button !== 0) return;
     if (pinned) return; // 固定模式不响应拖动
-    if (e.target === pinBtn || e.target === sortBtn || e.target === periodLabel || e.target === groupBtn) return;
-    if (e.target.closest && e.target.closest('#group-menu')) return;
+    if (e.target === pinBtn || e.target === sortBtn || e.target === periodLabel || e.target === groupBtn || e.target === indexBtn) return;
+    // 浮层菜单都挂在 body 上（position:fixed），必须在这里挡掉，
+    // 否则 pointerdown 会一路落到最下面的 startDrag()，点菜单变成拖窗口
+    if (e.target.closest && (e.target.closest('#group-menu') || e.target.closest('#index-menu') || e.target.closest('#f-level-menu'))) return;
     if (nearEdge(e)) return;             // 窗口四边留给系统缩放
     // 图表区：只有顶部那条（票名 / 缩放倍率 / 周期按钮旁边）能按住拖窗口；
     // 图表本体留给滚轮缩放、拖动平移和十字光标，别抢它的鼠标。
@@ -543,8 +722,10 @@
     var t = e.target;
     if (suppressClick) { suppressClick = false; return; }
     // 顶部整条都是窗口拖动区：点空白处只拖窗口，不该顺手展开图表
-    if (t.closest && (t.closest('#head') || t.closest('#focus') || t.closest('#splitter') || t.closest('#group-menu'))) return;
-    if (t === pinBtn || t === sortBtn || t === periodLabel || t === groupBtn) return;
+    // 浮层菜单（分组 / 分时级别）挂在 body 下，同样不能当成"点了行"
+    if (t.closest && (t.closest('#head') || t.closest('#focus') || t.closest('#splitter') ||
+        t.closest('#group-menu') || t.closest('#index-menu') || t.closest('#f-level-menu'))) return;
+    if (t === pinBtn || t === sortBtn || t === periodLabel || t === groupBtn || t === indexBtn) return;
     // 拖着窗口跑（起点和落点差得多）不算点击，别顺手展开 / 换标的
     if (downAt && (Math.abs(e.screenX - downAt.sx) > 3 || Math.abs(e.screenY - downAt.sy) > 3 ||
       Math.abs(e.clientX - downAt.x) > 4 || Math.abs(e.clientY - downAt.y) > 4)) return;
@@ -563,6 +744,9 @@
     var w = leftEl.clientWidth;
     document.body.classList.toggle('compact', w < 300);
     document.body.classList.toggle('tight', w < 240);
+    // 宽度变了不需要改文案，指数条固定用正式名称
+    // 但可用空间变了，指数名该收就收，别把分组名挤掉
+    fitTopIndex();
     // 窗口宽度变了，折线按新空间重新收边
     applySpark(sparkWant);
   }).observe(leftEl);

@@ -76,6 +76,20 @@ const SCENARIOS = [
     config: baseConfig({ symbols: ['sh000001', 'sz399001'], watchlist: ['sh000001', 'sz399001'] })
   },
   {
+    // 外观页保留三档配色，标题改为「主题色」
+    name: 'settings-theme-color',
+    shot: 'settings',
+    screenshot: 'settings.png',
+    env: {
+      TICKER_SHOT_SETTINGS_EVAL: "(function(){" +
+        "var n=document.querySelector('.nav-item[data-target=\"appearance\"]');if(n)n.click();" +
+        "var f=document.querySelector('input[name=\"textMode\"]');" +
+        "return f?f.closest('.field').querySelector('.fl').textContent:'';})()"
+    },
+    expect: [/\[settings-eval\] 主题色/],
+    config: baseConfig({ symbols: ['sh000001'], watchlist: ['sh000001'] })
+  },
+  {
     name: 'focus',
     shot: 'focus',
     screenshot: 'focus.png',
@@ -158,6 +172,40 @@ const SCENARIOS = [
     env: { TICKER_SHOT_FOCUS_TAB: 'minute', TICKER_SHOT_CLICKROW: '1' },
     expect: [/\[focus\] 点选标的 sz399001/],
     config: baseConfig({ symbols: ['sh000001', 'sz399001'], watchlist: ['sh000001', 'sz399001'] })
+  },
+  {
+    name: 'index-click-same',
+    shot: 'focus',
+    screenshot: 'focus.png',
+    env: { TICKER_SHOT_FOCUS_TAB: 'minute', TICKER_SHOT_EVAL: "window.ticker.selectIndex('sh000001')" },
+    expect: [/再次点击当前指数，收起走势图/],
+    config: baseConfig({ symbols: ['sh000001'], watchlist: ['sh000001'] })
+  },
+  {
+    name: 'index-bar-close',
+    shot: 'focus',
+    screenshot: 'focus.png',
+    env: { TICKER_SHOT_FOCUS_TAB: 'minute', TICKER_SHOT_EVAL: "document.getElementById('index-quote').click()" },
+    expect: [/IPC focus-close/],
+    config: baseConfig({ symbols: ['sh000001'], watchlist: ['sh000001'] })
+  },
+  {
+    // 窗口偏窄时顶部优先保住分组名，指数条可以让位
+    name: 'index-group-name',
+    shot: 'main',
+    screenshot: 'self.png',
+    env: {
+      TICKER_SHOT_EVAL: "(function(){var n=document.querySelector('#group-btn .gname');" +
+        "return JSON.stringify({name:n?n.textContent:'',full:!!n&&n.clientWidth>=n.scrollWidth});})()"
+    },
+    expect: [/"full":true/],
+    config: baseConfig({
+      symbols: ['sh000001'],
+      watchlist: ['sh000001'],
+      width: 260,
+      groups: [{ id: 'default', name: '我的自选股', symbols: ['sh000001'] }],
+      activeGroupId: 'default'
+    })
   },
   {
     name: 'focus-interact',

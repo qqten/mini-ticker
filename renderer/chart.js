@@ -4,7 +4,11 @@
   /* 聚焦图表：画在原浮窗里（不另开窗口），背景保持透明，
      文字用 CSS 变量取当前亮/暗配色的颜色 + 描边光晕，压在任何桌面上都能看清。 */
 
-  var state = { on: false, code: '', tab: 'minute', index: -1, total: 0, name: '' };
+  var state = {
+    on: false, code: '', tab: 'minute', index: -1, total: 0, name: '',
+    // 分时级别：levels = 设置里勾选的档位（下拉里能选到哪些），min = 当前选中的档位
+    min: 5, levels: [5, 15, 30, 60]
+  };
   var payload = null;
   var timer = null;
   var seq = 0;
@@ -15,6 +19,17 @@
   var elName = document.getElementById('f-name');
   var elZoom = document.getElementById('f-zoom');
   var tabsEl = document.getElementById('f-tabs');
+  var elLevel = document.getElementById('f-level');
+  var elLevelCur = document.getElementById('f-level-cur');
+  var elLevelMenu = document.getElementById('f-level-menu');
+  // 下拉必须直接挂在 body 下：只要祖先有 transform / filter / backdrop-filter，
+  // position:fixed 就会改成以那个祖先为参照，还会被它的 overflow 裁掉。
+  // 聚焦栏 #focus 正好有 transform 动画（animation ... both），所以这里兜一下，
+  // 免得以后有人把菜单挪回 #focus 里又变成「点了没反应」。
+  if (elLevelMenu && elLevelMenu.parentElement !== document.body &&
+      document.body && document.body.appendChild) {
+    document.body.appendChild(elLevelMenu);
+  }
   var elEdgeL = document.getElementById('edge-l');
   var elEdgeR = document.getElementById('edge-r');
   var appEl = document.getElementById('app');
@@ -25,18 +40,24 @@
      滚轮以光标为不动点收缩/展开，纵轴跟着可见数据重新拟合；
      拖动平移只改 s/e 的位置、不改宽度。
 
-     日K 现在会拉回 1200 根历史，但默认只露最近 120 根（和以前看起来一样），
-     剩下的靠缩出去 / 往左拖才能翻到。所以「回到默认」不等于「回到整幅」：
+     各 K 线周期都会拉回一大段历史（日K 1200 根、分钟 K 320 根），
+     但默认只露最近 DEF_K_BARS 根（各周期一致），剩下的靠缩出去 / 往左拖才能翻到。
+     所以「回到默认」不等于「回到整幅」：
      defSpan 记当前这张图的默认可视比例，由渲染时按数据量算出来。 */
   var view = { s: 0, e: 1 };
   var viewTouched = false;  // 用户缩放过或拖动过；false 时每帧都贴回默认窗口
   var defSpan = 1;          // 当前图的默认可视比例
-  var DEF_DAY_BARS = 120;   // 日K 默认露出多少根
+  // 所有 K 线周期（分时级别 / 日 / 周 / 月）默认都露同样多的柱子。
+  // 以前按「一个交易日的分钟数」换算，5 分钟是 48 根、60 分钟只剩 4 根，
+  // 切换档位时柱宽和疏密跳得厉害；统一成固定根数后各档看起来一致。
+  var DEF_K_BARS = 120;     // 各周期默认露出多少根 K 线
   var lastDayN = 0;         // 上一帧日K 的总根数，用来发现「数据量变了」
+  var lastDayTab = '';      // 上一帧画的是哪个 K 线周期，换周期时重排默认窗口
 
   function resetView() {
     viewTouched = false;
     lastDayN = 0;
+    lastDayTab = '';
     view.e = 1;
     view.s = 1 - defSpan;
   }
@@ -73,6 +94,8 @@
       up: v('--up', '#ff3b46'),
       down: v('--down', '#0fb87a'),
       line: v('--chart-line', '#3ba7ff'),
+      // 上证指数分时的「白线」：深色桌面用近白，浅色桌面用近黑
+      indexLine: v('--chart-index', '#f4f7fb'),
       avg: v('--chart-avg', '#f2c14e'),
       ma10: v('--chart-ma10', '#7aa2f7'),
       ma20: v('--chart-ma20', '#c586f0'),
@@ -202,6 +225,7 @@
       '价 ' + fPrice(best.p),
       '涨跌 ' + fChg(best.p - c.prec) + '  ' + fPct(chg)
     ];
+    if (c.lead && isNum(best.a)) lines.push('领先 ' + fPrice(best.a));
     if (c.showVol) lines.push('量 ' + fVol(best.v));
     return {
       lines: lines,
@@ -304,6 +328,87 @@
 
   /* ---------------- 分时 / 5日 ---------------- */
 
+  // 分时级别的显示文案：1分 / 5分 / 15分 / 30分 / 60分
+  var INTERVAL_LABEL = { 1: '1分', 5: '5分', 15: '15分', 30: '30分', 60: '60分' };
+  function minLabel(min) { return INTERVAL_LABEL[min] || (min + '分'); }
+  // 周期顺序：←→ 轮换和数字键都按这个走。
+  // 分时级别不是独立 tab：它挂在「分时」左边的下拉上，选中后 tab 仍然是 min
+  var TAB_ORDER = ['minute', 'five', 'day', 'week', 'month'];
+  // 画着分钟 K 时，「分时」按钮保持点亮（它本来就是分时的细化）
+  function tabButtonOf(tab) { return tab === 'min' ? 'minute' : tab; }
+
+  function isCandleTab(tab) {
+    return tab === 'day' || tab === 'week' || tab === 'month' || tab === 'min';
+  }
+
+  /* ---- 分时级别下拉 ---- */
+  function levelList() {
+    var list = state.levels && state.levels.length ? state.levels : [5, 15, 30, 60];
+    return list.slice().sort(function (a, b) { return a - b; });
+  }
+
+  function paintLevel() {
+    if (elLevelCur) elLevelCur.textContent = minLabel(state.min);
+    if (elLevel) {
+      elLevel.classList.toggle('on', state.tab === 'min');
+      elLevel.title = '分时级别：点开选 ' + levelList().map(minLabel).join(' / ') +
+        '（在设置 → 行情 → 图表周期里可以增减这几档）';
+    }
+  }
+
+  function closeLevelMenu() {
+    if (elLevelMenu) elLevelMenu.style.display = 'none';
+    if (elLevel) elLevel.classList.remove('open');
+  }
+
+  function renderLevelMenu() {
+    if (!elLevelMenu) return;
+    elLevelMenu.innerHTML = '';
+    levelList().forEach(function (n) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'lm-item' + (n === state.min && state.tab === 'min' ? ' on' : '');
+      b.textContent = minLabel(n);
+      b.addEventListener('click', function (e) {
+        e.stopPropagation();
+        closeLevelMenu();
+        // 点就切过去：已经是这一档并且图就在这档上，就别白请求一次
+        if (n === state.min && state.tab === 'min') return;
+        window.ticker.focusTab('min', n);
+      });
+      elLevelMenu.appendChild(b);
+    });
+  }
+
+  function openLevelMenu() {
+    if (!elLevelMenu || !elLevel) return;
+    renderLevelMenu();
+    // 先显示再量尺寸：offsetWidth/Height 为 0 时算出来的位置会把菜单顶出窗口
+    elLevelMenu.style.display = 'block';
+    elLevel.classList.add('open');
+
+    var r = elLevel.getBoundingClientRect();
+    if (!r.width && !r.height) return;   // 聚焦没展开，按钮不可见
+    var mw = elLevelMenu.offsetWidth;
+    var mh = elLevelMenu.offsetHeight;
+
+    // 贴着按钮左边缘；右侧放不下就整体左移，始终留在窗口里
+    var left = Math.min(r.left, window.innerWidth - mw - 4);
+    left = Math.max(4, left);
+    // 默认开在按钮下方；下方空间不够就翻到上方
+    var top = r.bottom + 3;
+    if (top + mh > window.innerHeight - 4) top = Math.max(4, r.top - mh - 3);
+
+    elLevelMenu.style.left = Math.round(left) + 'px';
+    elLevelMenu.style.top = Math.round(top) + 'px';
+  }
+
+  function toggleLevelMenu() {
+    if (!elLevelMenu) return;
+    if (elLevelMenu.style.display === 'block') closeLevelMenu();
+    else openLevelMenu();
+  }
+
   function sessionTicks(code, session) {
     if (/^hk/i.test(code)) {
       return [[0, '09:30'], [100, '11:00'], [182, '13:00'], [272, '15:00'], [session - 1, '16:00']];
@@ -318,6 +423,9 @@
     var days = p.days || [];
     if (!days.length) return empty('暂无分时数据');
     var T = theme();
+    // 上证指数叠加了领先指数时才用白/黄配色：白线是加权指数，黄线是不加权领先指数
+    var isLead = p.code === 'sh000001' && p.lead === true;
+    var mainColor = isLead ? T.indexLine : T.line;
 
     var session = p.session || 242;
     // 5 日图每天占一个固定槽位。最后一天是盘中实时数据，靠左排、右边留白；
@@ -373,6 +481,11 @@
       if (pts[k].x < xs || pts[k].x > xe) continue;
       if (pts[k].p < lo) lo = pts[k].p;
       if (pts[k].p > hi) hi = pts[k].p;
+      // 领先指数（黄线）可能跑在加权指数区间之外，纵轴要一起兜住，否则会被裁掉
+      if (isLead && isNum(pts[k].a)) {
+        if (pts[k].a < lo) lo = pts[k].a;
+        if (pts[k].a > hi) hi = pts[k].a;
+      }
       if (pts[k].v > maxV) maxV = pts[k].v;
       sumV += pts[k].v;
     }
@@ -455,9 +568,17 @@
         '" stroke-width="1" opacity=".9"/>');
     });
     lineSegs.forEach(function (seg) {
-      s.push('<polyline points="' + seg.join(' ') + '" fill="none" stroke="' + T.line +
+      s.push('<polyline points="' + seg.join(' ') + '" fill="none" stroke="' + mainColor +
         '" stroke-width="1.3" stroke-linejoin="round"/>');
     });
+
+    // 上证指数黄白线图例：贴在左上角绘图区内。
+    // 左侧 x=3 是价格刻度，图例至少从 52 开始，否则会被「3734.16」压住。
+    if (isLead) {
+      var legendX = Math.max(g.padL + 2, 52);
+      s.push(txt(legendX, g.priceTop + 9, '白 上证', 'start', T.indexLine, 9));
+      s.push(txt(legendX + 44, g.priceTop + 9, '黄 领先', 'start', T.avg, 9));
+    }
 
     // 价格刻度（左）：贴在面板左边缘，画在图上
     s.push(txt(TICK_INSET, g.priceTop + 9, fx(hi), 'start', T.sub));
@@ -524,16 +645,30 @@
     s.push(crosshairSvg(g));
     s.push('</svg>');
     chartEl.innerHTML = s.join('');
-    tipCtx = { type: 'minute', g: g, X: X, Y: Y, pts: pts, days: days, session: session, total: total, prec: p.prevClose, xs: xs, xe: xe, showVol: hasVol, dataEnd: pts[pts.length - 1].x / (total - 1) };
+    tipCtx = { type: 'minute', g: g, X: X, Y: Y, pts: pts, days: days, session: session, total: total, prec: p.prevClose, xs: xs, xe: xe, showVol: hasVol, lead: isLead, dataEnd: pts[pts.length - 1].x / (total - 1) };
   }
 
-  /* ---------------- 日K / 月K（K线 + 均线 + 成交量 + MACD） ---------------- */
+  /* ---------------- K 线（日 / 周 / 月 / 分时级别） ---------------- */
+
+  // 分钟 K 的日期是 "2026-11-11 14:35"，日K 是 "2026-11-11"，周K 是那一周的收盘日。
+  // 带时间的行按「MM-DD HH:MM」，只有一个日期的行统一走 shortDate（MM-DD）；
+  // withDate=false 时只返回时间，轴上一串刻度都在同一天时不重复写日期
+  function axisDateOf(row, withDate) {
+    var s = String((row && row.d) || '');
+    var m = s.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/);
+    if (!m) return shortDate(s);
+    var hm = m[4] + ':' + m[5];
+    return withDate === false ? hm : (m[2] + '-' + m[3] + ' ' + hm);
+  }
 
   function renderDay(p) {
     var c = p.candles || [];
     if (c.length < 2) return empty('暂无 K 线数据');
     var T = theme();
     var isMonth = p.tab === 'month';
+    // 分钟 K 的粒度，只用来在左上角标「5分K」；默认窗口不按它换算（各档统一根数）
+    var isMin = p.tab === 'min';
+    var minN = isMin ? Math.max(1, parseInt(p.min, 10) || 1) : 1;
 
     var closes = c.map(function (x) { return x.c; });
     var ma5 = ma(closes, 5), ma10 = ma(closes, 10), ma20 = ma(closes, 20);
@@ -560,18 +695,25 @@
       if (rows[hvi].v > 0) { hasVol = true; break; }
     }
 
-    // 月K 120 根本来就铺得下，直接整幅；日K 默认只露最近 120 根
-    defSpan = isMonth ? 1 : Math.min(1, DEF_DAY_BARS / Math.max(1, n));
+    // 默认窗口：所有周期统一露出同样多根柱子（数据不够就全露）
+    var wantBars = Math.min(n, DEF_K_BARS);
+    defSpan = Math.min(1, Math.max(1e-6, wantBars / Math.max(1, n)));
     // 首帧数据可能还没齐（也可能换标的后根数变了）。只要当前跨度还是「默认那么多根」，
     // 就按新的总根数重排一次，否则会停在 0.8× 这种莫名其妙的倍率上
     var nChanged = lastDayN > 0 && lastDayN !== n;
     var shownBefore = (view.e - view.s) * (lastDayN || n);
-    var wasDefaultSpan = Math.abs(shownBefore - Math.min(DEF_DAY_BARS, lastDayN || n)) < 1.5;
-    if (!viewTouched || (nChanged && wasDefaultSpan && !isMonth)) {
+    var wasDefaultSpan = Math.abs(shownBefore - Math.min(wantBars, lastDayN || n)) < 1.5;
+    // 换周期（日K ↔ 周K ↔ 分钟 K）时，上一张图的跨度比例对新图没有意义：
+    // 日K 的 0.1 放到周K 上只剩几根。所以换 tab 一律回到新图的默认窗口，
+    // 同周期内（刷新、resize）才保留用户自己的缩放
+    if (!viewTouched || lastDayTab !== p.tab || (nChanged && wasDefaultSpan)) {
+      // 换 tab / 换标的后第一次画到这张图，按新图的默认窗口排一次；
+      // 排完把 viewTouched 留成 false，用户随后滚轮缩放的区间才会被每一帧保留
       view.e = 1;
       view.s = 1 - defSpan;
     }
     lastDayN = n;
+    lastDayTab = p.tab;
 
     // 可见窗口（索引，浮点）：缩放后只画这一段，纵轴也按这段重新拟合
     var xs = view.s * (n - 1);
@@ -715,6 +857,10 @@
     s.push(txt(TICK_INSET, g.priceBot - 1, fx(lo), 'start', T.sub));
     if (hasVol) s.push(txt(g.padL + 2, g.volTop + 9, '量 ' + fVol(sumV), 'start', T.sub, 9));
     s.push(txt(g.padL + 2, g.macdTop + 8, 'MACD(12,26,9)', 'start', T.sub, 8.5));
+    // 分钟 K 在左上角标一下粒度（5分K），单看柱子分不清是日K 还是 5 分钟
+    if (isMin) {
+      s.push(txt(g.padL + 2, g.priceTop + 9, minLabel(minN) + 'K', 'start', T.sub, 9));
+    }
 
     // 均线图例：贴右侧显示具体数值，光标移动时跟着变成当天的值
     var legendVals = bars.length ? bars[bars.length - 1] : null;
@@ -732,16 +878,25 @@
     legend += '</text>';
     s.push(legend);
 
-    // 横轴日期：按可见根数决定放几个，缩得很近时少放几个免得糊成一片
+    // 横轴刻度：分钟 K 要看得到「哪天几点」，日/周K 只写日期，月K 只写年月
     var visN = xe - xs + 1;
     var cnt = visN >= 40 ? 5 : visN >= 18 ? 4 : Math.max(2, Math.min(3, Math.round(visN / 6)));
-    // 超过一年就别只写 MM-DD 了：25-09 和 26-09 在轴上长得一模一样
-    var wide = isMonth || visN > 260;
+    var lastDayKey = '';
     for (var t = 0; t < cnt; t++) {
       var idx = Math.round(xs + (t * (xe - xs)) / (cnt - 1));
       idx = Math.max(0, Math.min(n - 1, idx));
-      s.push(axisLabel(Xc(idx), g.axisY,
-        wide ? shortMonth(rows[idx].d) : shortDate(rows[idx].d), g.W, T.sub));
+      var lbl;
+      if (isMin) {
+        // 同一天里的多个刻度只在第一个带上日期，后面的只写时间，免得挤成一片
+        var dayKey = String(rows[idx].d || '').slice(0, 10);
+        lbl = axisDateOf(rows[idx], dayKey !== lastDayKey);
+        lastDayKey = dayKey;
+      } else if (isMonth) {
+        lbl = shortMonth(rows[idx].d);
+      } else {
+        lbl = shortDate(rows[idx].d);
+      }
+      s.push(axisLabel(Xc(idx), g.axisY, lbl, g.W, T.sub));
     }
 
     s.push(crosshairSvg(g));
@@ -770,10 +925,13 @@
   }
 
   function paintTabs(tab) {
+    // 画分钟 K 时「分时」按钮保持点亮，级别靠左边的下拉体现
+    var active = tabButtonOf(tab);
     var bs = tabsEl.querySelectorAll('button[data-tab]');
     for (var i = 0; i < bs.length; i++) {
-      bs[i].classList.toggle('on', bs[i].getAttribute('data-tab') === tab);
+      bs[i].classList.toggle('on', bs[i].getAttribute('data-tab') === active);
     }
+    paintLevel();
   }
 
   // 当前聚焦的标的，在列表里点亮那一行
@@ -798,7 +956,7 @@
   function render() {
     if (!state.on || !payload) return;
     hideTip();
-    if (payload.tab === 'day' || payload.tab === 'month') renderDay(payload);
+    if (isCandleTab(payload.tab)) renderDay(payload);
     else renderMinute(payload);
     // defSpan 是渲染时按数据量算的，徽标和边缘箭头都得放在渲染之后同步
     syncZoomBadge();
@@ -830,7 +988,8 @@
   function schedule() {
     if (timer) clearTimeout(timer);
     if (!state.on) return;
-    var ms = state.tab === 'minute' ? 4000 : 20000;
+    // 分时 4 秒刷新一次；分钟 K 一天才换几根，给 20 秒就够，别白打接口
+    var ms = state.tab === 'minute' ? 4000 : state.tab === 'min' ? 15000 : 20000;
     timer = setTimeout(function () {
       load().then(schedule);
     }, ms);
@@ -844,10 +1003,15 @@
   function applyMeta(s) {
     if (!s) return;
     var was = state.on;
-    var sameTarget = state.code === s.code && state.tab === s.tab;
+    var nextMin = s.focusInterval != null ? parseInt(s.focusInterval, 10) || 5 : state.min;
+    // 分钟级别改了也算「换了张图」：5 分钟切 15 分钟要重新取数并重置缩放
+    var sameTarget = state.code === s.code && state.tab === s.tab && state.min === nextMin;
     state.on = !!s.on;
     state.code = s.code;
     state.tab = s.tab;
+    state.min = nextMin;
+    // 下拉里能选到哪几档，由设置决定
+    if (Array.isArray(s.levels) && s.levels.length) state.levels = s.levels;
     state.index = s.index;
     state.total = s.total;
     state.name = s.name;
@@ -883,6 +1047,7 @@
       hideTip();
       stopEdge();
       syncEdgeArrows();
+      closeLevelMenu();
       chartEl.innerHTML = '';
       return;
     }
@@ -1118,27 +1283,64 @@
     render();
   });
 
+  // 数字键 1~5 直接跳周期；Shift+↑↓ 快速切换分时级别（下拉里勾选过的那几档）
   document.addEventListener('keydown', function (e) {
     if (!state.on) return;
     var k = e.key;
-    if (k === 'ArrowUp') { e.preventDefault(); window.ticker.focusStep(-1); }
-    else if (k === 'ArrowDown') { e.preventDefault(); window.ticker.focusStep(1); }
-    else if (k === 'ArrowLeft') { e.preventDefault(); cycleTab(-1); }
+    if (k === 'ArrowUp') {
+      e.preventDefault();
+      if (e.shiftKey) stepInterval(1); else window.ticker.focusStep(-1);
+    } else if (k === 'ArrowDown') {
+      e.preventDefault();
+      if (e.shiftKey) stepInterval(-1); else window.ticker.focusStep(1);
+    } else if (k === 'ArrowLeft') { e.preventDefault(); cycleTab(-1); }
     else if (k === 'ArrowRight') { e.preventDefault(); cycleTab(1); }
     else if (k === '1') { window.ticker.focusTab('minute'); }
     else if (k === '2') { window.ticker.focusTab('five'); }
     else if (k === '3') { window.ticker.focusTab('day'); }
-    else if (k === '4') { window.ticker.focusTab('month'); }
-    else if (k === 'Escape') { e.preventDefault(); window.ticker.focusClose(); }
+    else if (k === '4') { window.ticker.focusTab('week'); }
+    else if (k === '5') { window.ticker.focusTab('month'); }
+    else if (k === 'Escape') {
+      // 下拉开着就先收下拉，再按才关图表
+      if (elLevelMenu && elLevelMenu.style.display === 'block') { closeLevelMenu(); return; }
+      e.preventDefault();
+      window.ticker.focusClose();
+    }
   });
 
-  function cycleTab(dir) {
-    var order = ['minute', 'five', 'day', 'month'];
-    var i = order.indexOf(state.tab);
+  // 在勾选过的级别里跳到上一档 / 下一档，并顺带切到分时级别图
+  function stepInterval(dir) {
+    var list = levelList();
+    var i = list.indexOf(state.min);
     if (i < 0) i = 0;
-    i = (i + dir + order.length) % order.length;
-    window.ticker.focusTab(order[i]);
+    i = (i + dir + list.length) % list.length;
+    window.ticker.focusTab('min', list[i]);
   }
+
+  function cycleTab(dir) {
+    var i = TAB_ORDER.indexOf(state.tab === 'min' ? 'minute' : state.tab);
+    if (i < 0) i = 0;
+    i = (i + dir + TAB_ORDER.length) % TAB_ORDER.length;
+    window.ticker.focusTab(TAB_ORDER[i]);
+  }
+
+  /* ---- 下拉交互：点按钮展开、点外面收起 ---- */
+  if (elLevel) {
+    elLevel.addEventListener('click', function (e) {
+      e.stopPropagation();
+      toggleLevelMenu();
+    });
+    elLevel.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleLevelMenu(); }
+    });
+  }
+
+  document.addEventListener('click', function (e) {
+    if (!elLevelMenu || elLevelMenu.style.display !== 'block') return;
+    if (e.target === elLevel || (elLevel && elLevel.contains(e.target))) return;
+    if (elLevelMenu.contains(e.target)) return;
+    closeLevelMenu();
+  });
 
   window.ticker.onFocusState(applyMeta);
 

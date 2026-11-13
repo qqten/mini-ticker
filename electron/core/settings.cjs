@@ -1,12 +1,24 @@
 'use strict';
 
-const { PERIODS, TEXT_MODES, FOCUS_CHART_SIDES } = require('./constants.cjs');
+const { PERIODS, TEXT_MODES, FOCUS_CHART_SIDES, TOP_INDEX_CODES } = require('./constants.cjs');
 const { isValidCode } = require('./symbols.cjs');
 const { clampInt } = require('./utils.cjs');
-const { isValidTime, normalizeShortcuts, sanitizeGroups } = require('./config.cjs');
+const { isValidTime, normalizeFocusInterval, normalizeFocusIntervals, normalizeTopIndex, normalizeShortcuts, sanitizeGroups } = require('./config.cjs');
 
 function patchTime(value, fallback) {
   return isValidTime(value) ? value : fallback;
+}
+
+// 下拉选中的级别：面板传了就按它（但必须在该面板勾选的列表里），
+// 没传就沿用当前值；当前值不在新列表里（用户刚把这一档取消勾选）时退回列表第一项。
+function pickFocusInterval(raw, current) {
+  const list = raw.focusIntervals === undefined
+    ? normalizeFocusIntervals(current.focusIntervals)
+    : normalizeFocusIntervals(raw.focusIntervals);
+  const want = raw.focusInterval === undefined
+    ? normalizeFocusInterval(current.focusInterval)
+    : normalizeFocusInterval(raw.focusInterval);
+  return list.indexOf(want) >= 0 ? want : list[0];
 }
 
 // 设置面板保存的唯一入口：所有范围/格式校验只在这里做，
@@ -52,12 +64,22 @@ function applySettingsPatch(current, raw) {
   });
 
   const shortcuts = normalizeShortcuts(raw.shortcuts);
+  // 面板只负责开关；具体选哪只指数由浮窗下拉决定，没传就沿用当前值。
+  const topIndex = TOP_INDEX_CODES.indexOf(raw.topIndex) >= 0
+    ? raw.topIndex
+    : normalizeTopIndex(current.topIndex);
   const patch = {
     symbols: symbols,
     groups: groups,
     activeGroupId: activeGroupId,
     watchlist: watchlist,
     period: PERIODS.indexOf(raw.period) >= 0 ? raw.period : current.period,
+    // 图表「分时」下拉里显示哪些级别：设置面板勾选的列表，没带就沿用当前值
+    focusIntervals: raw.focusIntervals === undefined
+      ? normalizeFocusIntervals(current.focusIntervals)
+      : normalizeFocusIntervals(raw.focusIntervals),
+    // 下拉当前选中的级别：必须落在上面那个列表里，否则图表打开就是个空白选择
+    focusInterval: pickFocusInterval(raw, current),
     interval: clampInt(raw.interval, current.interval, 1000, 60000),
     textMode: TEXT_MODES.indexOf(raw.textMode) >= 0 ? raw.textMode : current.textMode,
     focusChartSide: FOCUS_CHART_SIDES.indexOf(raw.focusChartSide) >= 0
@@ -68,6 +90,8 @@ function applySettingsPatch(current, raw) {
     probeIntervalMs: clampInt(raw.probeIntervalMs, current.probeIntervalMs, 1000, 15000),
     showName: raw.showName !== false,
     baseline: raw.baseline !== false,
+    showTopIndex: raw.showTopIndex !== false,
+    topIndex: topIndex,
     // 面板里已经没有「始终置顶 / 锁定位置」这两个开关了，缺省时沿用当前值，
     // 否则每次保存都会把它们重置成 false（窗口就不再置顶）。
     alwaysOnTop: raw.alwaysOnTop === undefined ? !!current.alwaysOnTop : !!raw.alwaysOnTop,

@@ -7,7 +7,10 @@ const {
   createMarket,
   mapEmKlineRows,
   buildFiveDayRows,
-  aggregateMonthlyRows
+  aggregateMonthlyRows,
+  aggregateWeeklyRows,
+  MIN_INTERVAL,
+  SINA_SCALE
 } = require('../electron/data/market.cjs');
 
 function makeHttp(handlers) {
@@ -208,8 +211,7 @@ test('fetchKlineRaw 解析腾讯 K 线，空数据时用新浪 jsonp 兜底', as
     [['2026-10-27', '1', '2', '3', '0.5', '100']]);
 });
 
-test('东财 K 线字符串行能解析，外盘月 K 用 klt=103 而不是日 K', async function () {
-  const urls = [];
+test('东财 K 线字符串行能解析，外盘月 K 用 klt=103 而不是日 K', async function () {  const urls = [];
   const http = makeHttp({
     json: function (url) {
       urls.push(url);
@@ -310,4 +312,127 @@ test('fetchFiveDay 走东财 5 分钟 K 线', async function () {
   assert.ok(urls[0].indexOf('klt=5') >= 0);
   assert.deepEqual(days.map(function (d) { return d.date; }), ['2026-11-02', '2026-11-03']);
   assert.equal(days[1].points[1].price, 20);
+});
+
+test('aggregateWeeklyRows 按 ISO 周聚合，开收高低量都对', function () {
+  // 2026-11-02 是周一，11-06 周五收盘、11-09 下一周开始
+  const weeks = aggregateWeeklyRows([
+    ['2026-11-02', 10, 11, 12, 9, 100],
+    ['2026-11-03', 11, 13, 14, 10, 200],
+    ['2026-11-06', 13, 12, 15, 11, 300],
+    ['2026-11-09', 12, 16, 17, 12, 400]
+  ]);
+  assert.equal(weeks.length, 2);
+  // 开取首根、收取尾根、高取最大、低取最小、量累加
+  assert.deepEqual(weeks[0], ['2026-11-06', 10, 12, 15, 9, 600]);
+  assert.deepEqual(weeks[1], ['2026-11-09', 12, 16, 17, 12, 400]);
+});
+
+test('aggregateWeeklyRows 丢掉坏日期，跨年周不拆成两段', function () {
+  // 2025-12-29（周一）~ 2026-01-02（周五）属于同一个 ISO 周
+  const weeks = aggregateWeeklyRows([
+    ['2025-12-29', 10, 10, 10, 10, 1],
+    ['2026-01-02', 10, 11, 12, 9, 2],
+    ['bad', 1, 2, 3, 0, 0],
+    ['2026-01-05', 11, 12, 13, 10, 4]
+  ]);
+  assert.equal(weeks.length, 2);
+  assert.equal(weeks[0][0], '2026-01-02');
+  assert.equal(weeks[0][5], 3);
+  assert.equal(weeks[1][0], '2026-01-05');
+});
+
+test('周K 走腾讯周期字段；分钟 K 腾讯只当兜底（东财先失败才轮到它）', async function () {
+  const urls = [];
+  const http = makeHttp({
+    json: function (url) {
+      urls.push(url);
+      // 东财分钟 K 返回空，才落到腾讯
+      if (url.indexOf('eastmoney.com') >= 0) return { data: { klines: [] } };
+      if (url.indexOf(',m5,') >= 0) {
+        return { data: { sh600519: { qfqm5: ['2026-11-11 14:30', '1', '2', '3', '0.5', '10'] } } };
+      }
+      return { data: { sh600519: { qfqweek: ['2026-11-06', '1', '2', '3', '0.5', '10'] } } };
+    }
+  });
+  const market = createMarket({ http: http });
+  // fetchKlineRaw 原样返回腾讯给的行（开收高低量顺序由调用方切）
+  assert.deepEqual(await market.fetchKlineRaw('sh600519', 'week', 520),
+    ['2026-11-06', '1', '2', '3', '0.5', '10']);
+  assert.deepEqual(await market.fetchKlineRaw('sh600519', 'm5', 320),
+    ['2026-11-11 14:30', '1', '2', '3', '0.5', '10']);
+  assert.ok(urls[0].indexOf('sh600519,week,,,520,qfq') >= 0);
+  // 分钟 K：先东财、后腾讯
+  assert.ok(urls[1].indexOf('eastmoney.com') >= 0 && urls[1].indexOf('klt=5') >= 0);
+  assert.ok(urls[2].indexOf('sh600519,m5,,,320,qfq') >= 0);
+});
+
+test('外盘周K 用东财 klt=102，分钟 K 用对应 klt；没有分钟数据时返回空', async function () {
+  const urls = [];
+  const http = makeHttp({
+    json: function (url) {
+      urls.push(url);
+      // 分钟 K 东财返回空，走新浪外盘日 K 也聚合不出分钟，最终是空数组
+      if (url.indexOf('klt=5') >= 0) return { data: { klines: [] } };
+      return { data: { klines: ['2026-11-06,10,11,12,9,5'] } };
+    }
+  });
+  const market = createMarket({ http: http });
+  const week = await market.fetchKlineRaw('hf_XAU', 'week', 260);
+  assert.ok(urls[0].indexOf('klt=102') >= 0);
+  assert.deepEqual(week, [['2026-11-06', 10, 11, 12, 9, 5]]);
+
+  const minRows = await market.fetchKlineRaw('hf_XAU', 'm5', 320);
+  assert.ok(urls[1].indexOf('klt=5') >= 0);
+  assert.deepEqual(minRows, []);
+});
+
+test('MIN_INTERVAL / SINA_SCALE 覆盖分时级别与周线', function () {
+  assert.deepEqual(MIN_INTERVAL, { m5: 5, m15: 15, m30: 30, m60: 60 });
+  assert.equal(SINA_SCALE.m5, 5);
+  assert.equal(SINA_SCALE.m15, 15);
+  assert.equal(SINA_SCALE.m30, 30);
+  assert.equal(SINA_SCALE.m60, 60);
+  assert.equal(SINA_SCALE.week, 1200);
+});
+
+test('分钟 K 优先走东财：A 股 / 港股 / 美股指数都能拿到多天历史', async function () {
+  const urls = [];
+  const http = makeHttp({
+    json: function (url) {
+      urls.push(url);
+      return { data: { klines: ['2026-11-11 14:30,10,11,12,9,5'] } };
+    }
+  });
+  const market = createMarket({ http: http });
+
+  // 上证指数 → 1.000001，恒生科技 → 124.HSTECH，道指 → 100.DJIA
+  const cases = [
+    ['sh000001', 'm5', '1.000001', 5],
+    ['sz000001', 'm15', '0.000001', 15],
+    ['bj899050', 'm30', '0.899050', 30],
+    ['hkHSTECH', 'm5', '124.HSTECH', 5],
+    ['usDJI', 'm60', '100.DJIA', 60],
+    ['hf_XAU', 'm5', '122.XAU', 5]
+  ];
+  for (let i = 0; i < cases.length; i++) {
+    const c = cases[i];
+    const rows = await market.fetchKlineRaw(c[0], c[1], 320);
+    assert.equal(rows.length, 1, c[0] + ' 应拿到东财分钟 K');
+    assert.ok(urls[i].indexOf('secid=' + c[2]) >= 0, c[0] + ' secid 应为 ' + c[2] + '，实际 ' + urls[i]);
+    assert.ok(urls[i].indexOf('klt=' + c[3]) >= 0, c[0] + ' klt 应为 ' + c[3]);
+    assert.ok(urls[i].indexOf('lmt=320') >= 0);
+  }
+});
+
+test('新浪外盘：东财给不出分钟 K 时返回空，不拿日 K 冒充', async function () {
+  // 东财给不出分钟数据时返回空，不能把日 K 冒充成分钟 K
+  const http = makeHttp({
+    json: function (url) {
+      if (url.indexOf('klt=') >= 0) return { data: { klines: [] } };
+      return { result: { data: [] } };
+    }
+  });
+  const market = createMarket({ http: http });
+  assert.deepEqual(await market.fetchKlineRaw('hf_GC', 'm15', 320), []);
 });

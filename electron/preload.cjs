@@ -11,6 +11,7 @@ contextBridge.exposeInMainWorld('ticker', {
   openSettings: function () { ipcRenderer.send('open-settings'); },
   setPeriod: function (p) { ipcRenderer.send('set-period', p); },
   setGroup: function (id) { ipcRenderer.send('set-group', id); },
+  selectIndex: function (code) { ipcRenderer.send('select-index', code); },
   save: function (patch) { ipcRenderer.send('save-config', patch); },
   onForceRefresh: function (fn) { ipcRenderer.on('force-refresh', fn); },
   onRefitHeight: function (fn) { ipcRenderer.on('refit-height', function () { fn(); }); },
@@ -26,7 +27,7 @@ contextBridge.exposeInMainWorld('ticker', {
   focusData: function () { return ipcRenderer.invoke('focus-data'); },
   focusStep: function (dir) { ipcRenderer.send('focus-step', dir); },
   focusSelect: function (code) { ipcRenderer.send('focus-select', code); },
-  focusTab: function (tab) { ipcRenderer.send('focus-tab', tab); },
+  focusTab: function (tab, interval) { ipcRenderer.send('focus-tab', tab, interval); },
   focusSplit: function (leftW) { ipcRenderer.send('focus-split', leftW); },
   onFocusState: function (fn) { ipcRenderer.on('focus-state', function (e, s) { fn(s); }); },
 

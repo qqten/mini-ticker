@@ -125,6 +125,22 @@ test('applySettingsPatch 校验聚焦图表位置', function () {
   assert.equal(bad.patch.focusChartSide, 'auto');
 });
 
+test('applySettingsPatch 顶部指数：没传时沿用当前，非法值回退', function () {
+  const cur = current();
+  const keep = applySettingsPatch(cur, { symbols: ['sh000001'] });
+  assert.equal(keep.patch.showTopIndex, true);
+  assert.equal(keep.patch.topIndex, 'sh000001');
+
+  const off = applySettingsPatch(cur, {
+    symbols: ['sh000001'], showTopIndex: false, topIndex: 'sz399001'
+  });
+  assert.equal(off.patch.showTopIndex, false);
+  assert.equal(off.patch.topIndex, 'sz399001');
+
+  const bad = applySettingsPatch(cur, { symbols: ['sh000001'], topIndex: 'sh600519' });
+  assert.equal(bad.patch.topIndex, 'sh000001');
+});
+
 test('applySettingsPatch 规范化快捷键，并只在全局键变化时要求重注册', function () {
   const cur = current();
   const same = applySettingsPatch(cur, {
@@ -201,7 +217,71 @@ test('applySettingsPatch 只返回设置面板负责的字段', function () {
   const result = applySettingsPatch(current(), { symbols: ['sh000001'] });
   assert.deepEqual(Object.keys(result.patch).sort(), [
     'activeGroupId', 'alert', 'alwaysOnTop', 'autoExit', 'autoStart', 'backdrop', 'backdropOpacity',
-    'baseline', 'focusChartSide', 'groups', 'interval', 'locked', 'period', 'probeIntervalMs',
-    'shortcuts', 'showName', 'symbols', 'textMode', 'watchlist', 'width'
+    'baseline', 'focusChartSide', 'focusInterval', 'focusIntervals', 'groups', 'interval', 'locked',
+    'period', 'probeIntervalMs', 'shortcuts', 'showName', 'showTopIndex', 'symbols',
+    'textMode', 'topIndex', 'watchlist', 'width'
   ]);
+});
+
+test('applySettingsPatch 校验图表分时级别列表，缺省时沿用当前值', function () {
+  const cur = current();
+  const def = applySettingsPatch(cur, { symbols: ['sh000001'] });
+  assert.deepEqual(def.patch.focusIntervals, [5, 15, 30, 60]);
+
+  // 勾选了 5 和 15：下拉只有这两档，固定按 5/15/30/60 的顺序排
+  const picked = applySettingsPatch(cur, { symbols: ['sh000001'], focusIntervals: [15, 5, 15, 7] });
+  assert.deepEqual(picked.patch.focusIntervals, [5, 15]);
+
+  // 老客户端不带这个字段：不能把用户配的列表打回默认
+  const kept = applySettingsPatch(
+    normalizeConfig(Object.assign({}, cur, { focusIntervals: [15, 30] })),
+    { symbols: ['sh000001'] }
+  );
+  assert.deepEqual(kept.patch.focusIntervals, [15, 30]);
+
+  // 全非法 / 空列表退回默认，下拉不能是空的
+  assert.deepEqual(applySettingsPatch(cur, { symbols: ['sh000001'], focusIntervals: [] }).patch.focusIntervals,
+    [5, 15, 30, 60]);
+  assert.deepEqual(applySettingsPatch(cur, { symbols: ['sh000001'], focusIntervals: ['x'] }).patch.focusIntervals,
+    [5, 15, 30, 60]);
+});
+
+test('选中级别必须落在勾选的列表里，否则退回第一项', function () {
+  const cur = current();
+  const ok = applySettingsPatch(cur, {
+    symbols: ['sh000001'], focusIntervals: [5, 15, 60], focusInterval: 15
+  });
+  assert.equal(ok.patch.focusInterval, 15);
+
+  // 15 被取消勾选了：当前的 15 不在新列表里，退回列表第一项
+  const dropped = applySettingsPatch(
+    normalizeConfig(Object.assign({}, cur, { focusIntervals: [5, 15, 30, 60], focusInterval: 15 })),
+    { symbols: ['sh000001'], focusIntervals: [5, 30, 60] }
+  );
+  assert.deepEqual(dropped.patch.focusIntervals, [5, 30, 60]);
+  assert.equal(dropped.patch.focusInterval, 5);
+
+  // 切了几档之后下拉当前值也能被记住
+  const kept = applySettingsPatch(
+    normalizeConfig(Object.assign({}, cur, { focusIntervals: [5, 15, 30, 60], focusInterval: 30 })),
+    { symbols: ['sh000001'] }
+  );
+  assert.equal(kept.patch.focusInterval, 30);
+});
+
+test('normalizeConfig 归一 focusIntervals 与 focusInterval 的配合', function () {
+  const cfg = normalizeConfig({ focusIntervals: [15, 30], focusInterval: 30 });
+  assert.deepEqual(cfg.focusIntervals, [15, 30]);
+  assert.equal(cfg.focusInterval, 30);
+
+  // 选中的级别不在列表里：退回列表第一项
+  const mismatch = normalizeConfig({ focusIntervals: [15, 30], focusInterval: 5 });
+  assert.equal(mismatch.focusInterval, 15);
+
+  assert.deepEqual(normalizeConfig({}).focusIntervals, [5, 15, 30, 60]);
+  assert.equal(normalizeConfig({}).focusInterval, 5);
+  assert.deepEqual(normalizeConfig({ focusIntervals: [1, 60] }).focusIntervals, [1, 60]);
+  // 空列表 / 全非法都退回默认四档
+  assert.deepEqual(normalizeConfig({ focusIntervals: [] }).focusIntervals, [5, 15, 30, 60]);
+  assert.deepEqual(normalizeConfig({ focusIntervals: [9, 'x'] }).focusIntervals, [5, 15, 30, 60]);
 });

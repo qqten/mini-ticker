@@ -1,20 +1,41 @@
 'use strict';
 
-const { NAMES, EM_SECID, HF_EM_SECID } = require('../core/constants.cjs');
+const {
+  NAMES, EM_SECID, HF_EM_SECID, INDEX_EM_SECID,
+  FOCUS_INTERVALS, FOCUS_INTERVAL_LABEL
+} = require('../core/constants.cjs');
 const { num } = require('../core/utils.cjs');
 const { HEADERS } = require('./market.cjs');
 
-const FOCUS_TABS = ['minute', 'five', 'day', 'month'];
+// 聚焦图表的周期：分时 / 5日 / 日K / 周K / 月K，外加可配置的分时级别 K 线。
+// 分时级别本身由一个 tab + 一个分钟数决定（config.focusInterval），
+// 所以开关键盘的 1234 仍然只切这四个基础周期，分钟级别在设置里配默认值。
+const FOCUS_TABS = ['minute', 'five', 'day', 'week', 'month'];
+const FOCUS_MIN_TAB = 'min';
 const FOCUS_SESSION_A = 242;   // A 股一个交易日：09:30-11:30 + 13:00-15:00，含首尾共 242 个分钟点
 const FOCUS_SESSION_HK = 332;  // 港股：09:30-12:00 + 13:00-16:00
 const FOCUS_SESSION_US = 392;  // 美股：09:30-16:00（东部时间）
 const FOCUS_SESSION_HF = 1440; // 外盘期货/美元指数：近乎 24 小时连续交易（实际约 1380 分钟），留足余量
-const FOCUS_TTL = { minute: 15000, five: 60000, day: 60000, month: 60000 };
+const FOCUS_TTL = { minute: 15000, five: 60000, day: 60000, week: 60000, month: 60000, min: 30000 };
 
 // 日K 往后翻要靠历史：腾讯 fqkline 实测最多给到 1200 根（约 5 年，最早 2021-11），
-// 再多就返回空。月K 120 根已经是 10 年，够看长期趋势了。
+// 再多就返回空。月K 120 根已经是 10 年，够看长期趋势了。周K 520 根正好 10 年。
 const DAY_BARS = 1200;
+const WEEK_BARS = 520;
 const MONTH_BARS = 120;
+// 分钟 K 默认拉 320 根：5 分钟级别约 6 个交易日，60 分钟级别约 3 个月，
+// 再往上拉腾讯会限流、图表也画不下。
+const MIN_BARS = 320;
+
+function clampInterval(v) {
+  const n = Number(v);
+  return FOCUS_INTERVALS.indexOf(n) >= 0 ? n : 1;
+}
+
+// 分钟级别 tab 在取数时归一成一个 K 线周期名：m5 / m15 / m30 / m60
+function minIntervalOf(minutes) {
+  return 'm' + clampInterval(minutes);
+}
 
 function sessionMinutes(code) {
   if (/^hf_/i.test(code) || /^usDXY$/i.test(code)) return FOCUS_SESSION_HF;
@@ -45,6 +66,45 @@ function parseMinuteLines(lines) {
   return pts;
 }
 
+// 东方财富 trends2 的最后一列：个股是均价，指数是不加权的领先指数（黄线）。
+// 同时放一份带日期的 key 和一份 HHMM key：单日分时用 HHMM，5 日分时用完整日期，
+// 避免多天里同一个 09:30 互相覆盖。
+function parseLeadTrends(trends) {
+  const map = new Map();
+  (trends || []).forEach(function (row) {
+    const f = String(row).split(',');
+    const m = String(f[0] || '').match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):?(\d{2})/);
+    const v = num(f[7]);
+    if (!m || !isFinite(v)) return;
+    const hm = m[4] + m[5];
+    map.set(m[1] + m[2] + m[3] + hm, v);
+    map.set(hm, v);
+  });
+  return map;
+}
+
+// 把领先指数填进分时点。13:00 这种接口缺一行的时间点沿用上一分钟，
+// 否则黄线会在午休处断开。返回是否真的填进过数据。
+function applyLeadValues(days, leadMap, multiDay) {
+  let applied = false;
+  (days || []).forEach(function (day) {
+    const dayKey = String(day.date || '').replace(/\D/g, '').slice(0, 8);
+    let last = NaN;
+    (day.points || []).forEach(function (pt) {
+      const m = String(pt.t || '').match(/^(\d{1,2}):?(\d{2})$/);
+      if (!m) return;
+      const hm = (m[1].length === 1 ? '0' : '') + m[1] + m[2];
+      const hit = leadMap.get((multiDay ? dayKey : '') + hm);
+      if (isFinite(hit)) {
+        last = hit;
+        applied = true;
+      }
+      if (isFinite(last)) pt.avg = last;
+    });
+  });
+  return applied;
+}
+
 // 聚焦图表的取数与缓存。窗口/热键/状态仍留在 main，这里只负责
 // 「给定 code + tab，拿到可渲染的数据」，方便单独测试和复用。
 function createFocusService(options) {
@@ -57,18 +117,58 @@ function createFocusService(options) {
   const ttl = Object.assign({}, FOCUS_TTL, opts.ttl || {});
   const cache = {};
 
-  async function buildPayload(code, tab) {
+  // 上证指数分时：白线用腾讯的加权指数，黄线用东财 trends2 第 8 列的领先指数。
+  // 只取指数，个股的 avg 仍然是成交量加权均价，不受影响。
+  async function fetchLeadMap(code, ndays) {
+    const secid = INDEX_EM_SECID[code];
+    if (!secid) return null;
+    const url = 'https://push2his.eastmoney.com/api/qt/stock/trends2/get?secid=' + secid +
+      '&fields1=f1,f2,f3,f4,f5,f6,f7,f8&fields2=f51,f52,f53,f54,f55,f56,f57,f58' +
+      '&iscr=0&ndays=' + ndays;
+    try {
+      const j = await http.fetchJson(url, {
+        headers: HEADERS, timeout: 4000, retries: 1, tag: 'em-lead'
+      });
+      return parseLeadTrends((j && j.data && j.data.trends) || []);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  async function buildPayload(code, tab, interval) {
     const snapP = market.fetchSnapshots([code]).catch(function () { return {}; });
+    // 黄线单独拉，和腾讯的白线并行，失败也不影响主图
+    const leadP = code === 'sh000001' && (tab === 'minute' || tab === 'five')
+      ? fetchLeadMap(code, tab === 'five' ? 5 : 1)
+      : Promise.resolve(null);
     let name = NAMES[code] || code;
     let price = NaN, pct = NaN, prevClose = NaN, change = NaN;
     let days = [];
     let candles = [];
     let session = sessionMinutes(code);
     let fiveForeign = false;
+    let tabMin = 0;
 
-    if (tab === 'day' || tab === 'month') {
-      // 日K 拉满 1200 根让用户能往回翻到 5 年前；月K 120 根就是 10 年
-      const rows = await market.fetchKlineRaw(code, tab, tab === 'day' ? DAY_BARS : MONTH_BARS);
+    if (tab === FOCUS_MIN_TAB) {
+      // 分时级别 K 线：tab 固定为 min，真正的粒度在 interval（1/5/15/30/60 分钟）
+      tabMin = clampInterval(interval);
+      const rows = await market.fetchKlineRaw(code, minIntervalOf(tabMin), MIN_BARS);
+      candles = rows.map(function (r) {
+        return { d: String(r[0]), o: num(r[1]), c: num(r[2]), h: num(r[3]), l: num(r[4]), v: num(r[5]) };
+      }).filter(function (x) { return isFinite(x.c) && isFinite(x.o) && isFinite(x.h) && isFinite(x.l); });
+      if (candles.length) {
+        const last = candles[candles.length - 1];
+        price = last.c;
+        // 涨跌幅按上一根分钟 K 收盘算，没有就走快照的昨收
+        if (candles.length > 1) prevClose = candles[candles.length - 2].c;
+        if (!isFinite(prevClose) || prevClose === 0) prevClose = last.o;
+        pct = ((price - prevClose) / prevClose) * 100;
+        change = price - prevClose;
+      }
+    } else if (tab === 'day' || tab === 'week' || tab === 'month') {
+      // 日K 拉满 1200 根让用户能往回翻到 5 年前；周K 520 根约 10 年；月K 120 根就是 10 年
+      const bars = tab === 'day' ? DAY_BARS : tab === 'week' ? WEEK_BARS : MONTH_BARS;
+      const rows = await market.fetchKlineRaw(code, tab, bars);
       candles = rows.map(function (r) {
         return { d: String(r[0]), o: num(r[1]), c: num(r[2]), h: num(r[3]), l: num(r[4]), v: num(r[5]) };
       }).filter(function (x) { return isFinite(x.c) && isFinite(x.o) && isFinite(x.h) && isFinite(x.l); });
@@ -165,6 +265,12 @@ function createFocusService(options) {
       }
     }
 
+    let leadApplied = false;
+    if (days.length) {
+      const leadMap = await leadP;
+      if (leadMap) leadApplied = applyLeadValues(days, leadMap, tab === 'five');
+    }
+
     const snap = await snapP;
     if (snap && snap[code]) {
       if (snap[code].name) name = snap[code].name;
@@ -185,26 +291,37 @@ function createFocusService(options) {
     }
     if (!isFinite(change) && isFinite(price) && isFinite(prevClose)) change = price - prevClose;
 
-    const hasData = (tab === 'day' || tab === 'month') ? candles.length > 1 : days.length > 0;
+    const isCandleTab = tab === 'day' || tab === 'week' || tab === 'month' || tab === FOCUS_MIN_TAB;
+    const hasData = isCandleTab ? candles.length > 1 : days.length > 0;
     return {
       code: code, name: name, tab: tab, session: session,
+      // 分钟级别 tab 把实际粒度一起带出去，渲染层据此画横轴和标题
+      min: tabMin,
       price: price, pct: pct, prevClose: prevClose, change: change,
+      // 上证指数分时是否成功叠加了领先指数（黄线）；失败时渲染层退回原来的均价线
+      lead: leadApplied,
       days: days, candles: candles, hasData: hasData, at: now()
     };
   }
 
-  async function payload(code, tab) {
-    const key = code + '|' + tab;
+  async function payload(code, tab, interval) {
+    // 分钟级别 tab 的缓存键要带上粒度，否则切 5 分钟 / 15 分钟会拿到上一档的数据
+    const key = tab === FOCUS_MIN_TAB
+      ? code + '|' + tab + '|' + clampInterval(interval)
+      : code + '|' + tab;
     const hit = cache[key];
     if (hit && now() - hit.at < ttl[tab]) return hit.data;
-    const data = await buildPayload(code, tab);
+    const data = await buildPayload(code, tab, interval);
     cache[key] = { at: now(), data: data };
     return data;
   }
 
   // 给 focusMeta 查名字用：只读缓存，不触发请求
-  function peek(code, tab) {
-    const hit = cache[code + '|' + tab];
+  function peek(code, tab, interval) {
+    const key = tab === FOCUS_MIN_TAB
+      ? code + '|' + tab + '|' + clampInterval(interval)
+      : code + '|' + tab;
+    const hit = cache[key];
     return hit ? hit.data : null;
   }
 
@@ -212,13 +329,20 @@ function createFocusService(options) {
     Object.keys(cache).forEach(function (key) { delete cache[key]; });
   }
 
-  return { payload, peek, clear };
+  return { payload, peek, clear, buildPayload };
 }
 
 module.exports = {
   createFocusService,
   FOCUS_TABS,
   FOCUS_TTL,
+  FOCUS_MIN_TAB,
+  FOCUS_INTERVALS,
+  FOCUS_INTERVAL_LABEL,
+  clampInterval,
+  minIntervalOf,
   sessionMinutes,
-  parseMinuteLines
+  parseMinuteLines,
+  parseLeadTrends,
+  applyLeadValues
 };

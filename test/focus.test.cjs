@@ -7,8 +7,12 @@ const {
   createFocusService,
   FOCUS_TABS,
   FOCUS_TTL,
+  FOCUS_MIN_TAB,
+  FOCUS_INTERVALS,
   sessionMinutes,
-  parseMinuteLines
+  parseMinuteLines,
+  parseLeadTrends,
+  applyLeadValues
 } = require('../electron/data/focus.cjs');
 const { HEADERS } = require('../electron/data/market.cjs');
 
@@ -223,6 +227,47 @@ test('月K payload 取 120 根（约 10 年）', async function () {
   assert.equal(data.hasData, true);
 });
 
+test('周K payload 取 520 根（约 10 年）', async function () {
+  const { service, calls } = makeService();
+  const data = await service.payload('sh600519', 'week');
+  assert.deepEqual(calls.kline, [['sh600519', 'week', 520]]);
+  assert.equal(data.tab, 'week');
+  assert.equal(data.candles.length, 3);
+  assert.equal(data.price, 1705);
+  assert.equal(data.hasData, true);
+});
+
+test('分时级别 payload 按 interval 取对应分钟 K，并把粒度带回渲染层', async function () {
+  const { service, calls } = makeService();
+  const five = await service.payload('sh600519', 'min', 5);
+  assert.deepEqual(calls.kline, [['sh600519', 'm5', 320]]);
+  assert.equal(five.tab, 'min');
+  assert.equal(five.min, 5);
+  assert.equal(five.candles.length, 3);
+  assert.equal(five.hasData, true);
+
+  await service.payload('sh600519', 'min', 15);
+  assert.deepEqual(calls.kline[1], ['sh600519', 'm15', 320]);
+
+  // 非法粒度回退 1 分钟
+  const bad = await service.payload('sh600519', 'min', 7);
+  assert.equal(bad.min, 1);
+  assert.deepEqual(calls.kline[2], ['sh600519', 'm1', 320]);
+});
+
+test('分时级别每一档单独缓存，互不串档', async function () {
+  const { service, calls } = makeService();
+  const a = await service.payload('sh600519', 'min', 5);
+  const b = await service.payload('sh600519', 'min', 60);
+  assert.ok(a !== b);
+  assert.equal(b.min, 60);
+  // 5 分钟那档还在缓存里，不会再请求一次
+  const again = await service.payload('sh600519', 'min', 5);
+  assert.equal(again, a);
+  assert.equal(calls.kline.length, 2);
+  assert.equal(service.peek('sh600519', 'min', 5).min, 5);
+});
+
 test('外盘聚焦走东财 trends2，并用快照补昨收', async function () {
   const { service, calls } = makeService({
     market: {
@@ -273,6 +318,128 @@ test('外盘分时没有成交量时 vol 为 0（伦敦金 / 美元指数）', a
   assert.ok(urls[0].indexOf('f56') >= 0);
 });
 
+test('parseLeadTrends 取东财第 8 列，并同时提供带日期和 HHMM 的 key', function () {
+  const map = parseLeadTrends([
+    '2026-11-12 09:30,3650,3650,3651,3649,100,0,3648.50',
+    '2026-11-12 09:31,3650,3655,3656,3648,200,0,3652.50',
+    'bad row',
+    '2026-11-12 09:32,3655,3656,3657,3654,300,0,'
+  ]);
+  assert.equal(map.get('202611120930'), 3648.5);
+  assert.equal(map.get('0930'), 3648.5);
+  assert.equal(map.get('202611120931'), 3652.5);
+  assert.equal(map.has('202611120932'), false);
+});
+
+test('上证指数分时把领先指数填进 avg，缺失的 13:00 沿用上一分钟', async function () {
+  const urls = [];
+  const { service } = makeService({
+    market: {
+      fetchSnapshots: async function () { return { sh000001: { name: '上证指数', price: 3660, prevClose: 3640, pct: 0.55 } }; },
+      fetchTencentJson: async function (pathAndQuery) {
+        assert.ok(pathAndQuery.indexOf('/minute/query') >= 0);
+        const qt = [];
+        qt[1] = '上证指数';
+        qt[4] = '3640.00';
+        qt[31] = '20.00';
+        qt[32] = '0.55';
+        return minuteBlock('sh000001', '20261112', [
+          '0930 3650 100 365000',
+          '0931 3655 200 730500',
+          '1300 3655 200 730500',
+          '1301 3660 300 1096500'
+        ], qt);
+      },
+      fetchKlineRaw: async function () { throw new Error('不应走K线'); }
+    },
+    http: {
+      fetchJson: async function (url) {
+        urls.push(url);
+        return {
+          data: {
+            trends: [
+              '2026-11-12 09:30,3650,3650,3651,3649,100,0,3648.50',
+              '2026-11-12 09:31,3650,3655,3656,3648,200,0,3652.50',
+              '2026-11-12 13:01,3655,3660,3661,3654,300,0,3658.50'
+            ]
+          }
+        };
+      }
+    }
+  });
+  const data = await service.payload('sh000001', 'minute');
+  assert.equal(data.lead, true);
+  assert.deepEqual(data.days[0].points.map(function (p) { return p.avg; }),
+    [3648.5, 3652.5, 3652.5, 3658.5]);
+  assert.ok(urls[0].indexOf('secid=1.000001') >= 0);
+  assert.ok(urls[0].indexOf('ndays=1') >= 0);
+});
+
+test('上证指数 5 日分时按日期匹配领先指数，不串日', async function () {
+  const urls = [];
+  const { service } = makeService({
+    market: {
+      fetchSnapshots: async function () { return { sh000001: { name: '上证指数', price: 3662 } }; },
+      fetchTencentJson: async function (pathAndQuery) {
+        assert.ok(pathAndQuery.indexOf('/day/query') >= 0);
+        return {
+          data: {
+            sh000001: {
+              data: [
+                { date: '20261111', prec: 3640, data: ['0930 3650 100 365000', '0931 3652 200 730400'] },
+                { date: '20261112', prec: 3650, data: ['0930 3660 100 366000', '0931 3662 200 732400'] }
+              ]
+            }
+          }
+        };
+      },
+      fetchKlineRaw: async function () { throw new Error('不应走K线'); }
+    },
+    http: {
+      fetchJson: async function (url) {
+        urls.push(url);
+        return {
+          data: {
+            trends: [
+              '2026-11-11 09:30,3650,3650,3651,3649,100,0,3645.50',
+              '2026-11-11 09:31,3650,3652,3653,3649,200,0,3648.50',
+              '2026-11-12 09:30,3660,3660,3661,3659,100,0,3655.50',
+              '2026-11-12 09:31,3660,3662,3663,3659,200,0,3657.50'
+            ]
+          }
+        };
+      }
+    }
+  });
+  const data = await service.payload('sh000001', 'five');
+  assert.equal(data.lead, true);
+  assert.deepEqual(data.days[0].points.map(function (p) { return p.avg; }), [3645.5, 3648.5]);
+  assert.deepEqual(data.days[1].points.map(function (p) { return p.avg; }), [3655.5, 3657.5]);
+  assert.ok(urls[0].indexOf('ndays=5') >= 0);
+});
+
+test('领先指数接口失败时退回原来的均价线', async function () {
+  const { service } = makeService({
+    market: {
+      fetchSnapshots: async function () { return { sh000001: { name: '上证指数', price: 3660 } }; },
+      fetchTencentJson: async function () {
+        return minuteBlock('sh000001', '20261112', [
+          '0930 3650 100 365000',
+          '0931 3655 200 730500'
+        ], []);
+      },
+      fetchKlineRaw: async function () { throw new Error('不应走K线'); }
+    },
+    http: {
+      fetchJson: async function () { throw new Error('东财不可用'); }
+    }
+  });
+  const data = await service.payload('sh000001', 'minute');
+  assert.equal(data.lead, false);
+  // 没有领先指数时 avg 仍然是价格×成交量算出的 VWAP
+  assert.equal(data.days[0].points[0].avg, 3650);
+});
+
 test('payload 命中缓存直到 TTL 过期，peek 只读缓存', async function () {
   let clock = 5000;
   const { service, calls } = makeService({ now: function () { return clock; } });
@@ -295,7 +462,11 @@ test('payload 命中缓存直到 TTL 过期，peek 只读缓存', async function
   assert.equal(service.peek('sh600519', 'minute'), null);
 });
 
-test('FOCUS_TABS 与 TTL 覆盖四个周期', function () {
-  assert.deepEqual(FOCUS_TABS, ['minute', 'five', 'day', 'month']);
-  assert.deepEqual(FOCUS_TTL, { minute: 15000, five: 60000, day: 60000, month: 60000 });
+test('FOCUS_TABS 与 TTL 覆盖所有周期，分时级别单独一个 tab', function () {
+  assert.deepEqual(FOCUS_TABS, ['minute', 'five', 'day', 'week', 'month']);
+  assert.equal(FOCUS_MIN_TAB, 'min');
+  assert.deepEqual(FOCUS_INTERVALS, [1, 5, 15, 30, 60]);
+  assert.deepEqual(FOCUS_TTL, {
+    minute: 15000, five: 60000, day: 60000, week: 60000, month: 60000, min: 30000
+  });
 });

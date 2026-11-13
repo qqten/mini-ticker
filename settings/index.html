@@ -75,10 +75,39 @@
           </select>
         </div>
         <p class="hint">行情刷新间隔，单位：秒。聚焦图表与主浮窗共用。</p>
+
+        <h2 style="margin-top:18px">顶部指数</h2>
+        <div class="checks">
+          <label class="check"><input type="checkbox" id="showTopIndex" /><span>在分组名右侧显示指数点位和涨跌幅</span></label>
+        </div>
+        <p class="hint">显示后点一下顶部指数，可切换上证指数 / 深证成指 / 创业板指 / 科创50，选中后同时展开对应指数走势图，图表展开时再点顶部指数即可收起；选择会记住，下次启动沿用。</p>
+
+        <h2 style="margin-top:18px">图表周期</h2>
+        <div class="field">
+          <span class="fl">分时级别</span>
+          <div class="checks" id="focusIntervalChecks"></div>
+        </div>
+        <p class="hint">勾选哪些分钟级别，图表里「分时」左边的下拉就列出哪些，最多可选 1 / 5 / 15 / 30 / 60 分钟。<br />
+          图里点下拉就能立刻切换，不用回这里；这里决定的是「能选到哪几档」。1 分钟数据量最大，东财一次只给约一天半，按需再勾。</p>
+        <div class="field">
+          <span class="fl">可用周期</span>
+          <span class="note">分时 · 5日 · 日K · 周K · 月K（+ 分时级别）</span>
+        </div>
+        <p class="hint">周期按钮在图表右上角：← → 方向键按顺序轮换，1~5 数字键直接跳；Shift+↑↓ 快速切换分时级别。</p>
       </section>
 
       <section data-cat="appearance">
         <h2>外观</h2>
+        <div class="field">
+          <span class="fl">主题色</span>
+          <div class="seg">
+            <label><input type="radio" name="textMode" value="auto" /><span>自动</span></label>
+            <label><input type="radio" name="textMode" value="light" /><span>亮色字</span></label>
+            <label><input type="radio" name="textMode" value="dark" /><span>暗色字</span></label>
+          </div>
+        </div>
+        <p class="hint">自动：实时采样窗口背后的画面，背景亮转暗色字、背景暗转亮色字。<br />
+          如果自动判定在你这台机器上不对（比如多屏、远程桌面、纯黑壁纸），直接选亮色字或暗色字锁定。</p>
         <div class="checks">
           <label class="check"><input type="checkbox" id="backdrop" /><span>加一层淡衬底</span></label>
           <label class="check"><input type="checkbox" id="showName" /><span>显示名称</span></label>
@@ -94,8 +123,7 @@
           <input type="range" id="probeIntervalSec" min="1" max="10" step="1" />
           <b id="probeIntervalSec-val">4</b>
         </div>
-        <p class="hint">单位：秒。值越小切换越灵敏，但更耗资源；拖动浮窗时自动暂停采样。<br />
-          文字颜色始终按窗口背后的实际画面自动切换：背景亮用暗色字，背景暗用亮色字。</p>
+        <p class="hint">单位：秒。值越小切换越灵敏，但更耗资源；拖动浮窗时自动暂停采样。选「自动」时这一项才生效。</p>
       </section>
 
       <section data-cat="appearance">

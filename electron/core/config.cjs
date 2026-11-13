@@ -8,7 +8,9 @@ const {
   DEFAULT_WATCHLIST,
   PERIODS,
   TEXT_MODES,
-  FOCUS_CHART_SIDES
+  FOCUS_CHART_SIDES,
+  FOCUS_INTERVALS,
+  TOP_INDEX_CODES
 } = require('./constants.cjs');
 const { sameList, clampInt } = require('./utils.cjs');
 const { isValidCode } = require('./symbols.cjs');
@@ -109,6 +111,29 @@ function isValidTime(value) {
   return h >= 0 && h <= 23 && m >= 0 && m <= 59;
 }
 
+// 分时级别的粒度：只认白名单里的分钟数，其余一律回退 1 分钟。
+function normalizeFocusInterval(value) {
+  const n = Number(value);
+  return FOCUS_INTERVALS.indexOf(n) >= 0 ? n : DEFAULT_CONFIG.focusInterval;
+}
+
+// 图表头部下拉里显示哪些级别：去重、按固定顺序排、只留合法值。
+// 全被过滤掉时退回默认列表——下拉至少要有一项，否则用户没法切级别。
+function normalizeFocusIntervals(list) {
+  const picked = {};
+  (Array.isArray(list) ? list : []).forEach(function (v) {
+    const n = Number(v);
+    if (FOCUS_INTERVALS.indexOf(n) >= 0) picked[n] = true;
+  });
+  const out = FOCUS_INTERVALS.filter(function (n) { return picked[n]; });
+  return out.length ? out : DEFAULT_CONFIG.focusIntervals.slice();
+}
+
+// 左上角指数条选中的指数：只认下拉里的四只，其余回退上证指数。
+function normalizeTopIndex(value) {
+  return TOP_INDEX_CODES.indexOf(value) >= 0 ? value : DEFAULT_CONFIG.topIndex;
+}
+
 function normalizeShortcuts(sc) {
   const def = DEFAULT_CONFIG.shortcuts;
   const out = {};
@@ -139,12 +164,21 @@ function normalizeConfig(raw) {
   cfg.watchlist = watchlist;
 
   if (PERIODS.indexOf(cfg.period) < 0) cfg.period = 'minute';
+  cfg.focusIntervals = normalizeFocusIntervals(cfg.focusIntervals);
+  // 选中的级别必须在下拉里存在，否则打开图表会是个空白选择
+  if (cfg.focusIntervals.indexOf(normalizeFocusInterval(cfg.focusInterval)) < 0) {
+    cfg.focusInterval = cfg.focusIntervals[0];
+  } else {
+    cfg.focusInterval = normalizeFocusInterval(cfg.focusInterval);
+  }
   if (TEXT_MODES.indexOf(cfg.textMode) < 0) cfg.textMode = 'auto';
   if (FOCUS_CHART_SIDES.indexOf(cfg.focusChartSide) < 0) {
     cfg.focusChartSide = DEFAULT_CONFIG.focusChartSide;
   }
   if (cfg.lastEffectiveTextMode !== 'dark') cfg.lastEffectiveTextMode = 'light';
   if (['off', 'pct-desc', 'pct-asc'].indexOf(cfg.sortMode) < 0) cfg.sortMode = 'off';
+  cfg.showTopIndex = cfg.showTopIndex !== false;
+  cfg.topIndex = normalizeTopIndex(cfg.topIndex);
 
   cfg.alert = Object.assign({}, DEFAULT_CONFIG.alert, raw.alert || {});
   if (!isValidTime(cfg.alert.time)) cfg.alert.time = DEFAULT_CONFIG.alert.time;
@@ -319,6 +353,9 @@ module.exports = {
   GROUP_NAME_MAX,
   isValidTime,
   validShortcut,
+  normalizeFocusInterval,
+  normalizeFocusIntervals,
+  normalizeTopIndex,
   normalizeShortcuts,
   sanitizeGroups,
   normalizeGroups,
