@@ -36,6 +36,7 @@ contextBridge.exposeInMainWorld('ticker', {
   saveSettings: function (patch) { return ipcRenderer.invoke('settings-save', patch); },
   validateSymbol: function (code) { return ipcRenderer.invoke('validate-symbol', code); },
   searchSymbol: function (q) { return ipcRenderer.invoke('search-symbol', q); },
+  importShare: function (link) { return ipcRenderer.invoke('import-share', link); },
   testAlert: function () { ipcRenderer.send('test-alert'); },
   closeSettings: function () { ipcRenderer.send('settings-close'); },
   previewWidth: function (w) { ipcRenderer.send('preview-width', w); },

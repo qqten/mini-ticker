@@ -276,7 +276,7 @@ test('normalizeConfig 允许当前分组为空', function () {
 test('normalizeConfig 清洗重复分组 id、空名称和非法代码', function () {
   const cfg = normalizeConfig({
     groups: [
-      { id: 'dup', name: '  一  ', symbols: ['sh000001', 'bad code', 'sh000001'] },
+      { id: 'dup', name: '  一  ', symbols: ['sh000001', 'bad code', 'em931787', 'sh000001'] },
       { id: 'dup', name: '', symbols: ['hf_XAU'] }
     ],
     activeGroupId: 'dup'
@@ -285,7 +285,7 @@ test('normalizeConfig 清洗重复分组 id、空名称和非法代码', functio
   assert.equal(cfg.groups[1].id, 'dup-2');
   assert.equal(cfg.groups[0].name, '一');
   assert.equal(cfg.groups[1].name, '分组');
-  assert.deepEqual(cfg.groups[0].symbols, ['sh000001']);
+  assert.deepEqual(cfg.groups[0].symbols, ['sh000001', 'em931787']);
   assert.deepEqual(cfg.groups[1].symbols, ['hf_XAU']);
 });
 
@@ -293,10 +293,12 @@ test('normalizeConfig 校验顶部指数开关和选中项', function () {
   const def = normalizeConfig({});
   assert.equal(def.showTopIndex, true);
   assert.equal(def.topIndex, 'sh000001');
+  assert.equal(def.showMarketOverview, true);
 
-  const off = normalizeConfig({ showTopIndex: false, topIndex: 'sz399006' });
+  const off = normalizeConfig({ showTopIndex: false, topIndex: 'sz399006', showMarketOverview: false });
   assert.equal(off.showTopIndex, false);
   assert.equal(off.topIndex, 'sz399006');
+  assert.equal(off.showMarketOverview, false);
 
   const bad = normalizeConfig({ topIndex: 'sh600519' });
   assert.equal(bad.topIndex, 'sh000001');

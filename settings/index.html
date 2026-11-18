@@ -36,12 +36,35 @@
           <button id="group-del" class="ghost tiny" type="button">删除</button>
           <button id="group-up" class="ghost tiny" type="button" title="分组上移">↑</button>
           <button id="group-down" class="ghost tiny" type="button" title="分组下移">↓</button>
+          <button id="group-import" class="ghost tiny" type="button" title="从同花顺分享链接导入分组">导入…</button>
           <label class="check"><input type="checkbox" id="show-all" /><span>全部标的</span></label>
         </div>
         <div id="group-edit" class="group-edit" hidden>
           <input id="group-name" type="text" maxlength="24" placeholder="分组名称" />
           <button id="group-edit-ok" class="primary tiny" type="button">确定</button>
           <button id="group-edit-cancel" class="ghost tiny" type="button">取消</button>
+        </div>
+        <div id="import-panel" class="import-panel" hidden>
+          <div class="import-head">
+            <input id="import-link" type="text" spellcheck="false" autocomplete="off"
+                   placeholder="粘贴同花顺自选 / 分组分享链接" />
+            <button id="import-read" class="primary tiny" type="button">读取</button>
+            <button id="import-cancel" class="ghost tiny" type="button">取消</button>
+          </div>
+          <div id="import-status" class="import-status"></div>
+          <div id="import-preview" class="import-preview" hidden>
+            <div id="import-summary" class="import-summary"></div>
+            <div class="import-target">
+              <span class="fl">导入到</span>
+              <label class="check"><input type="radio" name="import-target" id="import-target-new" value="new" /><span id="import-target-new-label">新建分组</span></label>
+              <label class="check"><input type="radio" name="import-target" id="import-target-merge" value="merge" /><span id="import-target-merge-label">合并到当前分组</span></label>
+            </div>
+            <ul id="import-list" class="import-list"></ul>
+            <div class="import-actions">
+              <span class="hint">只写入草稿，确认后记得点「保存并应用」。</span>
+              <button id="import-apply" class="primary tiny" type="button">导入到草稿</button>
+            </div>
+          </div>
         </div>
         <div class="add-row">
           <input id="code-input" type="text" spellcheck="false" autocomplete="off"
@@ -82,13 +105,20 @@
         </div>
         <p class="hint">显示后点一下顶部指数，可切换上证指数 / 深证成指 / 创业板指 / 科创50，选中后同时展开对应指数走势图，图表展开时再点顶部指数即可收起；选择会记住，下次启动沿用。</p>
 
+        <h2 style="margin-top:18px">大盘概览</h2>
+        <div class="checks">
+          <label class="check"><input type="checkbox" id="showMarketOverview" /><span>在指数条下方显示大盘概览</span></label>
+        </div>
+        <p class="hint">固定四项：涨跌家数、沪深两市总成交额、较昨日同期增减、按当前节奏预估的全天总成交额。<br />
+          窗口变窄时从右往左依次收起：预测 → 较昨 → 家数，最后只保留成交额。</p>
+
         <h2 style="margin-top:18px">图表周期</h2>
         <div class="field">
           <span class="fl">分时级别</span>
           <div class="checks" id="focusIntervalChecks"></div>
         </div>
         <p class="hint">勾选哪些分钟级别，图表里「分时」左边的下拉就列出哪些，最多可选 1 / 5 / 15 / 30 / 60 分钟。<br />
-          图里点下拉就能立刻切换，不用回这里；这里决定的是「能选到哪几档」。1 分钟数据量最大，东财一次只给约一天半，按需再勾。</p>
+          不在分钟图上时，点一下级别标识先切到当前选中的分钟图，再点一下才展开这份列表；这里决定的是「能选到哪几档」。1 分钟数据量最大，东财一次只给约一天半，按需再勾。</p>
         <div class="field">
           <span class="fl">可用周期</span>
           <span class="note">分时 · 5日 · 日K · 周K · 月K（+ 分时级别）</span>

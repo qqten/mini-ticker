@@ -5,6 +5,7 @@ const {
   FOCUS_INTERVALS, FOCUS_INTERVAL_LABEL
 } = require('../core/constants.cjs');
 const { num } = require('../core/utils.cjs');
+const { emIndexSecid, isEmIndexCode, isHkSymbol } = require('../core/symbols.cjs');
 const { HEADERS } = require('./market.cjs');
 
 // 聚焦图表的周期：分时 / 5日 / 日K / 周K / 月K，外加可配置的分时级别 K 线。
@@ -14,6 +15,8 @@ const FOCUS_TABS = ['minute', 'five', 'day', 'week', 'month'];
 const FOCUS_MIN_TAB = 'min';
 const FOCUS_SESSION_A = 242;   // A 股一个交易日：09:30-11:30 + 13:00-15:00，含首尾共 242 个分钟点
 const FOCUS_SESSION_HK = 332;  // 港股：09:30-12:00 + 13:00-16:00
+// 中证官网口径的港股主题指数：09:30-11:30 + 13:00-16:00（午休压缩），共 302 个分钟槽位
+const FOCUS_SESSION_HK_INDEX = 302;
 const FOCUS_SESSION_US = 392;  // 美股：09:30-16:00（东部时间）
 const FOCUS_SESSION_HF = 1440; // 外盘期货/美元指数：近乎 24 小时连续交易（实际约 1380 分钟），留足余量
 const FOCUS_TTL = { minute: 15000, five: 60000, day: 60000, week: 60000, month: 60000, min: 30000 };
@@ -37,11 +40,68 @@ function minIntervalOf(minutes) {
   return 'm' + clampInterval(minutes);
 }
 
-function sessionMinutes(code) {
+function sessionMinutes(code, name) {
   if (/^hf_/i.test(code) || /^usDXY$/i.test(code)) return FOCUS_SESSION_HF;
-  if (/^hk/i.test(code)) return FOCUS_SESSION_HK;
+  if (isHkSymbol(code, name)) return FOCUS_SESSION_HK;
   if (/^us/i.test(code)) return FOCUS_SESSION_US;
   return FOCUS_SESSION_A;
+}
+
+// 中证官网的港股主题指数分时：09:30-11:30 + 13:00-16:00。
+// 中证接口在 11:30-13:00 完全没有点，A 股分时也是同样口径，所以午休直接压缩掉：
+// 13:00 排在 11:30 的下一格，折线在午休处连续，不会留出一条空白。
+// 09:30 占 0、11:30 占 120、13:00 占 121、15:00 占 241、16:00 占 301。
+function hkIndexSlotOf(hm) {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(String(hm || ''));
+  if (!m) return -1;
+  const mins = parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
+  const open = 9 * 60 + 30;
+  if (mins >= open && mins <= 11 * 60 + 30) return mins - open;
+  if (mins >= 13 * 60 && mins <= 16 * 60) return 121 + mins - 13 * 60;
+  return -1;
+}
+
+// 中证官网分时：15 秒一个点，港股主题指数会一直更新到 16:00。
+// 东财 trends2 对 931787 只到 15:00，所以这类指数改用中证接口画分时。
+// 每分钟只留最后一个点（和 A 股分时的分钟收盘口径一致）。
+function parseCsindexIntraday(j) {
+  const d = j && j.data;
+  const list = (d && d.intraDayPerfList) || [];
+  if (!Array.isArray(list) || list.length < 2) return null;
+  const header = d.intraDayHeader || {};
+  const bySlot = new Map();
+  list.forEach(function (row) {
+    const hm = String((row && row.tradeTime) || '').slice(0, 5);
+    const slot = hkIndexSlotOf(hm);
+    const price = num(row && row.current);
+    if (slot < 0 || !isFinite(price)) return;
+    bySlot.set(slot, { t: hm, price: price, vol: 0 });
+  });
+  if (bySlot.size < 2) return null;
+  // 中证 15 秒数据的第一个点已经是 09:30:09 之后了，直接取会把开盘价丢掉；
+  // 用 header 的今开补 09:30，后面的分钟仍然取该分钟最后一个点。
+  const open = num(header.openToday);
+  if (isFinite(open) && open > 0) bySlot.set(0, { t: '09:30', price: open, vol: 0 });
+  const points = Array.from(bySlot.keys()).sort(function (a, b) { return a - b; })
+    .map(function (slot) {
+      const pt = bySlot.get(slot);
+      pt.slot = slot;
+      return pt;
+    });
+  // 收盘后中证会把最终收盘价回填到 header.current，16:00 那个 15 秒点可能还是暂定值。
+  // 最后一格正好是 16:00 时以 header.current 为准，保证图表终点和列表 / 标题一致。
+  const last = points[points.length - 1];
+  const close = num(header.current);
+  if (last && last.slot === FOCUS_SESSION_HK_INDEX - 1 && isFinite(close) && close > 0) {
+    last.price = close;
+  }
+  return {
+    date: String(header.tradeDate || '').slice(0, 10),
+    prevClose: num(header.closePre),
+    price: close,
+    session: FOCUS_SESSION_HK_INDEX,
+    points: points
+  };
 }
 
 // 分时原始行：`0930 3714.48 3228780 5179731313.30`（时间 价格 累计量 累计额）
@@ -135,17 +195,70 @@ function createFocusService(options) {
     }
   }
 
+  // 港股主题的 em 指数分时。中证官网能给到 16:00，东财 trends2 只到 15:00；
+  // 成交量仍从东财分钟线按分钟补（中证分时接口不带量）。
+  async function fetchHkIndexMinute(code, emSecid) {
+    const id = String(code).replace(/^em/i, '');
+    const csiUrl = 'https://www.csindex.com.cn/csindex-home/perf/index-perf-oneday?indexCode=' +
+      encodeURIComponent(id);
+    const emUrl = 'https://push2.eastmoney.com/api/qt/stock/trends2/get?secid=' + emSecid +
+      '&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56&iscr=0&ndays=1';
+    const both = await Promise.all([
+      http.fetchJson(csiUrl, {
+        headers: {
+          'User-Agent': HEADERS['User-Agent'],
+          'Referer': 'https://www.csindex.com.cn/'
+        },
+        timeout: 5000, retries: 1, tag: 'csi-minute'
+      }),
+      http.fetchJson(emUrl, {
+        headers: HEADERS, timeout: 4000, retries: 1, tag: 'em-minute'
+      }).catch(function () { return null; })
+    ]);
+    const parsed = parseCsindexIntraday(both[0]);
+    if (!parsed) return null;
+    const volMap = new Map();
+    const rows = (both[1] && both[1].data && both[1].data.trends) || [];
+    rows.forEach(function (line) {
+      const f = String(line).split(',');
+      const hm = String(f[0] || '').slice(11, 16);
+      const v = num(f[5]);
+      if (/^\d{2}:\d{2}$/.test(hm) && isFinite(v)) volMap.set(hm, v);
+    });
+    parsed.points.forEach(function (pt) { pt.vol = volMap.get(pt.t) || 0; });
+    return parsed;
+  }
+
   async function buildPayload(code, tab, interval) {
     const snapP = market.fetchSnapshots([code]).catch(function () { return {}; });
+    // em 指数要先看名称 / 币种：东财 secid 不区分港股主题和内地中证指数，
+    // 港股主题要走中证官网分时，才能一直画到 16:00。基本信息按代码缓存，不会每轮都拉。
+    const emCode = isEmIndexCode(code);
+    const csiInfoP = emCode && typeof market.fetchCsindexInfo === 'function'
+      ? market.fetchCsindexInfo(code).catch(function () { return null; })
+      : Promise.resolve(null);
+    const preSnap = emCode ? await snapP : null;
+    const csiInfo = emCode ? await csiInfoP : null;
+    const snapName = preSnap && preSnap[code] && preSnap[code].name;
+    let name = (snapName && snapName !== code ? snapName : '') ||
+      (csiInfo && csiInfo.name) || NAMES[code] || code;
+    const hk = !!(csiInfo && csiInfo.hk) || isHkSymbol(code, name);
+    // 中证口径的港股主题指数：09:30-11:30 / 13:00-16:00，午休压缩（302 槽位）。
+    // 和腾讯港股（09:30-12:00，332 槽位）区分开，免得 11:30-13:00 留出一大段空白。
+    const hkIndex = hk && emCode;
     // 黄线单独拉，和腾讯的白线并行，失败也不影响主图
     const leadP = code === 'sh000001' && (tab === 'minute' || tab === 'five')
       ? fetchLeadMap(code, tab === 'five' ? 5 : 1)
       : Promise.resolve(null);
-    let name = NAMES[code] || code;
     let price = NaN, pct = NaN, prevClose = NaN, change = NaN;
     let days = [];
     let candles = [];
-    let session = sessionMinutes(code);
+    let session = sessionMinutes(code, name);
+    let marketTag = hk ? 'hk' : (/^us/i.test(code) ? 'us' : (/^hf_/i.test(code) ? 'hf' : 'a'));
+    if (hkIndex) {
+      session = FOCUS_SESSION_HK_INDEX;
+      marketTag = 'hk-index';
+    }
     let fiveForeign = false;
     let tabMin = 0;
 
@@ -182,19 +295,61 @@ function createFocusService(options) {
       }
     } else if (tab === 'five') {
       // 外盘期货 / 美元指数：腾讯没有 5 日分时，用东财 5 分钟 K 线拼最近 5 个交易日
-      const emSecid = EM_SECID[code] || HF_EM_SECID[code];
+      const emSecid = EM_SECID[code] || HF_EM_SECID[code] || emIndexSecid(code);
       if (emSecid && typeof market.fetchFiveDay === 'function') {
         days = await market.fetchFiveDay(code);
         fiveForeign = true;
         if (days.length) {
-          // 5 分钟粒度每天点数比 A 股少，横轴按实际最大点数排，避免每天只占一小截
-          let maxPts = 0;
-          for (let i = 0; i < days.length; i++) {
-            if (days[i].points.length > maxPts) maxPts = days[i].points.length;
+          if (hkIndex) {
+            // 今天这段换成中证分时（1 分钟粒度，能到 16:00），并且带上 09:30 开盘。
+            // 前 4 天用东财 5 分钟 K，它把 15:00-16:00 压缩进最后一根，映射时摆到 16:00。
+            // 所有点按真实时钟摆进 302 槽位，和分时 tab 的口径一致。
+            let csi = null;
+            try { csi = await fetchHkIndexMinute(code, emSecid); } catch (error) { csi = null; }
+            if (csi && csi.points.length) {
+              const tail = days[days.length - 1];
+              if (tail.date === csi.date) {
+                tail.points = csi.points;
+              } else if (csi.date > tail.date) {
+                days.push({
+                  date: csi.date,
+                  prec: tail.points.length ? tail.points[tail.points.length - 1].price : csi.prevClose,
+                  points: csi.points
+                });
+              }
+            }
+            days.forEach(function (d) {
+              const lastIdx = d.points.length - 1;
+              d.points = d.points.filter(function (pt, idx) {
+                if (!isFinite(pt.slot)) {
+                  // 东财 5 分钟 K 把港股 15:00-16:00 这一小时压缩进最后一根 15:00 K：
+                  // 成交量是普通 5 分钟 K 的 20 多倍，收盘价就是当天收盘价。
+                  // 所以最后一根要摆到 16:00，前 4 天才能画到收盘，而不是停在 15:00。
+                  if (idx === lastIdx && pt.t === '15:00') {
+                    pt.slot = FOCUS_SESSION_HK_INDEX - 1;
+                    pt.t = '16:00';
+                  } else {
+                    pt.slot = hkIndexSlotOf(pt.t);
+                  }
+                }
+                return pt.slot >= 0 && isFinite(pt.price);
+              });
+            });
+            days = days.filter(function (d) { return d.points.length > 1; });
+            session = FOCUS_SESSION_HK_INDEX;
+            marketTag = 'hk-index';
+          } else {
+            // 5 分钟粒度每天点数比 A 股少，横轴按实际最大点数排，避免每天只占一小截
+            let maxPts = 0;
+            for (let i = 0; i < days.length; i++) {
+              if (days[i].points.length > maxPts) maxPts = days[i].points.length;
+            }
+            session = maxPts || session;
           }
-          session = maxPts || session;
-          const lastPts = days[days.length - 1].points;
-          price = lastPts[lastPts.length - 1].price;
+          if (days.length) {
+            const lastPts = days[days.length - 1].points;
+            price = lastPts[lastPts.length - 1].price;
+          }
           // 昨收和涨跌幅以快照（昨结）为准，后面统一补，和列表保持一致
         }
       } else {
@@ -221,8 +376,27 @@ function createFocusService(options) {
       }
     } else {
       // 外盘期货 / 美元指数：腾讯没有分时，走东财 trends2（与主浮窗一致）
-      const emSecid = EM_SECID[code] || HF_EM_SECID[code];
-      if (emSecid) {
+      const emSecid = EM_SECID[code] || HF_EM_SECID[code] || emIndexSecid(code);
+      let usedCsi = false;
+      // 港股主题的中证指数：东财只到 15:00，改用中证官网分时画到 16:00
+      if (emSecid && hk && isEmIndexCode(code)) {
+        try {
+          const csi = await fetchHkIndexMinute(code, emSecid);
+          if (csi) {
+            days = [{ date: csi.date, prec: csi.prevClose, points: csi.points }];
+            price = csi.price;
+            prevClose = csi.prevClose;
+            if (isFinite(price) && isFinite(prevClose) && prevClose) {
+              pct = ((price - prevClose) / prevClose) * 100;
+              change = price - prevClose;
+            }
+            usedCsi = true;
+          }
+        } catch (error) {
+          // 中证接口不可用：落回东财分时（画到 15:00）
+        }
+      }
+      if (emSecid && !usedCsi) {
         const url = 'https://push2.eastmoney.com/api/qt/stock/trends2/get?secid=' + emSecid +
           '&fields1=f1,f2,f3,f4,f5,f6,f7,f8&fields2=f51,f52,f53,f54,f55,f56,f57,f58&iscr=0&ndays=1';
         const j = await http.fetchJson(url, {
@@ -245,7 +419,7 @@ function createFocusService(options) {
           price = lastPt.price;
           // trends2 里没有昨收列，prevClose/pct/change 交给下方 snap 快照填充
         }
-      } else {
+      } else if (!emSecid) {
         const j = await market.fetchTencentJson('/appstock/app/minute/query?code=' + encodeURIComponent(code));
         const block = j && j.data && j.data[code];
         const lines = (block && block.data && block.data.data) || [];
@@ -295,6 +469,8 @@ function createFocusService(options) {
     const hasData = isCandleTab ? candles.length > 1 : days.length > 0;
     return {
       code: code, name: name, tab: tab, session: session,
+      // 市场：分时横轴按港股 / 美股 / A 股的交易时段画刻度（em 港股指数也能认出来）
+      market: marketTag,
       // 分钟级别 tab 把实际粒度一起带出去，渲染层据此画横轴和标题
       min: tabMin,
       price: price, pct: pct, prevClose: prevClose, change: change,
@@ -342,6 +518,8 @@ module.exports = {
   clampInterval,
   minIntervalOf,
   sessionMinutes,
+  hkIndexSlotOf,
+  parseCsindexIntraday,
   parseMinuteLines,
   parseLeadTrends,
   applyLeadValues

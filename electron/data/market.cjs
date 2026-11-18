@@ -7,7 +7,8 @@ const {
   isValidCode,
   sinaSupported,
   sinaSymbol,
-  unescapeUnicode
+  unescapeUnicode,
+  emIndexSecid
 } = require('../core/symbols.cjs');
 const { NAMES, EM_SECID, HF_EM_SECID, INDEX_EM_SECID, TYPE_LABEL } = require('../core/constants.cjs');
 
@@ -16,6 +17,7 @@ const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/
 const HEADERS = { 'User-Agent': UA, 'Referer': 'https://gu.qq.com/' };
 const SINA_HEADERS = { 'User-Agent': UA, 'Referer': 'https://finance.sina.com.cn/' };
 const FUND_HEADERS = { 'User-Agent': UA, 'Referer': 'https://fund.eastmoney.com/' };
+const CSI_HEADERS = { 'User-Agent': UA, 'Referer': 'https://www.csindex.com.cn/' };
 
 // 腾讯行情有两个等价入口：主域名被 WAF 拦就换备用域名，数据格式完全一致
 const QT_HOSTS = [
@@ -39,6 +41,7 @@ function isMinInterval(interval) {
 function minuteEmSecid(code) {
   if (EM_SECID[code] || HF_EM_SECID[code]) return EM_SECID[code] || HF_EM_SECID[code];
   if (INDEX_EM_SECID[code]) return INDEX_EM_SECID[code];
+  if (emIndexSecid(code)) return emIndexSecid(code);
   const m = /^(sh|sz|bj)(\d{6})$/.exec(code);
   if (!m) return '';
   return (m[1] === 'sh' ? '1.' : '0.') + m[2];
@@ -163,6 +166,8 @@ function createMarket(options) {
   let qtHostIdx = 0;
   let sinaFallbackLogged = false;
   const navCache = {};
+  const csiInfoCache = {};
+  const csiQuoteCache = {};
 
   function noteSinaFallback() {
     if (sinaFallbackLogged) return;
@@ -170,23 +175,83 @@ function createMarket(options) {
     log('[quote]', '腾讯行情不可用，已切到新浪财经兜底');
   }
 
+  // 中证官网的指数基本信息：名称 + 币种。港股主题指数的币种是港元，
+  // 用来判断 16:00 收盘；东财快照被限流时也能补到名称，列表不会只剩代码。
+  async function fetchCsindexInfo(code) {
+    const id = String(code || '').replace(/^em/i, '');
+    if (!/^[A-Za-z0-9]{6}$/.test(id)) return null;
+    if (csiInfoCache[id]) return csiInfoCache[id];
+    try {
+      const j = await http.fetchJson(
+        'https://www.csindex.com.cn/csindex-home/indexInfo/index-basic-info/' + id,
+        { headers: CSI_HEADERS, timeout: 4000, retries: 1, tag: 'csi-info' }
+      );
+      const d = j && j.data;
+      if (!d) return null;
+      const currency = String(d.currencyCn || '') + ' ' + String(d.currencyEn || '');
+      const info = {
+        name: String(d.indexShortNameCn || d.indexFullNameCn || ''),
+        hk: /港元/.test(currency) || /HKD/i.test(currency)
+      };
+      if (info.name || info.hk) csiInfoCache[id] = info;
+      return info;
+    } catch (error) {
+      // 失败不缓存，下次还能重试
+      return null;
+    }
+  }
+
+  // 中证官网的指数实时快照：东财 push2 被限流时用它补价格 / 昨收 / 涨跌幅。
+  // 15 秒缓存，别每 3 秒轮询都打一次；失败不缓存，下次重试。
+  async function fetchCsindexQuote(code) {
+    const id = String(code || '').replace(/^em/i, '');
+    if (!/^[A-Za-z0-9]{6}$/.test(id)) return null;
+    const hit = csiQuoteCache[id];
+    if (hit && Date.now() - hit.at < 15000) return hit;
+    try {
+      const j = await http.fetchJson(
+        'https://www.csindex.com.cn/csindex-home/perf/index-perf-oneday?indexCode=' + encodeURIComponent(id),
+        { headers: CSI_HEADERS, timeout: 5000, retries: 1, tag: 'csi-quote' }
+      );
+      const h = j && j.data && j.data.intraDayHeader;
+      if (!h) return null;
+      const price = num(h.current);
+      const prev = num(h.closePre);
+      const pct = num(h.changePct);
+      const out = {
+        at: Date.now(),
+        price: price,
+        prevClose: prev,
+        pct: isFinite(pct) ? pct : (((price - prev) / prev) * 100)
+      };
+      csiQuoteCache[id] = out;
+      return out;
+    } catch (error) {
+      return null;
+    }
+  }
+
   // 实时快照（GBK），一次请求拿全部标的
   async function fetchSnapshots(codes) {
-    // 东财特殊品种（美元指数等）：腾讯不支持，单独走东财快照
-    const emCodes = codes.filter(function (c) { return EM_SECID[c]; });
-    const txCodes = codes.filter(function (c) { return !EM_SECID[c]; });
+    // 东财特殊品种（美元指数、em 前缀的专属指数）：腾讯不支持，单独走东财快照
+    const emCodes = codes.filter(function (c) { return EM_SECID[c] || emIndexSecid(c); });
+    const txCodes = codes.filter(function (c) { return !EM_SECID[c] && !emIndexSecid(c); });
     const out = {};
 
     for (let i = 0; i < emCodes.length; i++) {
       const code = emCodes[i];
-      const secid = EM_SECID[code];
+      const secid = EM_SECID[code] || emIndexSecid(code);
+      let d = null;
       try {
         const j = await http.fetchJson('https://push2.eastmoney.com/api/qt/stock/get?secid=' + secid +
           '&fields=f43,f44,f45,f46,f57,f58,f60,f170', {
           headers: HEADERS, timeout: 4000, retries: 1, tag: 'em-snapshot'
         });
-        const d = j.data;
-        if (!d) continue;
+        d = j && j.data;
+      } catch (error) {
+        // 单个特殊品种失败不影响其它标的。
+      }
+      if (d) {
         // 东财价格放大了 100 倍（美元指数两位小数）
         const price = (d.f43 || 0) / 100;
         const prev = (d.f60 || 0) / 100;
@@ -198,8 +263,28 @@ function createMarket(options) {
           change: price - prev,
           time: ''
         };
-      } catch (error) {
-        // 单个特殊品种失败不影响其它标的。
+        continue;
+      }
+      // 东财快照被限流 / 返回空：em 指数还能从中证官网补到名称和价格。
+      // 只补名称会让列表显示错误的涨跌幅（拿最后一分钟和前一分钟比），所以价格也一起补。
+      if (emIndexSecid(code)) {
+        const info = await fetchCsindexInfo(code);
+        const quote = await fetchCsindexQuote(code);
+        const name = (NAMES[code] && NAMES[code] !== code)
+          ? NAMES[code]
+          : ((info && info.name) || code);
+        if ((info && info.name) || quote) {
+          out[code] = {
+            name: name,
+            price: quote ? quote.price : NaN,
+            prevClose: quote ? quote.prevClose : NaN,
+            pct: quote ? quote.pct : NaN,
+            change: quote && isFinite(quote.price) && isFinite(quote.prevClose)
+              ? quote.price - quote.prevClose
+              : NaN,
+            time: ''
+          };
+        }
       }
     }
 
@@ -350,15 +435,49 @@ function createMarket(options) {
     throw lastError || new Error('行情接口不可用');
   }
 
+  // 东财搜索：腾讯 smartbox 查不到的中证 / 国证指数（如 931787 港股创新药）只能从这里找。
+  // 市场号 2 的指数腾讯、新浪都没有，内部代码写成 em + 6 位数字；沪深指数仍用 sh / sz。
+  async function searchEmIndices(keyword) {
+    const url = 'https://searchapi.eastmoney.com/api/suggest/get?input=' + encodeURIComponent(keyword) +
+      '&type=14&token=D43BF722C8E33BDC906FB84D85E326E8&count=10';
+    const j = await http.fetchJson(url, {
+      headers: HEADERS, timeout: 4000, retries: 1, tag: 'em-search'
+    });
+    const table = (j && j.QuotationCodeTable) || {};
+    const rows = Array.isArray(table.Data) ? table.Data : [];
+    const out = [];
+    rows.forEach(function (row) {
+      if (!row || String(row.SecurityTypeName || '') !== '指数') return;
+      const m = /^(\d+)\.([A-Za-z0-9_]+)$/.exec(String(row.QuoteID || ''));
+      if (!m || !/^\d{6}$/.test(m[2])) return;
+      const id = m[2];
+      let code = '';
+      if (m[1] === '2') code = 'em' + id;
+      else if (m[1] === '1') code = 'sh' + id;
+      else if (m[1] === '0') code = 'sz' + id;
+      if (!code || !isValidCode(code)) return;
+      out.push({
+        code: code,
+        name: String(row.Name || code),
+        market: m[1] === '2' ? 'em' : (m[1] === '1' ? 'sh' : 'sz'),
+        type: 'ZS',
+        typeLabel: TYPE_LABEL.ZS
+      });
+    });
+    return out;
+  }
+
   async function searchSymbols(keyword) {
     const q = String(keyword || '').trim();
     if (!q) return [];
 
     const out = [];
     const seen = {};
+    // 6 位数字可能是股票、场外基金，也可能是东财专属指数，先交给搜索判断
+    const six = /^\d{6}$/.test(q) ? q : '';
 
     // 用户直接输入代码（如 hf_GC、sh518880）时，即使搜索接口没有也直接返回
-    if (isValidCode(q)) {
+    if (isValidCode(q) && !six) {
       out.push({ code: q, name: NAMES[q] || q, market: q.slice(0, 2).toLowerCase(), type: '', typeLabel: '' });
       seen[q] = true;
     }
@@ -409,6 +528,26 @@ function createMarket(options) {
       });
     }
 
+    // 腾讯搜不到时补一次东财：中证系列指数（931787 等）只在东财有。
+    // 6 位数字两条搜索都没认出来，才按场外基金兜底。
+    if (!out.length) {
+      try {
+        const emList = await searchEmIndices(q);
+        for (let i = 0; i < emList.length; i++) {
+          const it = emList[i];
+          if (seen[it.code]) continue;
+          seen[it.code] = true;
+          out.push(it);
+        }
+      } catch (error) {
+        // 东财搜索挂了不影响腾讯结果和下面的基金兜底
+      }
+    }
+    if (six && !out.length) {
+      out.push({ code: q, name: NAMES[q] || q, market: q.slice(0, 2).toLowerCase(), type: '', typeLabel: '' });
+      seen[q] = true;
+    }
+
     return out.slice(0, 12);
   }
 
@@ -454,17 +593,20 @@ function createMarket(options) {
     });
   }
 
+  // 东财当日分时（trends2）：腾讯不支持的品种走这里，只取价格序列
+  async function fetchEmMinuteTrend(secid) {
+    const url = 'https://push2.eastmoney.com/api/qt/stock/trends2/get?secid=' + secid +
+      '&fields1=f1,f2,f3,f4,f5,f6,f7,f8&fields2=f51,f52,f53,f54,f55&iscr=0&ndays=1';
+    const j = await http.fetchJson(url, { headers: HEADERS, timeout: 4000, retries: 1, tag: 'em-minute' });
+    const trends = (j && j.data && j.data.trends) || [];
+    return trends.map(function (t) { return num(String(t).split(',')[2]); }).filter(isFinite);
+  }
+
   // 当日分时（一次只能查一个 code）
   async function fetchMinuteSeries(code) {
-    // 东财特殊品种（美元指数等）和外盘期货：腾讯不支持分时，走东财 trends2
-    if (EM_SECID[code] || HF_EM_SECID[code]) {
-      const secid = EM_SECID[code] || HF_EM_SECID[code];
-      const url = 'https://push2.eastmoney.com/api/qt/stock/trends2/get?secid=' + secid +
-        '&fields1=f1,f2,f3,f4,f5,f6,f7,f8&fields2=f51,f52,f53,f54,f55&iscr=0&ndays=1';
-      const j = await http.fetchJson(url, { headers: HEADERS, timeout: 4000, retries: 1, tag: 'em-minute' });
-      const trends = (j && j.data && j.data.trends) || [];
-      return trends.map(function (t) { return num(String(t).split(',')[2]); }).filter(isFinite);
-    }
+    // 东财特殊品种（美元指数等）、外盘期货、em 专属指数：腾讯不支持分时，走东财 trends2
+    const emSecid = EM_SECID[code] || HF_EM_SECID[code] || emIndexSecid(code);
+    if (emSecid) return fetchEmMinuteTrend(emSecid);
     if (process.env.TICKER_FORCE_SINA && sinaSupported(code)) {
       try {
         const alt = await fetchSinaMinute(code);
@@ -525,9 +667,9 @@ function createMarket(options) {
     });
   }
 
-  // 外盘 5 日分时：东财 5 分钟 K 线，按交易日夜盘归并后取最近 5 天
+  // 外盘 5 日分时 / em 专属指数：东财 5 分钟 K 线，按交易日夜盘归并后取最近 5 天
   async function fetchFiveDay(code) {
-    const secid = EM_SECID[code] || HF_EM_SECID[code];
+    const secid = EM_SECID[code] || HF_EM_SECID[code] || emIndexSecid(code);
     if (!secid) return [];
     return buildFiveDayRows(await fetchEmKlines(secid, 5, 2000));
   }
@@ -557,7 +699,7 @@ function createMarket(options) {
         // 落到腾讯。
       }
     }
-    const emSecid = EM_SECID[code] || HF_EM_SECID[code];
+    const emSecid = EM_SECID[code] || HF_EM_SECID[code] || emIndexSecid(code);
     if (emSecid) {
       try {
         const rows = mapEmKlineRows(await fetchEmKlines(emSecid, emKltOf(interval), count));
@@ -631,24 +773,15 @@ function createMarket(options) {
   }
 
   async function fetchSeries(code, period) {
-    // 东财特殊品种（美元指数等）：走东财分时
-    if (EM_SECID[code] && period === 'minute') {
-      const url = 'https://push2.eastmoney.com/api/qt/stock/trends2/get?secid=' + EM_SECID[code] +
-        '&fields1=f1,f2,f3,f4,f5,f6,f7,f8&fields2=f51,f52,f53,f54,f55&iscr=0&ndays=1';
-      const j = await http.fetchJson(url, { headers: HEADERS, timeout: 4000, retries: 1, tag: 'em-minute' });
-      const trends = (j && j.data && j.data.trends) || [];
-      return trends.map(function (t) { return num(String(t).split(',')[2]); }).filter(isFinite);
+    // 东财特殊品种（美元指数等）、em 专属指数：走东财分时
+    if (period === 'minute') {
+      const secid = EM_SECID[code] || emIndexSecid(code);
+      if (secid) return fetchEmMinuteTrend(secid);
     }
     // 外盘期货（hf_ 前缀）：分时走东财 trends2，日/月/年 K 统一走 fetchKlineRaw
     if (/^hf_/i.test(code)) {
       const secid = HF_EM_SECID[code];
-      if (secid && period === 'minute') {
-        const url = 'https://push2.eastmoney.com/api/qt/stock/trends2/get?secid=' + secid +
-          '&fields1=f1,f2,f3,f4,f5,f6,f7,f8&fields2=f51,f52,f53,f54,f55&iscr=0&ndays=1';
-        const j = await http.fetchJson(url, { headers: HEADERS, timeout: 4000, retries: 1, tag: 'em-minute' });
-        const trends = (j && j.data && j.data.trends) || [];
-        return trends.map(function (t) { return num(String(t).split(',')[2]); }).filter(isFinite);
-      }
+      if (secid && period === 'minute') return fetchEmMinuteTrend(secid);
     }
     if (period === 'day') return closeSeries(await fetchKlineRaw(code, 'day', 120));
     if (period === 'month') return closeSeries(await fetchKlineRaw(code, 'month', 120));
@@ -716,6 +849,8 @@ function createMarket(options) {
 
   function clearCaches() {
     Object.keys(navCache).forEach(function (key) { delete navCache[key]; });
+    Object.keys(csiInfoCache).forEach(function (key) { delete csiInfoCache[key]; });
+    Object.keys(csiQuoteCache).forEach(function (key) { delete csiQuoteCache[key]; });
     qtHostIdx = 0;
     sinaFallbackLogged = false;
   }
@@ -723,6 +858,8 @@ function createMarket(options) {
   return {
     fetchSnapshots,
     fetchSinaSnapshots,
+    fetchCsindexInfo,
+    fetchCsindexQuote,
     fetchTencentJson,
     searchSymbols,
     fetchMinuteSeries,

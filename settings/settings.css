@@ -149,6 +149,83 @@ h2 {
 .group-edit[hidden] { display: none; }
 .group-edit input[type="text"] { height: 28px; font-size: 12px; max-width: 200px; }
 
+/* 同花顺分享导入：内联面板，结果只写草稿 */
+.import-panel {
+  margin-bottom: 8px;
+  padding: 9px 10px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #171b22;
+}
+.import-panel[hidden] { display: none; }
+.import-head { display: flex; align-items: center; gap: 7px; }
+.import-head input[type="text"] { height: 28px; font-size: 12px; }
+.import-status { min-height: 16px; margin-top: 6px; font-size: 12px; color: var(--sub); }
+.import-status.ok { color: var(--down); }
+.import-status.err { color: var(--up); }
+
+.import-preview[hidden] { display: none; }
+.import-summary { margin-top: 2px; font-size: 12px; color: var(--sub); }
+.import-target {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-top: 8px;
+}
+.import-target .fl { color: var(--sub); }
+.import-target .check { height: 24px; font-size: 12px; }
+.import-target .check input:disabled + span { opacity: .4; }
+
+.import-list {
+  list-style: none;
+  max-height: 148px;
+  margin-top: 8px;
+  padding-right: 4px;
+  overflow-y: auto;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  -webkit-user-select: text;
+  user-select: text;
+}
+.import-list::-webkit-scrollbar { width: 8px; }
+.import-list::-webkit-scrollbar-thumb { background: #333a47; border-radius: 4px; }
+.import-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 24px;
+  padding: 2px 0;
+  font-size: 12px;
+}
+.import-list .ic { flex: 0 0 64px; color: var(--text); font-variant-numeric: tabular-nums; }
+.import-list .isym { flex: 0 0 82px; color: var(--sub); font-variant-numeric: tabular-nums; }
+.import-list .inm { flex: 1; overflow: hidden; color: var(--sub); white-space: nowrap; text-overflow: ellipsis; }
+.import-list .why { flex: 0 0 auto; font-size: 11px; color: var(--up); }
+.import-list li.off .ic, .import-list li.off .isym { color: #6b7280; text-decoration: line-through; }
+.import-list li.more { justify-content: center; color: var(--sub); }
+
+.import-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 8px;
+}
+.import-actions .hint { margin: 0; }
+
+button.inline-link {
+  height: auto;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  color: var(--accent);
+  font-size: inherit;
+  vertical-align: baseline;
+}
+button.inline-link:hover { background: none; text-decoration: underline; }
+
 /* 当前分组视图：每行下方再占一行放分组标签 */
 .list li.grp-row {
   height: auto;

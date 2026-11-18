@@ -17,6 +17,35 @@
   var indexNameEl = indexBtn ? indexBtn.querySelector('.iq-name') : null;
   var indexValEl = indexBtn ? indexBtn.querySelector('.iq-val') : null;
   var indexPctEl = indexBtn ? indexBtn.querySelector('.iq-pct') : null;
+
+  /* ---- 大盘概览：涨跌家数 / 总成交额 / 较昨 / 预测全天 ---- */
+  var marketBar = document.getElementById('market-bar');
+  var marketEls = null;
+  var showMarketOverview = true;
+  var market = null;
+  if (marketBar) {
+    marketBar.innerHTML =
+      '<span class="mb-item mb-breadth">' +
+        '<i class="mb-label">涨</i><span class="mb-val mb-up"></span>' +
+        '<i class="mb-label">跌</i><span class="mb-val mb-down"></span>' +
+      '</span>' +
+      '<span class="mb-item mb-amount">' +
+        '<i class="mb-label">成交</i><span class="mb-val mb-amount-val"></span>' +
+      '</span>' +
+      '<span class="mb-item mb-vs">' +
+        '<i class="mb-label">较昨</i><span class="mb-val mb-vs-val"></span>' +
+      '</span>' +
+      '<span class="mb-item mb-proj">' +
+        '<i class="mb-label">预估全天</i><span class="mb-val mb-proj-val"></span>' +
+      '</span>';
+    marketEls = {
+      up: marketBar.querySelector('.mb-up'),
+      down: marketBar.querySelector('.mb-down'),
+      amount: marketBar.querySelector('.mb-amount-val'),
+      vs: marketBar.querySelector('.mb-vs-val'),
+      proj: marketBar.querySelector('.mb-proj-val')
+    };
+  }
   var rowMap = {};
   var PERIOD_LABEL = { minute: '分时', day: '日线', month: '月线', year: '年线' };
   var timer = null;
@@ -101,6 +130,82 @@
         document.body.classList.add('index-pct-hidden');
       }
     }
+  }
+
+  // 金额太大时按「万亿」显示，窄窗也只用 6~7 个字符
+  function fmtAmount(v) {
+    if (!isFinite(v) || v <= 0) return '--';
+    if (v >= 1e12) return (v / 1e12).toFixed(2) + '万亿';
+    return Math.round(v / 1e8) + '亿';
+  }
+
+  // 增减用绝对额，不换算成百分比：量级一眼可见，也不会出现 -0.1% 这种误导。
+  function fmtAmountDelta(v) {
+    if (!isFinite(v)) return '--';
+    var a = Math.abs(v);
+    if (a < 5e7) return '0';
+    var sign = v > 0 ? '+' : '-';
+    if (a >= 1e12) return sign + (a / 1e12).toFixed(2) + '万亿';
+    return sign + Math.round(a / 1e8) + '亿';
+  }
+
+  function marketTitle(m) {
+    var parts = ['沪深两市（不含北交所）'];
+    if (m && m.tradeTime) parts.push((m.status === 'closed' ? '收盘 ' : '') + m.tradeTime);
+    parts.push('成交额 ' + fmtAmount(m && m.amount));
+    if (m && isFinite(m.vsPct)) {
+      parts.push('较昨：今日累计 ' + fmtAmount(m.todayAmount) + '，昨日同期 ' + fmtAmount(m.prevAmount));
+    }    if (m && isFinite(m.projAmount)) {
+      parts.push('预估全天 ' + fmtAmount(m.projAmount) + '，较昨日全天 ' +
+        fmtAmountDelta(m.projDelta) + '，昨日全天 ' + fmtAmount(m.prevFullAmount));
+    } else if (m && m.status === 'early') {
+      parts.push('开盘不足 15 分钟，暂不预估全天');
+    } else if (m && m.status === 'closed') {
+      parts.push('今日全天 ' + fmtAmount(m.todayAmount) + '，昨日全天 ' + fmtAmount(m.prevFullAmount));
+    }
+    return parts.join(' · ');
+  }
+
+  function paintMarket() {
+    if (!marketBar) return;
+    var on = showMarketOverview !== false;
+    marketBar.hidden = !on;
+    document.body.classList.remove('mb-drop-proj', 'mb-drop-vs', 'mb-slim', 'mb-drop-breadth');
+    if (!on) return;
+
+    var m = market || {};
+    if (marketEls) {
+      if (marketEls.up) marketEls.up.textContent = isFinite(m.up) ? String(m.up) : '--';
+      if (marketEls.down) marketEls.down.textContent = isFinite(m.down) ? String(m.down) : '--';
+      if (marketEls.amount) marketEls.amount.textContent = fmtAmount(m.amount);
+      if (marketEls.vs) {
+        marketEls.vs.textContent = fmtAmountDelta(m.vsAmount);
+        marketEls.vs.className = 'mb-val mb-vs-val ' + clsOf(m.vsAmount);
+      }
+    }
+    // 开盘不足 15 分钟 / 收盘后没有预测值，整项收起（不是显示 --）
+    var hasProj = !!(m && isFinite(m.projAmount) && m.status === 'open');
+    marketBar.classList.toggle('no-proj', !hasProj);
+    if (marketEls && marketEls.proj) {
+      marketEls.proj.textContent = hasProj ? fmtAmount(m.projAmount) : '--';
+      marketEls.proj.className = 'mb-val mb-proj-val ' + clsOf(hasProj ? m.projDelta : NaN);
+    }
+    marketBar.title = marketTitle(m);
+    fitMarket();
+  }
+
+  // 宽度不够时从右往左降级：预测 → 较昨 → 家数只留数字 → 只留成交额。
+  // 用 scrollWidth 实测，避免窗口宽度和字体渲染差异导致误判。
+  function fitMarket() {
+    if (!marketBar || marketBar.hidden) return;
+    var classes = ['mb-drop-proj', 'mb-drop-vs', 'mb-slim', 'mb-drop-breadth'];
+    classes.forEach(function (c) { document.body.classList.remove(c); });
+    if (!marketEls) return;
+    var fits = function () { return marketBar.scrollWidth <= marketBar.clientWidth + 1; };
+    if (!fits()) document.body.classList.add('mb-drop-proj');
+    if (!fits()) document.body.classList.add('mb-drop-vs');
+    if (!fits()) document.body.classList.add('mb-slim');
+    if (!fits()) document.body.classList.add('mb-drop-breadth');
   }
 
   function renderIndexMenu() {
@@ -209,6 +314,10 @@
     groupBtn.title = '当前分组：' + name + '，点击切换';
 
     groupMenu.innerHTML = '';
+
+    // 分组多时只有列表滚动，底部「管理分组…」固定可见
+    var listEl = document.createElement('div');
+    listEl.className = 'gm-list';
     groups.forEach(function (item) {
       var b = document.createElement('button');
       b.type = 'button';
@@ -219,8 +328,25 @@
         closeGroupMenu();
         if (item.id !== activeGroupId) window.ticker.setGroup(item.id);
       });
-      groupMenu.appendChild(b);
+      listEl.appendChild(b);
     });
+    groupMenu.appendChild(listEl);
+
+    // 分组管理（新建 / 重命名 / 导入分享）都在设置面板里，浮窗只留一个入口
+    var foot = document.createElement('div');
+    foot.className = 'gm-foot';
+    var manage = document.createElement('button');
+    manage.type = 'button';
+    manage.className = 'gm-item gm-manage';
+    manage.textContent = '管理分组…';
+    manage.title = '打开设置：新建 / 重命名 / 导入分组';
+    manage.addEventListener('click', function (e) {
+      e.stopPropagation();
+      closeGroupMenu();
+      window.ticker.openSettings();
+    });
+    foot.appendChild(manage);
+    groupMenu.appendChild(foot);
   }
 
   function openGroupMenu() {
@@ -439,7 +565,8 @@
 
   function naturalHeight() {
     var rows = Math.min(app.children.length, MAX_ROWS);
-    return Math.ceil(rows * ROW_H + 12 + (head ? head.offsetHeight : 0));
+    var marketH = marketBar && !marketBar.hidden ? marketBar.offsetHeight : 0;
+    return Math.ceil(rows * ROW_H + 12 + (head ? head.offsetHeight : 0) + marketH);
   }
 
   function syncHeight() {
@@ -466,7 +593,10 @@
         if (Array.isArray(res.indices)) indexQuotes = res.indices;
         if (typeof res.showTopIndex === 'boolean') showTopIndex = res.showTopIndex;
         if (res.topIndex) topIndex = res.topIndex;
+        if (res.market) market = res.market;
+        if (typeof res.showMarketOverview === 'boolean') showMarketOverview = res.showMarketOverview;
         paintIndex();
+        paintMarket();
         document.body.classList.remove('stale');
         render(res.list || []);
       } else {
@@ -533,8 +663,11 @@
     if (s.activeGroupId) activeGroupId = s.activeGroupId;
     if (s.topIndex) topIndex = s.topIndex;
     if (typeof s.showTopIndex === 'boolean') showTopIndex = s.showTopIndex;
+    if (typeof s.showMarketOverview === 'boolean') showMarketOverview = s.showMarketOverview;
+    if (s.market) market = s.market;
     paintGroup();
     paintIndex();
+    paintMarket();
     if (s.shortcuts) rebuildShortcuts(s.shortcuts);
     if (s.sortMode && SORT_ORDER.indexOf(s.sortMode) >= 0 && s.sortMode !== sortMode) {
       sortMode = s.sortMode;
@@ -723,7 +856,7 @@
     if (suppressClick) { suppressClick = false; return; }
     // 顶部整条都是窗口拖动区：点空白处只拖窗口，不该顺手展开图表
     // 浮层菜单（分组 / 分时级别）挂在 body 下，同样不能当成"点了行"
-    if (t.closest && (t.closest('#head') || t.closest('#focus') || t.closest('#splitter') ||
+    if (t.closest && (t.closest('#head') || t.closest('#market-bar') || t.closest('#focus') || t.closest('#splitter') ||
         t.closest('#group-menu') || t.closest('#index-menu') || t.closest('#f-level-menu'))) return;
     if (t === pinBtn || t === sortBtn || t === periodLabel || t === groupBtn || t === indexBtn) return;
     // 拖着窗口跑（起点和落点差得多）不算点击，别顺手展开 / 换标的
@@ -747,6 +880,7 @@
     // 宽度变了不需要改文案，指数条固定用正式名称
     // 但可用空间变了，指数名该收就收，别把分组名挤掉
     fitTopIndex();
+    fitMarket();
     // 窗口宽度变了，折线按新空间重新收边
     applySpark(sparkWant);
   }).observe(leftEl);

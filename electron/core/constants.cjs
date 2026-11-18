@@ -141,6 +141,8 @@ const DEFAULT_CONFIG = {
   // 左上角分组名右侧的指数条：显示点位 / 涨跌幅，点开可切换指数并展开走势图
   showTopIndex: true,
   topIndex: 'sh000001',
+  // 指数条下方的大盘概览：涨跌家数 / 总成交额 / 较昨 / 预测全天增减
+  showMarketOverview: true,
   // 上次更新成功的源（gitee / ghfast / github），下次优先用它
   updateFeed: '',
   alwaysOnTop: true,

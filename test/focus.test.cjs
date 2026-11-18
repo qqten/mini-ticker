@@ -10,6 +10,8 @@ const {
   FOCUS_MIN_TAB,
   FOCUS_INTERVALS,
   sessionMinutes,
+  hkIndexSlotOf,
+  parseCsindexIntraday,
   parseMinuteLines,
   parseLeadTrends,
   applyLeadValues
@@ -111,6 +113,196 @@ test('sessionMinutes 按市场返回分钟数', function () {
   assert.equal(sessionMinutes('usAAPL'), 392);
   assert.equal(sessionMinutes('hf_XAU'), 1440);
   assert.equal(sessionMinutes('usDXY'), 1440);
+});
+
+test('sessionMinutes 能认出港股主题的东财指数', function () {
+  assert.equal(sessionMinutes('em931787', '港股创新药'), 332);
+  assert.equal(sessionMinutes('em931250', '港股通创新药'), 332);
+  assert.equal(sessionMinutes('em930901', '动漫游戏'), 242);
+  // 名称还没学到时按内地中证指数处理，避免把内地指数错画成 16:00 收盘
+  assert.equal(sessionMinutes('em931787'), 242);
+});
+
+test('hkIndexSlotOf 把港股午休压缩掉：09:30-11:30 + 13:00-16:00', function () {
+  assert.equal(hkIndexSlotOf('09:30'), 0);
+  assert.equal(hkIndexSlotOf('11:00'), 90);
+  assert.equal(hkIndexSlotOf('11:30'), 120);
+  assert.equal(hkIndexSlotOf('13:00'), 121);
+  assert.equal(hkIndexSlotOf('15:00'), 241);
+  assert.equal(hkIndexSlotOf('16:00'), 301);
+  // 11:30-13:00 中证没有数据，映射成空档而不是硬塞进上下午
+  assert.equal(hkIndexSlotOf('12:00'), -1);
+  assert.equal(hkIndexSlotOf('12:30'), -1);
+  assert.equal(hkIndexSlotOf('08:59'), -1);
+});
+
+test('中证分时收盘后以 header.current 修正 16:00 的暂定收盘价', function () {
+  const parsed = parseCsindexIntraday({ data: {
+    intraDayHeader: {
+      tradeDate: '2026-11-16', openToday: 1330.07, closePre: 1348.74, current: 1317.15
+    },
+    intraDayPerfList: [
+      { tradeTime: '09:30:09', current: 1330.07 },
+      { tradeTime: '15:59:09', current: 1318.17 },
+      { tradeTime: '16:00:09', current: 1318.30 }
+    ]
+  } });
+  const last = parsed.points[parsed.points.length - 1];
+  assert.equal(last.slot, 301);
+  // 16:00:09 的 1318.30 是暂定值，收盘后 header.current 才是最终收盘价
+  assert.equal(last.price, 1317.15);
+  assert.equal(parsed.price, 1317.15);
+});
+
+test('港股主题 em 指数分时走中证官网，槽位覆盖到 16:00', async function () {
+  const calls = { urls: [] };
+  const info = {
+    fetchSnapshots: async function () {
+      return { em931787: { name: '港股创新药', price: 1313.62, prevClose: 1348.74, pct: -2.6 } };
+    },
+    fetchTencentJson: async function () { throw new Error('不应走腾讯'); },
+    fetchKlineRaw: async function () { throw new Error('不应走K线'); }
+  };
+  const http = {
+    fetchJson: async function (url) {
+      calls.urls.push(url);
+      if (url.indexOf('csindex') >= 0) {
+        return { data: {
+          intraDayHeader: {
+            tradeDate: '2026-11-16', tradeTime: '15:25:09',
+            openToday: 1330.07, closePre: 1348.74, current: 1313.62
+          },
+          intraDayPerfList: [
+            { tradeTime: '09:30:09', current: 1330.07 },
+            { tradeTime: '09:30:24', current: 1330.30 },
+            { tradeTime: '09:31:09', current: 1329.00 },
+            { tradeTime: '12:00:00', current: 1320.00 },
+            { tradeTime: '13:00:10', current: 1318.00 },
+            { tradeTime: '15:00:09', current: 1314.00 },
+            { tradeTime: '15:25:09', current: 1313.62 }
+          ]
+        } };
+      }
+      return { data: { trends: [
+        '2026-11-16 09:30,1330,1330,1330,1330,10,0,1330',
+        '2026-11-16 09:31,1329,1329,1329,1329,20,0,1329',
+        '2026-11-16 15:00,1314,1314,1314,1314,30,0,1314'
+      ] } };
+    }
+  };
+  const service = createFocusService({ market: info, http: http, now: function () { return 1000; } });
+  const data = await service.payload('em931787', 'minute');
+  assert.equal(data.session, 302);
+  assert.equal(data.market, 'hk-index');
+  assert.equal(data.price, 1313.62);
+  assert.equal(data.prevClose, 1348.74);
+  assert.ok(calls.urls.some(function (u) { return u.indexOf('index-perf-oneday?indexCode=931787') >= 0; }));
+  const pts = data.days[0].points;
+  // 同一分钟的 15 秒点只留最后一个；09:30 用今开补；
+  // 13:00 紧接 11:30（午休压缩），11:30-13:00 之间没有点
+  assert.deepEqual(pts.map(function (p) { return p.slot; }), [0, 1, 121, 241, 266]);
+  assert.equal(pts[0].price, 1330.07);
+  assert.ok(pts.every(function (p) { return p.slot !== 150; }));
+  // 成交量从东财分钟线按分钟补，15:00 之后没有量就留 0
+  assert.equal(pts[0].vol, 10);
+  assert.equal(pts[3].vol, 30);
+  assert.equal(pts[4].vol, 0);
+});
+
+test('em 指数快照缺名称时，中证币种兜底判为港股并走 CSI 分时', async function () {
+  const calls = { urls: [] };
+  const info = {
+    fetchSnapshots: async function () { return {}; },
+    fetchCsindexInfo: async function (code) {
+      assert.equal(code, 'em931787');
+      return { name: '港股创新药', hk: true };
+    },
+    fetchTencentJson: async function () { throw new Error('不应走腾讯'); },
+    fetchKlineRaw: async function () { throw new Error('不应走K线'); }
+  };
+  const http = {
+    fetchJson: async function (url) {
+      calls.urls.push(url);
+      if (url.indexOf('csindex') >= 0) {
+        return { data: {
+          intraDayHeader: { tradeDate: '2026-11-16', openToday: 1330.07, closePre: 1348.74, current: 1313.62 },
+          intraDayPerfList: [
+            { tradeTime: '09:30:09', current: 1319.01 },
+            { tradeTime: '09:31:09', current: 1329.00 },
+            { tradeTime: '15:00:09', current: 1314.00 }
+          ]
+        } };
+      }
+      return { data: { trends: ['2026-11-16 09:30,1330,1330,1330,1330,10,0,1330'] } };
+    }
+  };
+  const service = createFocusService({ market: info, http: http, now: function () { return 1000; } });
+  const data = await service.payload('em931787', 'minute');
+  assert.equal(data.name, '港股创新药');
+  assert.equal(data.market, 'hk-index');
+  assert.equal(data.session, 302);
+  assert.equal(data.price, 1313.62);
+  assert.ok(calls.urls.some(function (u) { return u.indexOf('index-perf-oneday?indexCode=931787') >= 0; }));
+});
+
+test('港股 em 指数 5 日图：今天用中证补到 16:00，所有点按真实时钟摆位', async function () {
+  const info = {
+    fetchSnapshots: async function () {
+      return { em931787: { name: '港股创新药', price: 1313.62, prevClose: 1348.74, pct: -2.6 } };
+    },
+    fetchFiveDay: async function () {
+      return [
+        { date: '2026-11-13', prec: 1396.56, points: [
+          { t: '09:35', price: 1371.04, vol: 10 },
+          { t: '11:30', price: 1360.00, vol: 11 },
+          { t: '13:05', price: 1355.00, vol: 12 },
+          { t: '15:00', price: 1348.74, vol: 13 }
+        ] },
+        { date: '2026-11-16', prec: 1348.74, points: [
+          { t: '09:35', price: 1312.62, vol: 20 },
+          { t: '11:30', price: 1305.00, vol: 21 },
+          { t: '13:05', price: 1303.00, vol: 22 },
+          { t: '15:00', price: 1313.48, vol: 23 }
+        ] }
+      ];
+    },
+    fetchTencentJson: async function () { throw new Error('不应走腾讯'); },
+    fetchKlineRaw: async function () { throw new Error('不应走K线'); }
+  };
+  const http = {
+    fetchJson: async function (url) {
+      if (url.indexOf('csindex') >= 0) {
+        return { data: {
+          intraDayHeader: {
+            tradeDate: '2026-11-16', openToday: 1330.07, closePre: 1348.74, current: 1318.78
+          },
+          intraDayPerfList: [
+            { tradeTime: '09:30:09', current: 1330.07 },
+            { tradeTime: '09:31:09', current: 1329.00 },
+            { tradeTime: '13:00:10', current: 1306.00 },
+            { tradeTime: '15:00:09', current: 1314.00 },
+            { tradeTime: '15:40:09', current: 1318.78 }
+          ]
+        } };
+      }
+      return { data: { trends: [] } };
+    }
+  };
+  const service = createFocusService({ market: info, http: http, now: function () { return 1000; } });
+  const data = await service.payload('em931787', 'five');
+  assert.equal(data.session, 302);
+  assert.equal(data.market, 'hk-index');
+  assert.equal(data.days.length, 2);
+  assert.equal(data.price, 1318.78);
+  // 昨天（东财 5 分钟）按真实时钟摆：09:35=5、11:30=120、13:05=126；
+  // 东财把 15:00-16:00 压缩进最后一根 15:00 K，所以它要摆到 16:00（slot 301）
+  assert.deepEqual(data.days[0].points.map(function (p) { return p.slot; }), [5, 120, 126, 301]);
+  assert.equal(data.days[0].points[3].t, '16:00');
+  assert.equal(data.days[0].prec, 1396.56);
+  // 今天换成中证分时，带上 09:30 开盘，一直画到 15:40（收盘后到 16:00）
+  assert.deepEqual(data.days[1].points.map(function (p) { return p.slot; }), [0, 1, 121, 241, 281]);
+  assert.equal(data.days[1].points[0].price, 1330.07);
+  assert.equal(data.days[1].prec, 1348.74);
 });
 
 test('分时 payload 走腾讯分钟接口并补充快照信息', async function () {

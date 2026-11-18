@@ -70,6 +70,63 @@ const SCENARIOS = [
     config: baseConfig({ symbols: ['sh000001', 'sz399001', 'sz399006'], watchlist: ['sh000001', 'sz399001', 'sz399006'] })
   },
   {
+    // 分组下拉底部固定一个「管理分组…」，跳到设置面板
+    name: 'group-menu-manage',
+    shot: 'main',
+    screenshot: 'self.png',
+    env: {
+      TICKER_SHOT_EVAL: "(function(){document.getElementById('group-btn').click();" +
+        "var b=document.querySelector('#group-menu .gm-manage');" +
+        "var normal=document.querySelector('#group-menu .gm-item:not(.gm-manage):not(.on)');" +
+        "var r=b?b.getBoundingClientRect():null;var m=document.getElementById('group-menu').getBoundingClientRect();" +
+        "return JSON.stringify({text:b?b.textContent:''," +
+        "visible:document.getElementById('group-menu').style.display," +
+        "sameColor:!!(b&&normal)&&getComputedStyle(b).color===getComputedStyle(normal).color," +
+        "inside:!!r&&r.bottom<=m.bottom+0.5&&r.top>=m.top-0.5});})()"
+    },
+    expect: [/"text":"管理分组…"/, /"visible":"block"/, /"sameColor":true/, /"inside":true/],
+    config: baseConfig({
+      symbols: ['sh000001'],
+      watchlist: ['sh000001'],
+      groups: [
+        { id: 'default', name: '默认', symbols: ['sh000001'] },
+        { id: 'g2', name: '观察', symbols: [] }
+      ],
+      activeGroupId: 'default'
+    })
+  },
+  {
+    // 东财专属指数（中证 931787）：em 前缀走东财快照，列表里能显示名称和点位
+    name: 'em-index',
+    shot: 'main',
+    screenshot: 'self.png',
+    env: {
+      TICKER_SHOT_EVAL: "(function(){var r=document.querySelector('#app .row');" +
+        "return JSON.stringify({code:r?r.dataset.code:null,name:r?r.querySelector('.name').textContent:''," +
+        "price:r?r.querySelector('.chg').textContent:''});})()"
+    },
+    expect: [/"code":"em931787"/, /港股创新药/],
+    config: baseConfig({ symbols: ['em931787'], watchlist: ['em931787'] })
+  },
+  {
+    // 港股主题的 em 指数：分时走中证，横轴按港股 09:30-11:30 / 13:00-16:00 排
+    name: 'em-index-hk-minute',
+    shot: 'focus',
+    screenshot: 'focus.png',
+    env: { TICKER_SHOT_FOCUS_TAB: 'minute' },
+    expect: [/\[focus\] 展开图表 em931787/],
+    config: baseConfig({ symbols: ['em931787'], watchlist: ['em931787'] })
+  },
+  {
+    // 港股主题的 em 指数：5 日图也要按港股时段排，不能拿东财的 A 股时段硬套
+    name: 'em-index-hk-five',
+    shot: 'focus',
+    screenshot: 'focus.png',
+    env: { TICKER_SHOT_FOCUS_TAB: 'five' },
+    expect: [/\[focus\] 切换周期 five/],
+    config: baseConfig({ symbols: ['em931787'], watchlist: ['em931787'] })
+  },
+  {
     name: 'settings',
     shot: 'settings',
     screenshot: 'settings.png',
@@ -87,6 +144,26 @@ const SCENARIOS = [
         "return f?f.closest('.field').querySelector('.fl').textContent:'';})()"
     },
     expect: [/\[settings-eval\] 主题色/],
+    config: baseConfig({ symbols: ['sh000001'], watchlist: ['sh000001'] })
+  },
+  {
+    // 分享导入面板：打开、粘贴无效链接、本地就能报错（不需要联网）
+    name: 'settings-import',
+    shot: 'settings',
+    screenshot: 'settings.png',
+    env: {
+      TICKER_SHOT_SETTINGS_EVAL: "(function(){" +
+        "var btn=document.getElementById('group-import');btn.click();" +
+        "var panel=document.getElementById('import-panel');var open=!panel.hidden;" +
+        "var inp=document.getElementById('import-link');" +
+        "inp.value='https://eq.10jqka.com.cn/#/index?st=2';" +
+        "document.getElementById('import-read').click();" +
+        "return new Promise(function(res){setTimeout(function(){" +
+        "res(JSON.stringify({open:open," +
+        "status:document.getElementById('import-status').textContent," +
+        "cls:document.getElementById('import-status').className}));},800);});})()"
+    },
+    expect: [/"open":true/, /链接里没有 id 参数/, /"cls":"import-status err"/],
     config: baseConfig({ symbols: ['sh000001'], watchlist: ['sh000001'] })
   },
   {
@@ -174,6 +251,23 @@ const SCENARIOS = [
     config: baseConfig({ symbols: ['sh000001', 'sz399001'], watchlist: ['sh000001', 'sz399001'] })
   },
   {
+    // 不在分钟图上：第一下切到当前选中的分钟图，第二下才展开级别列表
+    name: 'focus-level-tap',
+    shot: 'focus',
+    screenshot: 'focus.png',
+    env: {
+      TICKER_SHOT_FOCUS_TAB: 'minute',
+      TICKER_SHOT_EVAL: "(function(){var b=document.getElementById('f-level');b.click();" +
+        "return new Promise(function(res){setTimeout(function(){b.click();" +
+        "setTimeout(function(){res(JSON.stringify({menu:document.getElementById('f-level-menu').style.display}));},400);},600);});})()"
+    },
+    expect: [
+      /\[focus\] 切换周期 min 5分钟/,
+      /"menu":"block"/
+    ],
+    config: baseConfig({ symbols: ['sh000001'], watchlist: ['sh000001'] })
+  },
+  {
     name: 'index-click-same',
     shot: 'focus',
     screenshot: 'focus.png',
@@ -206,6 +300,45 @@ const SCENARIOS = [
       groups: [{ id: 'default', name: '我的自选股', symbols: ['sh000001'] }],
       activeGroupId: 'default'
     })
+  },
+  {
+    // 大盘概览默认显示：四项标签都在，且这一条参与布局（不是 hidden）
+    name: 'market-overview',
+    shot: 'main',
+    screenshot: 'self.png',
+    env: {
+      TICKER_SHOT_EVAL: "(function(){var b=document.getElementById('market-bar');" +
+        "return JSON.stringify({hidden:!b||b.hidden,text:b?b.textContent.replace(/\\s+/g,''):''});})()"
+    },
+    expect: [/"hidden":false/, /成交/, /较昨/],
+    config: baseConfig({ symbols: ['sh000001', 'sz399001'], watchlist: ['sh000001', 'sz399001'], width: 360 })
+  },
+  {
+    // 设置里关掉后整条不占高度
+    name: 'market-overview-off',
+    shot: 'main',
+    screenshot: 'self.png',
+    env: {
+      TICKER_SHOT_EVAL: "JSON.stringify({hidden:document.getElementById('market-bar').hidden})"
+    },
+    expect: [/"hidden":true/],
+    config: baseConfig({
+      symbols: ['sh000001'], watchlist: ['sh000001'], showMarketOverview: false
+    })
+  },
+  {
+    // 窄窗从右往左降级：预测项不可见（宽度不够或收盘后收起），成交额始终保留
+    name: 'market-overview-narrow',
+    shot: 'main',
+    screenshot: 'self.png',
+    env: {
+      TICKER_SHOT_EVAL: "JSON.stringify({" +
+        "projHidden:document.querySelector('.mb-proj').offsetWidth===0," +
+        "slim:document.body.classList.contains('mb-slim')," +
+        "amountVisible:document.querySelector('.mb-amount').offsetWidth>0})"
+    },
+    expect: [/"projHidden":true/, /"amountVisible":true/],
+    config: baseConfig({ symbols: ['sh000001'], watchlist: ['sh000001'], width: 240 })
   },
   {
     name: 'focus-interact',

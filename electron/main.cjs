@@ -6,6 +6,7 @@ const { execFile } = require('child_process');
 const { NAMES, PERIODS, FOCUS_INTERVALS, FOCUS_INTERVAL_LABEL, DEFAULT_FOCUS_INTERVALS, TOP_INDEX_CODES, TOP_INDEX_TITLE } = require('./core/constants.cjs');
 const { pad2 } = require('./core/utils.cjs');
 const { isValidCode, isFundCode } = require('./core/symbols.cjs');
+const { autoExitTime, hasHkSymbols } = require('./core/sessions.cjs');
 const {
   migrateConfig,
   loadConfig,
@@ -17,7 +18,9 @@ const { createHttp } = require('./data/http.cjs');
 const { createMarket } = require('./data/market.cjs');
 const { createFundMinuteStore } = require('./data/fund-minutes.cjs');
 const { createQuoteService } = require('./data/quote-service.cjs');
+const { createMarketStats } = require('./data/market-stats.cjs');
 const { createFocusService, FOCUS_TABS, FOCUS_MIN_TAB, clampInterval } = require('./data/focus.cjs');
+const { createShareImporter } = require('./data/share-import.cjs');
 const { applySettingsPatch } = require('./core/settings.cjs');
 const { clampRect, snapRect, rectInside, focusExpandBox, collapseRect, pickRememberedPosition } = require('./core/window-layout.cjs');
 
@@ -90,6 +93,10 @@ const quoteService = createQuoteService({
   getConfig: function () { return config; }
 });
 const focusService = createFocusService({ market: market, http: http });
+// 大盘概览：取数在后台跑，行情轮询只读缓存快照。
+const marketStats = createMarketStats({ http: http, log: logLine });
+// 同花顺分享链接导入：只读一次分享接口，返回分组草稿交给设置面板预览。
+const shareImporter = createShareImporter({ http: http });
 
 // 窗口 / 聚焦图表直接用的几个取数入口，保留原有函数名，调用点不用跟着改。
 const fetchSnapshots = market.fetchSnapshots;
@@ -99,6 +106,15 @@ const fetchFundNav = market.fetchFundNav;
 
 function fetchAll() {
   return quoteService.fetchAll();
+}
+
+// 行情快照自带名称：顺手记住。em 指数靠名称区分港股 / 内地中证指数，
+// 收盘退出顺延和分时横轴都要用到，不能等到打开设置面板才学。
+function learnNames(list) {
+  (list || []).forEach(function (it) {
+    if (!it || !it.code || !it.name || it.name === it.code) return;
+    NAMES[it.code] = it.name;
+  });
 }
 
 // 左上角指数条：四只指数的快照。当前分组里已经拉到的直接复用，
@@ -1686,6 +1702,8 @@ function toggleSymbol(code, on) {
 
 
 ipcMain.handle('get-state', function () {
+  // 冷启动时先让大盘概览的请求跑起来，首个行情轮询就能拿到数据。
+  if (config.showMarketOverview !== false) marketStats.ensure();
   return {
     textMode: config.textMode,
     effectiveTextMode: effectiveTextMode(),
@@ -1703,6 +1721,7 @@ ipcMain.handle('get-state', function () {
     sortMode: config.sortMode,
     showTopIndex: config.showTopIndex !== false,
     topIndex: config.topIndex,
+    showMarketOverview: config.showMarketOverview !== false,
     locked: !!config.locked,
     alwaysOnTop: !!config.alwaysOnTop,
     shortcuts: normalizeShortcuts(config.shortcuts)
@@ -1711,7 +1730,10 @@ ipcMain.handle('get-state', function () {
 
 ipcMain.handle('get-quotes', async function () {
   try {
+    // 大盘概览：只触发后台刷新，不 await，行情该多快还多快；本次先返回上一次的缓存。
+    if (config.showMarketOverview !== false) marketStats.ensure();
     const list = await fetchAll();
+    learnNames(list);
     // 左上角指数条：关闭开关时连快照都不拉，省一次请求。
     const indices = config.showTopIndex ? await fetchTopIndexItems(list) : [];
     // 空分组不是「行情失败」：返回空列表让渲染层显示空状态，而不是保留旧行。
@@ -1720,12 +1742,16 @@ ipcMain.handle('get-quotes', async function () {
       ok: ok, list: list, period: config.period, at: Date.now(),
       indices: indices,
       showTopIndex: config.showTopIndex !== false,
-      topIndex: config.topIndex
+      topIndex: config.topIndex,
+      showMarketOverview: config.showMarketOverview !== false,
+      market: config.showMarketOverview !== false ? marketStats.peek() : null
     };
   } catch (e) {
     return {
       ok: false, error: e.message, list: [], period: config.period, at: Date.now(),
-      indices: [], showTopIndex: config.showTopIndex !== false, topIndex: config.topIndex
+      indices: [], showTopIndex: config.showTopIndex !== false, topIndex: config.topIndex,
+      showMarketOverview: config.showMarketOverview !== false,
+      market: config.showMarketOverview !== false ? marketStats.peek() : null
     };
   }
 });
@@ -1923,6 +1949,16 @@ let closingForDay = false;
 let sessionAfterClose = false;
 let sessionDay = '';
 
+// 港股（含港股主题的中证指数）16:00 才收盘，比 A 股晚一小时。
+// 只要当前分组里还有港股，收盘退出就不能按 15:05 提前关掉，统一顺延到 16:05。
+function effectiveAutoExit() {
+  return autoExitTime(config.autoExit && config.autoExit.time, config.symbols, NAMES);
+}
+
+function currentHasHk() {
+  return hasHkSymbols(config.symbols, NAMES);
+}
+
 function minutesOf(hhmm) {
   const m = /^(\d{2}):(\d{2})$/.exec(String(hhmm || ''));
   if (!m) return null;
@@ -1945,7 +1981,7 @@ function nowMinutes() {
 function startAutoExitTimer() {
   if (autoExitTimer) clearInterval(autoExitTimer);
   sessionDay = todayKey();
-  const exitAt = minutesOf(config.autoExit.time);
+  const exitAt = minutesOf(effectiveAutoExit());
   sessionAfterClose = !!(exitAt != null && nowMinutes() >= exitAt);
 
   autoExitTimer = setInterval(function () {
@@ -1964,11 +2000,11 @@ function startAutoExitTimer() {
     }
     if (sessionAfterClose) return;
 
-    const at = minutesOf(config.autoExit.time);
+    const at = minutesOf(effectiveAutoExit());
     if (at == null || nowMinutes() < at) return;
 
     closingForDay = true;
-    console.log('[auto-exit] 已到 ' + config.autoExit.time + '，收盘退出');
+    console.log('[auto-exit] 已到 ' + effectiveAutoExit() + '，收盘退出');
     saveConfig();
     app.quit();
   }, 30000);
@@ -2222,6 +2258,27 @@ ipcMain.handle('search-symbol', async function (e, q) {
   }
 });
 
+// 同花顺分享链接：只解析 + 读一次，返回草稿。真正写配置仍然走 settings-save，
+// 这样导入和手工添加共用同一套校验（32 组上限 / 24 字分组名 / 代码清洗）。
+ipcMain.handle('import-share', async function (e, link) {
+  try {
+    const result = await shareImporter.resolve(link);
+    if (!result.ok) {
+      logLine('[import]', '读取失败：' + result.msg);
+      return result;
+    }
+    const c = result.counts || {};
+    logLine('[import]', '读取 ' + result.shareType + '「' + result.groupName + '」共 ' +
+      (c.total || 0) + ' 个，可导入 ' + (c.ready || 0) +
+      (c.duplicate ? '，重复 ' + c.duplicate : '') +
+      (c.unmapped ? '，未识别市场 ' + c.unmapped : ''));
+    return result;
+  } catch (err) {
+    logLine('[import]', '异常：' + err.message);
+    return { ok: false, msg: '导入失败：' + err.message };
+  }
+});
+
 ipcMain.handle('settings-save', async function (e, patch) {
   const prevFocusSide = config.focusChartSide;
   const result = applySettingsPatch(config, patch);
@@ -2249,10 +2306,10 @@ ipcMain.handle('settings-save', async function (e, patch) {
   if (!taskOk) taskMsg = '，但写入计划任务失败（可尝试用管理员身份运行一次）';
   taskInstalledCache = result.patch.autoStart.enabled && taskOk;
 
-  // 收盘退出时间/开关改了，定时器要按新配置重算
+  // 收盘退出时间/开关改了，定时器要按新配置重算（含港股时实际时间会顺延）
   sessionDay = todayKey();
-  const exitAt = minutesOf(result.patch.autoExit.time);
-  sessionAfterClose = !!(result.patch.autoExit.enabled && exitAt != null && nowMinutes() >= exitAt);
+  const exitAt = minutesOf(effectiveAutoExit());
+  sessionAfterClose = !!(config.autoExit.enabled && exitAt != null && nowMinutes() >= exitAt);
 
   return { ok: true, msg: taskMsg };
 });
@@ -2721,8 +2778,10 @@ if (!gotTheLock) {
     logLine('[ready]', 'Electron ready');
     // 关机 / 休眠会让计划任务在错过 09:25 后被 Windows 补跑。
     // 如果补跑发生在收盘之后，开窗也没有行情可看，直接不打开。
-    if (SCHEDULED_LAUNCH && nowMinutes() >= 15 * 60) {
-      console.log('[autostart] 已过 15:00，跳过本次自动启动');
+    // 自选含港股时收盘是 16:00，补跑窗口也要跟着往后延。
+    const catchUpUntil = currentHasHk() ? 16 * 60 : 15 * 60;
+    if (SCHEDULED_LAUNCH && nowMinutes() >= catchUpUntil) {
+      console.log('[autostart] 已过 ' + (catchUpUntil / 60) + ':00，跳过本次自动启动');
       app.quit();
       return;
     }

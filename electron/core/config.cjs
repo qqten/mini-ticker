@@ -179,6 +179,7 @@ function normalizeConfig(raw) {
   if (['off', 'pct-desc', 'pct-asc'].indexOf(cfg.sortMode) < 0) cfg.sortMode = 'off';
   cfg.showTopIndex = cfg.showTopIndex !== false;
   cfg.topIndex = normalizeTopIndex(cfg.topIndex);
+  cfg.showMarketOverview = cfg.showMarketOverview !== false;
 
   cfg.alert = Object.assign({}, DEFAULT_CONFIG.alert, raw.alert || {});
   if (!isValidTime(cfg.alert.time)) cfg.alert.time = DEFAULT_CONFIG.alert.time;

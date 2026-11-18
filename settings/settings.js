@@ -9,6 +9,8 @@
   var groupEditMode = '';
   var dragCode = '';
   var MAX_GROUPS = 32;
+  var MAX_IMPORT_PREVIEW = 200;
+  var importState = { loading: false, result: null, seq: 0 };
   var $ = function (id) { return document.getElementById(id); };
 
   function esc(s) {
@@ -71,7 +73,11 @@
         '新增标的、新建 / 重命名 / 删除分组请先切回具体分组。';
     } else {
       el.innerHTML = '当前分组：<b>' + esc(g ? g.name : '-') + '</b>。拖动行可调整本组顺序；点行内分组标签可加入 / 移出其它分组；✕ 只把标的移出本组。<br />' +
-        '输入中文名、拼音首字母或代码都能搜到，回车选第一条，↑↓ 挑，点一下直接加。';
+        '输入中文名、拼音首字母或代码都能搜到，回车选第一条，↑↓ 挑，点一下直接加。' +
+        (g && !g.symbols.length
+          ? '<br />分组还是空的，也可以从同花顺自选 / 分组分享链接 ' +
+            '<button type="button" class="inline-link" id="hint-import">导入</button>。'
+          : '');
     }
   }
 
@@ -92,10 +98,13 @@
     var i = state.groups.indexOf(activeGroup());
     $('group-up').disabled = state.showAll || i <= 0;
     $('group-down').disabled = state.showAll || i < 0 || i >= state.groups.length - 1;
+    $('group-import').disabled = state.showAll;
     $('show-all').checked = state.showAll;
     // 「全部标的」没有明确的归属分组，先切回具体分组才能新增
     $('add-btn').disabled = state.showAll;
     $('code-input').disabled = state.showAll;
+    if (state.showAll && !$('import-panel').hidden) closeImport();
+    if (importState.result && !$('import-panel').hidden) renderImportTargets(importState.result);
     updateCount();
     updateGroupHint();
   }
@@ -185,6 +194,8 @@
     });
 
     renderGroupSelect();
+    // 当前分组影响到账/港股，收盘退出提示跟着更新
+    refreshExitHint();
 
     // 新加的滚到可见，不然列表一长就看不见自己刚加的那条
     if (scrollToNew && ul.lastElementChild) {
@@ -242,6 +253,7 @@
   }
 
   function beginGroupEdit(mode) {
+    closeImport();
     groupEditMode = mode;
     var box = $('group-edit');
     var inp = $('group-name');
@@ -308,8 +320,255 @@
     renderList();
   }
 
+  /* ---- 同花顺分享导入（只有草稿，保存仍走 settings-save） ---- */
+  function setImportStatus(text, kind) {
+    var el = $('import-status');
+    el.textContent = text || '';
+    el.className = 'import-status' + (kind ? ' ' + kind : '');
+  }
+
+  // 分享名可能和已有分组重名：加 " (2)" 之类的后缀，最长仍限制 24 字。
+  function uniqueGroupName(base) {
+    var name = String(base || '导入分组').replace(/\s+/g, ' ').trim().slice(0, 24) || '导入分组';
+    var used = {};
+    state.groups.forEach(function (g) { used[g.name] = true; });
+    if (!used[name]) return name;
+    for (var n = 2; n < 100; n++) {
+      var suffix = ' (' + n + ')';
+      var candidate = name.slice(0, 24 - suffix.length) + suffix;
+      if (!used[candidate]) return candidate;
+    }
+    return name;
+  }
+
+  function openImport() {
+    if (state.showAll) return;
+    cancelGroupEdit();
+    importState.loading = false;
+    importState.result = null;
+    importState.seq++;
+    $('import-panel').hidden = false;
+    $('import-link').value = '';
+    $('import-link').disabled = false;
+    $('import-read').disabled = false;
+    $('import-preview').hidden = true;
+    $('import-list').innerHTML = '';
+    $('import-summary').textContent = '';
+    setImportStatus('把同花顺自选 / 分组分享链接粘进来，只读取这一个分享。', 'info');
+    $('import-link').focus();
+  }
+
+  function closeImport() {
+    importState.loading = false;
+    importState.result = null;
+    importState.seq++;
+    $('import-panel').hidden = true;
+    $('import-link').value = '';
+    $('import-link').disabled = false;
+    $('import-read').disabled = false;
+    $('import-preview').hidden = true;
+    $('import-list').innerHTML = '';
+    $('import-summary').textContent = '';
+    setImportStatus('', '');
+  }
+
+  function renderImportTargets(result) {
+    var g = activeGroup();
+    var atMax = state.groups.length >= MAX_GROUPS;
+    var newEl = $('import-target-new');
+    var mergeEl = $('import-target-merge');
+
+    $('import-target-new-label').textContent =
+      '新建分组「' + (result.groupName || '导入分组') + '」';
+    $('import-target-merge-label').textContent = g
+      ? '合并到当前分组「' + g.name + '」'
+      : '合并到当前分组（无）';
+    newEl.disabled = atMax;
+    mergeEl.disabled = !g;
+
+    if (newEl.checked && atMax) mergeEl.checked = !!(g && !mergeEl.disabled);
+    if (mergeEl.checked && !g) newEl.checked = !atMax;
+    if (!newEl.checked && !mergeEl.checked) {
+      if (!atMax) newEl.checked = true;
+      else if (g) mergeEl.checked = true;
+    }
+    updateImportApplyState();
+  }
+
+  function updateImportApplyState() {
+    var result = importState.result;
+    var atMax = state.groups.length >= MAX_GROUPS;
+    var hasReady = !!(result && result.counts && result.counts.ready > 0);
+    var targetOk = $('import-target-new').checked ? !atMax : !!activeGroup();
+    $('import-apply').disabled = !(hasReady && targetOk);
+  }
+
+  function renderImportPreview(result) {
+    var c = result.counts || {};
+    var parts = [
+      (result.shareType === 'selfgroup' ? '同花顺分组' : '同花顺自选') + '「' + result.groupName + '」',
+      '共 ' + (c.total || 0) + ' 个',
+      '可导入 ' + (c.ready || 0)
+    ];
+    if (c.duplicate) parts.push('重复 ' + c.duplicate);
+    if (c.unmapped) parts.push('市场未识别 ' + c.unmapped);
+    if (c.invalid) parts.push('无效 ' + c.invalid);
+    if (c.truncated) parts.push('超出上限 ' + c.truncated + ' 个未读取');
+    $('import-summary').textContent = parts.join(' · ');
+
+    var ul = $('import-list');
+    ul.innerHTML = '';
+    var items = (result.items || []).slice(0, MAX_IMPORT_PREVIEW);
+    items.forEach(function (item) {
+      var li = document.createElement('li');
+      if (!item.mapped) li.className = 'off';
+
+      var ic = document.createElement('span');
+      ic.className = 'ic';
+      ic.textContent = item.code;
+
+      var sym = document.createElement('span');
+      sym.className = 'isym';
+      sym.textContent = item.symbol || '—';
+
+      var nm = document.createElement('span');
+      nm.className = 'inm';
+      nm.textContent = item.symbol && state.names[item.symbol]
+        ? state.names[item.symbol]
+        : (item.mapped ? '' : '市场 ' + item.market + ' 未识别');
+
+      li.appendChild(ic);
+      li.appendChild(sym);
+      li.appendChild(nm);
+      if (!item.mapped) {
+        var why = document.createElement('span');
+        why.className = 'why';
+        why.textContent = '跳过';
+        li.appendChild(why);
+      }
+      ul.appendChild(li);
+    });
+
+    var rest = (result.items || []).length - items.length;
+    if (rest > 0) {
+      var more = document.createElement('li');
+      more.className = 'more';
+      more.textContent = '还有 ' + rest + ' 个未展开，导入时会一并处理';
+      ul.appendChild(more);
+    }
+
+    $('import-preview').hidden = false;
+    renderImportTargets(result);
+  }
+
+  function readImport() {
+    if (importState.loading) return;
+    var link = $('import-link').value.trim();
+    if (!link) {
+      setImportStatus('先把分享链接粘进来', 'err');
+      $('import-link').focus();
+      return;
+    }
+
+    importState.loading = true;
+    importState.result = null;
+    var seq = ++importState.seq;
+    $('import-read').disabled = true;
+    $('import-link').disabled = true;
+    $('import-preview').hidden = true;
+    setImportStatus('读取中…', 'info');
+
+    window.ticker.importShare(link).then(function (result) {
+      if (seq !== importState.seq) return;
+      importState.loading = false;
+      $('import-read').disabled = false;
+      $('import-link').disabled = false;
+      if (!result || !result.ok) {
+        setImportStatus((result && result.msg) || '读取失败', 'err');
+        return;
+      }
+      importState.result = result;
+      renderImportPreview(result);
+      if (!result.counts || !result.counts.ready) {
+        setImportStatus('这个分享里没有可导入的标的' +
+          (result.counts && result.counts.unmapped
+            ? '（' + result.counts.unmapped + ' 个市场暂不支持）'
+            : ''), 'err');
+      } else {
+        setImportStatus('读取成功，确认后导入到草稿', 'ok');
+      }
+    }).catch(function (e) {
+      if (seq !== importState.seq) return;
+      importState.loading = false;
+      $('import-read').disabled = false;
+      $('import-link').disabled = false;
+      setImportStatus('读取失败：' + (e && e.message ? e.message : e), 'err');
+    });
+  }
+
+  function applyImport() {
+    var result = importState.result;
+    if (!result) return;
+
+    var mapped = (result.items || []).filter(function (item) {
+      return item.mapped && item.symbol;
+    });
+    if (!mapped.length) {
+      setImportStatus('没有可导入的标的', 'err');
+      return;
+    }
+
+    var merge = $('import-target-merge').checked;
+    var target = null;
+
+    if (merge) {
+      target = activeGroup();
+      if (!target) {
+        setImportStatus('当前没有可合并的分组', 'err');
+        return;
+      }
+    } else {
+      if (state.groups.length >= MAX_GROUPS) {
+        setImportStatus('最多只能建 ' + MAX_GROUPS + ' 个分组，请改成合并到当前分组', 'err');
+        return;
+      }
+      target = {
+        id: newGroupId(),
+        name: uniqueGroupName(result.groupName),
+        symbols: []
+      };
+      state.groups.push(target);
+      state.activeGroupId = target.id;
+      state.showAll = false;
+    }
+
+    var added = 0;
+    var duplicate = 0;
+    mapped.forEach(function (item) {
+      if (target.symbols.indexOf(item.symbol) >= 0) {
+        duplicate++;
+        return;
+      }
+      target.symbols.push(item.symbol);
+      if (state.watchlist.indexOf(item.symbol) < 0) state.watchlist.push(item.symbol);
+      added++;
+      if (!state.names[item.symbol]) state.names[item.symbol] = item.symbol;
+    });
+
+    var skipped = (result.counts && result.counts.unmapped) || 0;
+    closeImport();
+    renderList(added > 0);
+
+    var text = added > 0
+      ? '已导入 ' + added + ' 个到「' + target.name + '」，记得点「保存并应用」'
+      : '这些标的都已在「' + target.name + '」中';
+    if (duplicate && added > 0) text += '；' + duplicate + ' 个已存在';
+    if (skipped) text += '；' + skipped + ' 个市场未识别已跳过';
+    setMsg(text, added > 0 ? 'ok' : 'info');
+  }
+
   function isCodeLike(s) {
-    return /^(sh|sz|bj|hk|us)[a-z0-9.]{1,12}$/i.test(s) || /^\d{6}$/.test(s);
+    return /^(sh|sz|bj|hk|us|em)[a-z0-9.]{1,12}$/i.test(s) || /^\d{6}$/.test(s);
   }
 
   function addByCode(code, hintName) {
@@ -473,6 +732,35 @@
   }
 
   /* ---- 收盘退出状态提示 ---- */
+  // 港股 16:00 收盘，比 A 股晚一小时；自选里含港股时退出时间自动顺延到 16:05。
+  // 和主进程 hasHkSymbols / autoExitTime 保持同一套规则。
+  var HK_EXIT_TIME = '16:05';
+
+  function viewHasHk() {
+    var g = activeGroup();
+    var list = (g && g.symbols) || [];
+    var names = state.names || {};
+    return list.some(function (c) {
+      return /^hk/i.test(c) || (/^em\d{6}$/i.test(c) && /港股|香港/.test(names[c] || ''));
+    });
+  }
+
+  function minutesOfTime(t) {
+    var m = /^(\d{2}):(\d{2})$/.exec(String(t || ''));
+    return m ? parseInt(m[1], 10) * 60 + parseInt(m[2], 10) : null;
+  }
+
+  // 返回实际生效的退出时间（含港股且设置早于 16:05 时顺延）
+  function effectiveExitTime() {
+    var raw = $('autoExitTime').value || '15:05';
+    var a = minutesOfTime(raw);
+    var hk = minutesOfTime(HK_EXIT_TIME);
+    if (viewHasHk() && a != null && hk != null && a < hk) {
+      return { at: HK_EXIT_TIME, raw: raw, deferred: true };
+    }
+    return { at: raw, raw: raw, deferred: false };
+  }
+
   // 规则和主进程一致：打开（或改配置）时已经过了退出时间，这次会话就不踢。
   function refreshExitHint() {
     var el = $('exit-hint');
@@ -481,15 +769,16 @@
       el.textContent = '已关闭：窗口会一直留着，需要手动退出。';
       return;
     }
-    var t = $('autoExitTime').value || '15:05';
-    var m = /^(\d{2}):(\d{2})$/.exec(t);
-    var at = m ? parseInt(m[1], 10) * 60 + parseInt(m[2], 10) : null;
+    var eff = effectiveExitTime();
+    var t = eff.at;
+    var deferredNote = eff.deferred ? '（含港股，已从 ' + eff.raw + ' 顺延到 ' + HK_EXIT_TIME + '）' : '';
+    var at = minutesOfTime(t);
     var d = new Date();
     var now = d.getHours() * 60 + d.getMinutes();
     if (at != null && now >= at) {
-      el.textContent = '现在已过 ' + t + '，本次打开的窗口不会自动退出；明天从计划任务启动的那次会正常到点关掉。';
+      el.textContent = '现在已过 ' + t + '，本次打开的窗口不会自动退出；明天从计划任务启动的那次会正常到点关掉。' + deferredNote;
     } else {
-      el.textContent = '到 ' + t + ' 会自动关掉浮窗。';
+      el.textContent = '到 ' + t + ' 会自动关掉浮窗。' + deferredNote;
     }
   }
 
@@ -752,6 +1041,7 @@
       showName: $('showName').checked,
       baseline: $('baseline').checked,
       showTopIndex: $('showTopIndex').checked,
+      showMarketOverview: $('showMarketOverview').checked,
       shortcuts: state.shortcuts,
       alert: {
         enabled: $('alertOn').checked,
@@ -833,6 +1123,7 @@
     $('showName').checked = d.showName !== false;
     $('baseline').checked = d.baseline !== false;
     $('showTopIndex').checked = d.showTopIndex !== false;
+    $('showMarketOverview').checked = d.showMarketOverview !== false;
     var fcs = document.querySelector('input[name="focusChartSide"][value="' + (d.focusChartSide || 'auto') + '"]');
     if (fcs) fcs.checked = true;
 
@@ -893,6 +1184,25 @@
   $('group-name').addEventListener('keydown', function (e) {
     if (e.key === 'Enter') { e.preventDefault(); commitGroupEdit(); }
     else if (e.key === 'Escape') { e.stopPropagation(); cancelGroupEdit(); }
+  });
+
+  /* ---- 分享导入事件 ---- */
+  $('group-import').addEventListener('click', function () {
+    if ($('import-panel').hidden) openImport();
+    else closeImport();
+  });
+  $('import-read').addEventListener('click', readImport);
+  $('import-cancel').addEventListener('click', closeImport);
+  $('import-apply').addEventListener('click', applyImport);
+  $('import-target-new').addEventListener('change', updateImportApplyState);
+  $('import-target-merge').addEventListener('change', updateImportApplyState);
+  $('import-link').addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') { e.preventDefault(); readImport(); }
+    else if (e.key === 'Escape') { e.stopPropagation(); closeImport(); }
+  });
+  // 空分组提示里的「导入」：元素是每次重绘 innerHTML 生成的，用委托接
+  $('symbol-hint').addEventListener('click', function (e) {
+    if (e.target && e.target.id === 'hint-import') openImport();
   });
 
   /* ---- 事件 ---- */
@@ -992,6 +1302,8 @@
       var nm = rows[i].querySelector('.nm');
       if (code && nm && state.names[code]) nm.textContent = state.names[code];
     }
+    // 晚到的名称可能让「em 指数是不是港股」变得确定，顺带刷新退出时间提示
+    refreshExitHint();
   }
   if (window.ticker.onSettingsNames) {
     window.ticker.onSettingsNames(paintNames);
@@ -1004,7 +1316,10 @@
     // 正在录入快捷键时不触发全局快捷键
     var editing = document.querySelector('.sc.editing');
     if (editing) return;
-    if (e.key === 'Escape') window.ticker.closeSettings();
+    if (e.key === 'Escape') {
+      if (!$('import-panel').hidden) { closeImport(); return; }
+      window.ticker.closeSettings();
+    }
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { e.preventDefault(); save(); }
   });
 })();

@@ -413,7 +413,8 @@ test('分钟 K 优先走东财：A 股 / 港股 / 美股指数都能拿到多天
     ['bj899050', 'm30', '0.899050', 30],
     ['hkHSTECH', 'm5', '124.HSTECH', 5],
     ['usDJI', 'm60', '100.DJIA', 60],
-    ['hf_XAU', 'm5', '122.XAU', 5]
+    ['hf_XAU', 'm5', '122.XAU', 5],
+    ['em931787', 'm5', '2.931787', 5]
   ];
   for (let i = 0; i < cases.length; i++) {
     const c = cases[i];
@@ -435,4 +436,145 @@ test('新浪外盘：东财给不出分钟 K 时返回空，不拿日 K 冒充',
   });
   const market = createMarket({ http: http });
   assert.deepEqual(await market.fetchKlineRaw('hf_GC', 'm15', 320), []);
+});
+
+test('em 前缀的东财专属指数：快照 / 分时都走 2.xxxxxx', async function () {
+  const urls = [];
+  const http = makeHttp({
+    json: function (url) {
+      urls.push(url);
+      if (url.indexOf('stock/get') >= 0) {
+        return { data: { f43: 131025, f57: '931787', f58: '港股创新药', f60: 134874, f170: -285 } };
+      }
+      if (url.indexOf('trends2') >= 0) {
+        return { data: { trends: [
+          '2026-11-16 09:30,1300.0,1310.25,1315.0,1298.0,10,0,1305.0',
+          '2026-11-16 09:31,1310.25,1311.00,1313.0,1309.0,12,0,1307.0'
+        ] } };
+      }
+      return { data: {} };
+    }
+  });
+  const market = createMarket({ http: http });
+
+  const snap = await market.fetchSnapshots(['em931787']);
+  assert.ok(urls[0].indexOf('secid=2.931787') >= 0);
+  assert.equal(snap.em931787.name, '港股创新药');
+  assert.equal(snap.em931787.price, 1310.25);
+  assert.equal(snap.em931787.prevClose, 1348.74);
+  assert.equal(snap.em931787.pct, -2.85);
+
+  const pts = await market.fetchMinuteSeries('em931787');
+  assert.deepEqual(pts, [1310.25, 1311]);
+  assert.ok(urls[1].indexOf('secid=2.931787') >= 0);
+});
+
+test('东财快照失败时 em 指数用中证补名称和价格，并识别港元指数', async function () {
+  const calls = { snapshot: 0, info: 0, quote: 0 };
+  const http = makeHttp({
+    json: function (url) {
+      if (url.indexOf('stock/get') >= 0) {
+        calls.snapshot++;
+        throw new Error('fetch failed');
+      }
+      if (url.indexOf('index-basic-info') >= 0) {
+        calls.info++;
+        return { data: {
+          indexFullNameCn: '中证香港创新药指数',
+          indexShortNameCn: '港股创新药',
+          currencyCn: '港元',
+          currencyEn: 'HKD'
+        } };
+      }
+      if (url.indexOf('index-perf-oneday') >= 0) {
+        calls.quote++;
+        return { data: {
+          intraDayHeader: {
+            tradeDate: '2026-11-16', current: 1313.62, closePre: 1348.74, changePct: -2.6
+          },
+          intraDayPerfList: []
+        } };
+      }
+      throw new Error('unexpected json: ' + url);
+    }
+  });
+  const market = createMarket({ http: http });
+
+  const snap = await market.fetchSnapshots(['em931787']);
+  assert.equal(snap.em931787.name, '港股创新药');
+  // 价格 / 昨收 / 涨跌幅都从中证补，不能让列表拿最后一分钟和前一分比出 +0.3%
+  assert.equal(snap.em931787.price, 1313.62);
+  assert.equal(snap.em931787.prevClose, 1348.74);
+  assert.equal(snap.em931787.pct, -2.6);
+  assert.ok(Math.abs(snap.em931787.change - (1313.62 - 1348.74)) < 1e-9);
+  assert.equal(calls.info, 1);
+  assert.equal(calls.quote, 1);
+
+  // 同一代码命中缓存，不重复请求中证基本信息 / 快照
+  const info = await market.fetchCsindexInfo('em931787');
+  assert.equal(info.name, '港股创新药');
+  assert.equal(info.hk, true);
+  const quote = await market.fetchCsindexQuote('em931787');
+  assert.equal(quote.price, 1313.62);
+  assert.equal(calls.info, 1);
+  assert.equal(calls.quote, 1);
+});
+
+test('非港股主题的中证指数不会被当成 16:00 收盘', async function () {
+  const http = makeHttp({
+    json: function (url) {
+      if (url.indexOf('index-basic-info') >= 0) {
+        return { data: { indexShortNameCn: '动漫游戏', currencyCn: '人民币', currencyEn: 'CNY' } };
+      }
+      return { data: {} };
+    }
+  });
+  const market = createMarket({ http: http });
+  const info = await market.fetchCsindexInfo('930901');
+  assert.equal(info.name, '动漫游戏');
+  assert.equal(info.hk, false);
+
+  // 非 6 位数字 / 非法代码不请求接口
+  assert.equal(await market.fetchCsindexInfo('sh000001'), null);
+});
+
+test('searchSymbols 腾讯查不到时用东财补指数，6 位基金仍然兜底', async function () {
+  const emPayload = {
+    QuotationCodeTable: {
+      Data: [{
+        Code: '931787', Name: '港股创新药', SecurityTypeName: '指数', QuoteID: '2.931787'
+      }, {
+        Code: '000300', Name: '沪深300', SecurityTypeName: '指数', QuoteID: '1.000300'
+      }]
+    }
+  };
+  const hs300Payload = {
+    QuotationCodeTable: {
+      Data: [{ Code: '000300', Name: '沪深300', SecurityTypeName: '指数', QuoteID: '1.000300' }]
+    }
+  };
+  const http = makeHttp({
+    gbk: function () { return 'v_hint="N"'; },
+    json: function (url) {
+      return decodeURIComponent(url).indexOf('沪深300') >= 0 ? hs300Payload : emPayload;
+    }
+  });
+  const market = createMarket({ http: http });
+
+  const list = await market.searchSymbols('931787');
+  const hit = list.find(function (x) { return x.code === 'em931787'; });
+  assert.ok(hit);
+  assert.equal(hit.name, '港股创新药');
+  assert.equal(hit.typeLabel, '指数');
+
+  const hs300 = await market.searchSymbols('沪深300');
+  assert.equal(hs300[0].code, 'sh000300');
+
+  const fundHttp = makeHttp({
+    gbk: function () { return 'v_hint="N"'; },
+    json: function () { return { QuotationCodeTable: { Data: [] } }; }
+  });
+  const market2 = createMarket({ http: fundHttp });
+  const fund = await market2.searchSymbols('001186');
+  assert.deepEqual(fund.map(function (x) { return x.code; }), ['001186']);
 });

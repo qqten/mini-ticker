@@ -122,7 +122,7 @@ body[data-text="dark"] {
    但不能太长——否则临界区来回切时会看到颜色慢慢渐变再反向渐变，反而更晃。
    text-shadow 必须一起过渡：描边光晕是黑↔白反向变的，只淡颜色会让字在切换
    的 120ms 里"糊"一下（深字配白晕）。 */
-.name, .chg, .pct, .spark polyline, .spark .baseline, #period-label, #group-btn, #sort-btn, #f-name {
+.name, .chg, .pct, .spark polyline, .spark .baseline, #period-label, #group-btn, #sort-btn, #f-name, #market-bar {
   transition: color .12s ease, text-shadow .12s ease, stroke .12s ease, filter .12s ease;
 }
 
@@ -144,6 +144,53 @@ body[data-text="dark"].backdrop {
   flex: 0 0 auto;
   white-space: nowrap;
 }
+
+/* 大盘概览：指数条下方独立一行。宽度不够时按从右往左的顺序收起，
+   具体收起哪几项由 app.js 的 fitMarket() 加 body 类决定。 */
+#market-bar {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 1px 9px 0;
+  height: 15px;
+  flex: 0 0 auto;
+  font-size: 10px;
+  line-height: 13px;
+  color: var(--sub);
+  text-shadow: var(--shadow);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+#market-bar[hidden] {
+  display: none;
+}
+
+.mb-item {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 2px;
+}
+
+.mb-label {
+  font-style: normal;
+  font-size: 9px;
+  opacity: .55;
+}
+
+.mb-val {
+  font-variant-numeric: tabular-nums;
+}
+
+#market-bar .mb-up { color: var(--up); }
+#market-bar .mb-down { color: var(--down); }
+
+#market-bar.no-proj .mb-proj { display: none; }
+body.mb-drop-proj .mb-proj { display: none; }
+body.mb-drop-vs .mb-vs { display: none; }
+body.mb-slim .mb-label { display: none; }
+body.mb-drop-breadth .mb-breadth { display: none; }
 
 /* 右侧三个控件绝不压缩、绝不换行：窗口再窄也优先保住它们 */
 #sort-btn, #period-label, #pin-btn {
@@ -321,9 +368,9 @@ body.pinned #pin-btn { opacity: 1; fill: var(--up); }
   display: none;
   min-width: 92px;
   max-width: 200px;
-  max-height: 60vh;
-  overflow-y: auto;
-  padding: 4px;
+  max-height: calc(100vh - 8px);
+  overflow: hidden;
+  padding: 0;
   border-radius: 6px;
   border: 1px solid rgba(140, 152, 170, .25);
   background: rgba(20, 23, 29, .96);
@@ -358,6 +405,22 @@ body[data-text="dark"] #group-menu {
 .gm-item:hover { background: rgba(128, 140, 160, .18); color: var(--text); }
 .gm-item.on { color: var(--text); }
 .gm-item.on::before { content: "✓ "; }
+
+/* 组名列表单独滚动，管理入口固定在底部，窗口再矮也不会被挤出可视区 */
+.gm-list {
+  max-height: min(60vh, calc(100vh - 42px));
+  overflow-y: auto;
+  padding: 4px;
+}
+.gm-list::-webkit-scrollbar { width: 6px; }
+.gm-list::-webkit-scrollbar-track { background: transparent; }
+.gm-list::-webkit-scrollbar-thumb { background: rgba(140, 152, 170, .4); border-radius: 3px; }
+.gm-list::-webkit-scrollbar-button { display: none; height: 0; }
+
+.gm-foot {
+  padding: 4px;
+  border-top: 1px solid rgba(140, 152, 170, .22);
+}
 
 /* 指数下拉：每行「名称 + 点位 + 涨跌幅」，点一行就换顶部指数并展开走势 */
 #index-menu {

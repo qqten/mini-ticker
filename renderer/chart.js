@@ -351,8 +351,11 @@
     if (elLevelCur) elLevelCur.textContent = minLabel(state.min);
     if (elLevel) {
       elLevel.classList.toggle('on', state.tab === 'min');
-      elLevel.title = '分时级别：点开选 ' + levelList().map(minLabel).join(' / ') +
-        '（在设置 → 行情 → 图表周期里可以增减这几档）';
+      // 在分钟级别图上点开列表；其它周期上点一下先切到当前选中的分钟图。
+      elLevel.title = state.tab === 'min'
+        ? '分时级别：点开选 ' + levelList().map(minLabel).join(' / ') +
+          '（在设置 → 行情 → 图表周期里可以增减这几档）'
+        : '切到当前分时级别（' + minLabel(state.min) + '），再点一下展开级别列表';
     }
   }
 
@@ -409,14 +412,22 @@
     else openLevelMenu();
   }
 
-  function sessionTicks(code, session) {
-    if (/^hk/i.test(code)) {
-      return [[0, '09:30'], [100, '11:00'], [182, '13:00'], [272, '15:00'], [session - 1, '16:00']];
+  function sessionTicks(p, session) {
+    var market = (p && p.market) || '';
+    var code = (p && p.code) || '';
+    if (market === 'hk-index') {
+      // 中证口径的港股指数：09:30-11:30 + 13:00-16:00，午休压缩，共 302 个槽位
+      return [[0, '09:30'], [90, '11:00'], [121, '13:00'], [241, '15:00'], [session - 1, '16:00']];
     }
-    if (/^us/i.test(code)) {
+    if (market === 'hk' || /^hk/i.test(code)) {
+      // 港股：09:30-12:00 + 13:00-16:00，共 332 个分钟槽位
+      return [[0, '09:30'], [90, '11:00'], [151, '13:00'], [271, '15:00'], [session - 1, '16:00']];
+    }
+    if (market === 'us' || /^us/i.test(code)) {
       return [[0, '09:30'], [120, '11:30'], [212, '13:00'], [322, '15:00'], [session - 1, '16:00']];
     }
-    return [[0, '09:30'], [60, '10:30'], [120, '13:00'], [180, '14:00'], [session - 1, '15:00']];
+    // A 股：09:30-11:30 + 13:00-15:00；13:00 是午休后的第一个槽位
+    return [[0, '09:30'], [60, '10:30'], [121, '13:00'], [181, '14:00'], [session - 1, '15:00']];
   }
 
   function renderMinute(p) {
@@ -441,12 +452,20 @@
       var prec = days[d].prec;
       var base = multi ? d * session : 0;
       var off = 0;
-      if (multi && d < days.length - 1 && arr.length < session) off = session - arr.length;
+      // 后端给了 slot 的（港股指数 / 中证口径）已经按真实时钟排好，不能再整体右移；
+      // 只有纯按数组下标排的旧数据才需要靠右补齐。
+      var hasSlot = arr.length > 0 && isNum(arr[0].slot);
+      if (multi && d < days.length - 1 && arr.length < session && !hasSlot) {
+        off = session - arr.length;
+      }
       dayStart.push(base);
       dayOffset.push(off);
       for (var i = 0; i < arr.length; i++) {
+        // 港股分时的点在中午休市 / 15:00 之后会有空档，用后端给的 slot 摆在真实时间位置，
+        // 没有 slot 的（A 股、5 日图）仍按数组下标排。
+        var slot = isNum(arr[i].slot) ? arr[i].slot : i;
         pts.push({
-          x: base + off + i,
+          x: base + off + slot,
           p: arr[i].price,
           v: arr[i].vol,
           a: arr[i].avg,
@@ -513,9 +532,12 @@
     var leftEdge = g.padL, rightEdge = g.padL + g.plotW;
     for (var dd = 0; dd < days.length; dd++) {
       var pc = days[dd].prec;
-      var dayN = (days[dd].points || []).length;
-      var dx0 = dayStart[dd] + dayOffset[dd];
-      var dx1 = dx0 + Math.max(0, dayN - 1);
+      var dayPts = days[dd].points || [];
+      var dayN = dayPts.length;
+      var firstSlot = dayN && isNum(dayPts[0].slot) ? dayPts[0].slot : 0;
+      var lastSlot = dayN && isNum(dayPts[dayN - 1].slot) ? dayPts[dayN - 1].slot : Math.max(0, dayN - 1);
+      var dx0 = dayStart[dd] + dayOffset[dd] + firstSlot;
+      var dx1 = dayStart[dd] + dayOffset[dd] + lastSlot;
       if (dx1 < xs || dx0 > xe) continue;
       if (isNum(pc) && pc > 0) {
         var yb = Y(pc);
@@ -546,8 +568,9 @@
       }
     }
 
-    // 价格线 + 均价线：按 x 连续性分段。前一天结尾和后一天开头之间有缺口的，
-    // 直接断开，不再用一条斜线把两段不相邻的行情硬连起来。
+    // 价格线 + 均价线：跨交易日就断开，不再用一条斜线把两天硬连起来。
+    // 同一天内允许 x 不连续（比如港股中证 1 分钟点、东财 5 分钟点混排），
+    // 否则 5 分钟级别的点每隔 5 格就断一次，整条线会消失。
     var lineSegs = [], avgSegs = [], lineSeg = [], avgSeg = [];
     function flushSeg() {
       if (lineSeg.length > 1) lineSegs.push(lineSeg);
@@ -557,7 +580,7 @@
     }
     for (var n = 0; n < pts.length; n++) {
       if (pts[n].x < xs - 1 || pts[n].x > xe + 1) continue;
-      if (lineSeg.length && pts[n].x !== pts[n - 1].x + 1) flushSeg();
+      if (lineSeg.length && pts[n].day !== pts[n - 1].day) flushSeg();
       var xx = X(pts[n].x).toFixed(1);
       lineSeg.push(xx + ',' + Y(pts[n].p).toFixed(1));
       if (isNum(pts[n].a)) avgSeg.push(xx + ',' + Y(pts[n].a).toFixed(1));
@@ -601,12 +624,16 @@
     if (!isZoomed()) {
       if (days.length > 1) {
         for (var q = 0; q < days.length; q++) {
-          var qn = (days[q].points || []).length;
-          var cx = X(dayStart[q] + dayOffset[q] + Math.floor(Math.max(0, qn - 1) / 2));
+          var qp = days[q].points || [];
+          var qFirst = qp.length && isNum(qp[0].slot) ? qp[0].slot : 0;
+          var qLast = qp.length && isNum(qp[qp.length - 1].slot)
+            ? qp[qp.length - 1].slot
+            : Math.max(0, qp.length - 1);
+          var cx = X(dayStart[q] + dayOffset[q] + (qFirst + qLast) / 2);
           s.push(axisLabel(cx, g.axisY, shortDate(days[q].date), g.W, T.sub));
         }
       } else {
-        var ticks = sessionTicks(p.code, session);
+        var ticks = sessionTicks(p, session);
         var right = g.W - g.padR;
         for (var t = 0; t < ticks.length; t++) {
           var tx = Math.max(g.padL, Math.min(right, X(ticks[t][0])));
@@ -1324,14 +1351,25 @@
     window.ticker.focusTab(TAB_ORDER[i]);
   }
 
-  /* ---- 下拉交互：点按钮展开、点外面收起 ---- */
+  /* ---- 下拉交互：不在分钟图上先切到选中档位，在分钟图上再点才展开 ---- */
+  function levelTap() {
+    // 已经在 5/15/30/60 分钟图上：点一下展开可选列表
+    if (state.tab === 'min') {
+      toggleLevelMenu();
+      return;
+    }
+    // 不在分钟图上（分时 / 日K / 周K / 月K）：先切到当前选中的分钟图
+    closeLevelMenu();
+    window.ticker.focusTab('min', state.min);
+  }
+
   if (elLevel) {
     elLevel.addEventListener('click', function (e) {
       e.stopPropagation();
-      toggleLevelMenu();
+      levelTap();
     });
     elLevel.addEventListener('keydown', function (e) {
-      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleLevelMenu(); }
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); levelTap(); }
     });
   }
 

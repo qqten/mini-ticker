@@ -91,6 +91,7 @@ function applySettingsPatch(current, raw) {
     showName: raw.showName !== false,
     baseline: raw.baseline !== false,
     showTopIndex: raw.showTopIndex !== false,
+    showMarketOverview: raw.showMarketOverview !== false,
     topIndex: topIndex,
     // 面板里已经没有「始终置顶 / 锁定位置」这两个开关了，缺省时沿用当前值，
     // 否则每次保存都会把它们重置成 false（窗口就不再置顶）。

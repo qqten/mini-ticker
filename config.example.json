@@ -58,6 +58,7 @@
   "sortMode": "off",
   "showTopIndex": true,
   "topIndex": "sh000001",
+  "showMarketOverview": true,
   "alwaysOnTop": true,
   "locked": false,
   "width": 320,

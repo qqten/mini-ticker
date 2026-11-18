@@ -139,6 +139,11 @@ test('applySettingsPatch 顶部指数：没传时沿用当前，非法值回退'
 
   const bad = applySettingsPatch(cur, { symbols: ['sh000001'], topIndex: 'sh600519' });
   assert.equal(bad.patch.topIndex, 'sh000001');
+
+  const marketOff = applySettingsPatch(cur, { symbols: ['sh000001'], showMarketOverview: false });
+  assert.equal(marketOff.patch.showMarketOverview, false);
+  const marketOn = applySettingsPatch(cur, { symbols: ['sh000001'] });
+  assert.equal(marketOn.patch.showMarketOverview, true);
 });
 
 test('applySettingsPatch 规范化快捷键，并只在全局键变化时要求重注册', function () {
@@ -218,7 +223,7 @@ test('applySettingsPatch 只返回设置面板负责的字段', function () {
   assert.deepEqual(Object.keys(result.patch).sort(), [
     'activeGroupId', 'alert', 'alwaysOnTop', 'autoExit', 'autoStart', 'backdrop', 'backdropOpacity',
     'baseline', 'focusChartSide', 'focusInterval', 'focusIntervals', 'groups', 'interval', 'locked',
-    'period', 'probeIntervalMs', 'shortcuts', 'showName', 'showTopIndex', 'symbols',
+    'period', 'probeIntervalMs', 'shortcuts', 'showMarketOverview', 'showName', 'showTopIndex', 'symbols',
     'textMode', 'topIndex', 'watchlist', 'width'
   ]);
 });
