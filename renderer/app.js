@@ -455,8 +455,11 @@
     // 共约 1380 个分钟点。都按交易时间占比映射，开盘初期数据少就只占左边一段。
     var TOTAL_MINUTES_A = 240;
     var TOTAL_MINUTES_HF = 1380;
-    var isHf = /^hf_/i.test(item.code || '') || /^usDXY$/i.test(item.code || '');
-    var total = isHf ? TOTAL_MINUTES_HF : TOTAL_MINUTES_A;
+    // 上金所 T+D：20:00-02:30 + 09:00-11:30 + 13:30-15:30，约 660 分钟
+    var TOTAL_MINUTES_SGE = 660;
+    var code = item.code || '';
+    var total = /^sge_/i.test(code) ? TOTAL_MINUTES_SGE
+      : (/^hf_/i.test(code) || /^usDXY$/i.test(code) ? TOTAL_MINUTES_HF : TOTAL_MINUTES_A);
     var xScale = (currentPeriod === 'minute')
       ? (VW / total)
       : (VW / Math.max(1, pts.length - 1));

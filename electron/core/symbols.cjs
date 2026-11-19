@@ -49,7 +49,7 @@ function isHkSymbol(code, name) {
 
 function isValidCode(c) {
   if (typeof c !== 'string') return false;
-  return /^(sh|sz|bj|hk|us|hf)[a-z0-9._]{1,12}$/i.test(c) ||
+  return /^(sh|sz|bj|hk|us|hf|sge)[a-z0-9._]{1,12}$/i.test(c) ||
     /^\d{6}$/.test(c) || /^em\d{6}$/i.test(c);
 }
 

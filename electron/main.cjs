@@ -505,7 +505,7 @@ function createWindow() {
       }
 
       // 调试：TICKER_SHOT_CROSS=0.55 在聚焦图表里模拟悬停，截十字光标 + 数值提示
-      // 0~1 是横向位置比例，纵向固定落在价格区（成交量/MACD 区不弹提示）
+      // 0~1 是横向位置比例，纵向固定在 30% 高度
       if (process.env.TICKER_SHOT_CROSS) {
         setTimeout(async function () {
           if (!win || win.isDestroyed()) return;

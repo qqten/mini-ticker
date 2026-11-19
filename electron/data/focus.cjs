@@ -6,7 +6,7 @@ const {
 } = require('../core/constants.cjs');
 const { num } = require('../core/utils.cjs');
 const { emIndexSecid, isEmIndexCode, isHkSymbol } = require('../core/symbols.cjs');
-const { HEADERS } = require('./market.cjs');
+const { HEADERS, SINA_HEADERS } = require('./market.cjs');
 
 // 聚焦图表的周期：分时 / 5日 / 日K / 周K / 月K，外加可配置的分时级别 K 线。
 // 分时级别本身由一个 tab + 一个分钟数决定（config.focusInterval），
@@ -19,6 +19,8 @@ const FOCUS_SESSION_HK = 332;  // 港股：09:30-12:00 + 13:00-16:00
 const FOCUS_SESSION_HK_INDEX = 302;
 const FOCUS_SESSION_US = 392;  // 美股：09:30-16:00（东部时间）
 const FOCUS_SESSION_HF = 1440; // 外盘期货/美元指数：近乎 24 小时连续交易（实际约 1380 分钟），留足余量
+// 上金所 T+D：20:00-02:30 + 09:00-11:30 + 13:30-15:30，共 660 个分钟槽位
+const FOCUS_SESSION_SGE = 660;
 const FOCUS_TTL = { minute: 15000, five: 60000, day: 60000, week: 60000, month: 60000, min: 30000 };
 
 // 日K 往后翻要靠历史：腾讯 fqkline 实测最多给到 1200 根（约 5 年，最早 2021-11），
@@ -41,7 +43,9 @@ function minIntervalOf(minutes) {
 }
 
 function sessionMinutes(code, name) {
+  // 外盘期货 / 美元指数：近乎 24 小时连续交易，按 1440 个分钟槽位画
   if (/^hf_/i.test(code) || /^usDXY$/i.test(code)) return FOCUS_SESSION_HF;
+  if (/^sge_/i.test(code)) return FOCUS_SESSION_SGE;
   if (isHkSymbol(code, name)) return FOCUS_SESSION_HK;
   if (/^us/i.test(code)) return FOCUS_SESSION_US;
   return FOCUS_SESSION_A;
@@ -123,6 +127,51 @@ function parseMinuteLines(lines) {
     cumPV += p * v;
     pts.push({ t: t, price: p, vol: v, avg: cumVol > 0 ? cumPV / cumVol : p });
   }
+  return pts;
+}
+
+// 腾讯分时 / 5 日分时只覆盖 A 股（sh / sz / bj），外盘、美元指数、上金所不能走这条路
+function isTencentMinuteCode(code) {
+  return /^(sh|sz|bj)\d{6}$/i.test(String(code || ''));
+}
+
+// 腾讯 day/query：`data[code].data = [{date, data:[行...]}]`，按「今天 → 前 4 天」倒序给。
+// 行格式和 minute/query 一样（时间 价格 累计量 累计额），解析后转成正序。
+function parseTencentFiveDays(block) {
+  const arr = block && block.data;
+  if (!Array.isArray(arr)) return [];
+  return arr.slice().sort(function (a, b) {
+    return String((a && a.date) || '').localeCompare(String((b && b.date) || ''));
+  }).map(function (d) {
+    const pts = parseMinuteLines((d && d.data) || []);
+    return { date: String((d && d.date) || ''), prec: num(d && d.prec), points: pts };
+  }).filter(function (d) { return d.points.length > 1; });
+}
+
+// 新浪指数分时：p=加权指数（白线），avg_p=均价，lx=领先指数（上证黄线），v=每分钟成交量。
+// 东财 trends2 连不上时用它兜底，单日能同时补回白线和黄线。
+// 09:25 集合竞价不占分时槽位，先丢掉，保证第 0 个点仍是 09:30。
+function parseSinaIndexMinute(rows, lead) {
+  const pts = [];
+  let lastAvg = NaN;
+  (rows || []).forEach(function (row) {
+    const m = String((row && row.m) || '').match(/^(\d{1,2}):(\d{2})/);
+    const p = num(row && row.p);
+    if (!m || !isFinite(p)) return;
+    const t = (m[1].length < 2 ? '0' + m[1] : m[1]) + ':' + m[2];
+    if (t < '09:30') return;
+    const v = num(row.v);
+    const lx = num(row.lx);
+    const ap = num(row.avg_p);
+    // 新浪偶尔把还没算出来的领先指数 / 均价给成 0，不能当成真实点位，
+    // 否则纵轴会被 0 拉到底，白线和黄线都挤成一条贴顶的直线。
+    const raw = lead
+      ? (isFinite(lx) && lx > 0 ? lx : NaN)
+      : (isFinite(ap) && ap > 0 ? ap : NaN);
+    if (isFinite(raw)) lastAvg = raw;
+    const avg = isFinite(raw) ? raw : (isFinite(lastAvg) ? lastAvg : p);
+    pts.push({ t: t, price: p, vol: isFinite(v) ? v : 0, avg: avg });
+  });
   return pts;
 }
 
@@ -229,6 +278,27 @@ function createFocusService(options) {
     return parsed;
   }
 
+  // 新浪分时兜底：指数能拿到领先指数（黄线），个股只有均价。
+  // 东财 / 腾讯分时都不通时用它，避免整张分时空图。
+  async function fetchSinaMinute(code) {
+    const url = 'https://quotes.sina.cn/cn/api/openapi.php/CN_MinlineService.getMinlineData?symbol=' +
+      encodeURIComponent(code);
+    const text = await http.fetchText(url, {
+      headers: SINA_HEADERS, timeout: 4000, retries: 1, tag: 'sina-index-minute'
+    });
+    const j = JSON.parse(text);
+    const rows = (j && j.result && j.result.data) || [];
+    let lead = false;
+    if (code === 'sh000001') {
+      rows.forEach(function (r) {
+        const lx = num(r && r.lx);
+        if (isFinite(lx) && lx > 0) lead = true;
+      });
+    }
+    const pts = parseSinaIndexMinute(rows, lead);
+    return pts.length > 1 ? { pts: pts, lead: lead } : null;
+  }
+
   async function buildPayload(code, tab, interval) {
     const snapP = market.fetchSnapshots([code]).catch(function () { return {}; });
     // em 指数要先看名称 / 币种：东财 secid 不区分港股主题和内地中证指数，
@@ -254,13 +324,26 @@ function createFocusService(options) {
     let days = [];
     let candles = [];
     let session = sessionMinutes(code, name);
-    let marketTag = hk ? 'hk' : (/^us/i.test(code) ? 'us' : (/^hf_/i.test(code) ? 'hf' : 'a'));
+    // 市场只用来选分时横轴口径：美元指数不是美股，和 hf_ / 上金所一样按真实时钟标刻度
+    let marketTag = hk ? 'hk' : (/^sge_/i.test(code) ? 'sge'
+      : (/^hf_/i.test(code) || /^usDXY$/i.test(code) ? 'hf'
+        : (/^us/i.test(code) ? 'us' : 'a')));
     if (hkIndex) {
       session = FOCUS_SESSION_HK_INDEX;
       marketTag = 'hk-index';
     }
     let fiveForeign = false;
     let tabMin = 0;
+    // 东财分时不可用、靠新浪 / 腾讯兜底时，黄线是否已经由新浪的领先指数补上
+    let minuteLead = false;
+    // 新浪分时一次取数多处复用（白线兜底 / 黄线兜底 / 五日兜底），同一次构建只打一次接口
+    let sinaMinutePromise = null;
+    function sinaMinuteOnce() {
+      if (!sinaMinutePromise) {
+        sinaMinutePromise = fetchSinaMinute(code).catch(function () { return null; });
+      }
+      return sinaMinutePromise;
+    }
 
     if (tab === FOCUS_MIN_TAB) {
       // 分时级别 K 线：tab 固定为 min，真正的粒度在 interval（1/5/15/30/60 分钟）
@@ -353,25 +436,32 @@ function createFocusService(options) {
           // 昨收和涨跌幅以快照（昨结）为准，后面统一补，和列表保持一致
         }
       } else {
-        const j = await market.fetchTencentJson('/appstock/app/day/query?code=' + encodeURIComponent(code));
-        const block = j && j.data && j.data[code];
-        const arr = (block && block.data) || [];
-        // 接口按「今天 → 前 4 天」倒序给，画图要正序
-        const list = arr.slice().sort(function (a, b) {
-          return String(a.date).localeCompare(String(b.date));
-        });
-        days = list.map(function (d) {
-          const pts = parseMinuteLines(d.data || []);
-          return { date: String(d.date || ''), prec: num(d.prec), points: pts };
-        }).filter(function (d) { return d.points.length > 1; });
+        let singleFallback = false;
+        try {
+          const j = await market.fetchTencentJson('/appstock/app/day/query?code=' + encodeURIComponent(code));
+          days = parseTencentFiveDays(j && j.data && j.data[code]);
+        } catch (error) {
+          days = [];
+        }
+        // 腾讯 5 日分时也不可用：用新浪当天分时兜底，只画今天，别整张空图
+        if (!days.length && isTencentMinuteCode(code)) {
+          const alt = await sinaMinuteOnce();
+          if (alt) {
+            days = [{ date: '', prec: NaN, points: alt.pts }];
+            minuteLead = minuteLead || !!alt.lead;
+            singleFallback = true;
+          }
+        }
         if (days.length) {
           const lastDay = days[days.length - 1];
           const lastPt = lastDay.points[lastDay.points.length - 1];
           price = lastPt.price;
-          prevClose = lastDay.prec;
-          if (!isFinite(prevClose) || !prevClose) prevClose = days[0].points[0].price;
-          pct = ((price - prevClose) / prevClose) * 100;
-          change = price - prevClose;
+          if (!singleFallback) {
+            prevClose = lastDay.prec;
+            if (!isFinite(prevClose) || !prevClose) prevClose = days[0].points[0].price;
+            pct = ((price - prevClose) / prevClose) * 100;
+            change = price - prevClose;
+          }
         }
       }
     } else {
@@ -397,44 +487,80 @@ function createFocusService(options) {
         }
       }
       if (emSecid && !usedCsi) {
-        const url = 'https://push2.eastmoney.com/api/qt/stock/trends2/get?secid=' + emSecid +
-          '&fields1=f1,f2,f3,f4,f5,f6,f7,f8&fields2=f51,f52,f53,f54,f55,f56,f57,f58&iscr=0&ndays=1';
-        const j = await http.fetchJson(url, {
-          headers: HEADERS, timeout: 4000, retries: 1, tag: 'em-minute'
-        });
-        const trends = (j && j.data && j.data.trends) || [];
-        // trends 行：时间,开,收,高,低,成交量,成交额,均价；价格取分钟收盘，量直接取成交量。
-        // 伦敦金 / 美元指数本身没有成交量，接口整列为 0，交给图表隐藏成交量栏。
-        const pts = [];
-        for (const t of trends) {
-          const f = String(t).split(',');
-          const p = num(f[2]);
-          if (!isFinite(p)) continue;
-          const v = num(f[5]);
-          pts.push({ t: f[0], price: p, vol: isFinite(v) ? v : 0 });
+        let pts = [];
+        let date = '';
+        try {
+          const url = 'https://push2.eastmoney.com/api/qt/stock/trends2/get?secid=' + emSecid +
+            '&fields1=f1,f2,f3,f4,f5,f6,f7,f8&fields2=f51,f52,f53,f54,f55,f56,f57,f58&iscr=0&ndays=1';
+          const j = await http.fetchJson(url, {
+            headers: HEADERS, timeout: 4000, retries: 1, tag: 'em-minute'
+          });
+          const trends = (j && j.data && j.data.trends) || [];
+          date = String((j && j.data && j.data.date) || '');
+          // trends 行：时间,开,收,高,低,成交量,成交额,均价；价格取分钟收盘，量直接取成交量。
+          // 伦敦金 / 美元指数本身没有成交量，接口整列为 0，交给图表隐藏成交量栏。
+          for (const t of trends) {
+            const f = String(t).split(',');
+            const p = num(f[2]);
+            if (!isFinite(p)) continue;
+            const v = num(f[5]);
+            pts.push({ t: f[0], price: p, vol: isFinite(v) ? v : 0 });
+          }
+        } catch (error) {
+          // 东财 trends2 不可用：美元指数 / 外盘 / 上金所下面走各自的新浪兜底。
+        }
+        if (pts.length <= 1 && typeof market.fetchForeignMinute === 'function') {
+          try {
+            const alt = await market.fetchForeignMinute(code);
+            if (alt && alt.points && alt.points.length > 1) {
+              pts = alt.points;
+              date = alt.date || date;
+            }
+          } catch (error) {
+            // 两个源都失败：保持空图，不拿日 K 冒充分时。
+          }
         }
         if (pts.length > 1) {
-          days = [{ date: String((j.data && j.data.date) || ''), prec: NaN, points: pts }];
+          days = [{ date: date, prec: NaN, points: pts }];
           const lastPt = pts[pts.length - 1];
           price = lastPt.price;
           // trends2 里没有昨收列，prevClose/pct/change 交给下方 snap 快照填充
         }
       } else if (!emSecid) {
-        const j = await market.fetchTencentJson('/appstock/app/minute/query?code=' + encodeURIComponent(code));
-        const block = j && j.data && j.data[code];
-        const lines = (block && block.data && block.data.data) || [];
-        const qt = (block && block.qt && block.qt[code]) || [];
-        const pts = parseMinuteLines(lines);
+        let pts = [];
+        let qqDate = '';
+        let qqPrec = NaN;
+        let qqPct = NaN;
+        let qqChange = NaN;
+        let qqName = '';
+        try {
+          const j = await market.fetchTencentJson('/appstock/app/minute/query?code=' + encodeURIComponent(code));
+          const block = j && j.data && j.data[code];
+          const lines = (block && block.data && block.data.data) || [];
+          const qt = (block && block.qt && block.qt[code]) || [];
+          pts = parseMinuteLines(lines);
+          qqDate = String((block && block.data && block.data.date) || '');
+          qqPrec = num(qt[4]);
+          qqPct = num(qt[32]);
+          qqChange = num(qt[31]);
+          qqName = String(qt[1] || '');
+        } catch (error) {
+          // 腾讯分时不可用：下面用新浪兜底
+        }
+        if (pts.length <= 1 && isTencentMinuteCode(code)) {
+          const alt = await sinaMinuteOnce();
+          if (alt) {
+            pts = alt.pts;
+            minuteLead = !!alt.lead;
+          }
+        }
         if (pts.length > 1) {
-          days = [{ date: String((block.data && block.data.date) || ''), prec: num(qt[4]), points: pts }];
-          const lastPt = pts[pts.length - 1];
-          price = lastPt.price;
-          prevClose = num(qt[4]);
-          pct = num(qt[32]);
-          change = num(qt[31]);
-          if (qt[1]) name = qt[1];
-          if (!isFinite(prevClose) || !prevClose) prevClose = pts[0].price;
-          if (!isFinite(pct)) pct = ((price - prevClose) / prevClose) * 100;
+          days = [{ date: qqDate, prec: isFinite(qqPrec) ? qqPrec : NaN, points: pts }];
+          price = pts[pts.length - 1].price;
+          if (isFinite(qqPrec) && qqPrec > 0) prevClose = qqPrec;
+          if (isFinite(qqPct)) pct = qqPct;
+          if (isFinite(qqChange)) change = qqChange;
+          if (qqName) name = qqName;
         }
       }
     }
@@ -444,6 +570,17 @@ function createFocusService(options) {
       const leadMap = await leadP;
       if (leadMap) leadApplied = applyLeadValues(days, leadMap, tab === 'five');
     }
+    // 东财领先指数接口也不通时，上证分时的黄线用新浪 lx 兜底
+    if (!leadApplied && code === 'sh000001' && tab === 'minute' && days.length) {
+      const alt = await sinaMinuteOnce();
+      if (alt && alt.lead && alt.pts.length) {
+        const leadMap = new Map();
+        alt.pts.forEach(function (p) { leadMap.set(p.t.replace(':', ''), p.avg); });
+        if (applyLeadValues(days, leadMap, false)) leadApplied = true;
+      }
+    }
+    // 东财趋势线不可用时，新浪兜底已经带了领先指数，黄线照样画
+    if (!leadApplied && minuteLead) leadApplied = true;
 
     const snap = await snapP;
     if (snap && snap[code]) {
@@ -462,6 +599,14 @@ function createFocusService(options) {
         }
       }
       if (isFinite(prevClose)) days[days.length - 1].prec = prevClose;
+    }
+    // 单日分时：东财 trends2 没有昨收列，用快照昨收补上，图表才画得出昨收虚线
+    if (days.length === 1 && !isFinite(days[0].prec) && isFinite(prevClose) && prevClose > 0) {
+      days[0].prec = prevClose;
+    }
+    // 腾讯 qt 和快照都没给昨收时退回开盘价，分时至少还有一条参考虚线
+    if (!isFinite(prevClose) && tab === 'minute' && days.length && days[0].points.length) {
+      prevClose = days[0].points[0].price;
     }
     if (!isFinite(change) && isFinite(price) && isFinite(prevClose)) change = price - prevClose;
 
@@ -521,6 +666,8 @@ module.exports = {
   hkIndexSlotOf,
   parseCsindexIntraday,
   parseMinuteLines,
+  parseTencentFiveDays,
+  parseSinaIndexMinute,
   parseLeadTrends,
   applyLeadValues
 };

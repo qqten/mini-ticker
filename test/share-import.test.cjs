@@ -90,6 +90,24 @@ test('normalizeShareData 未识别市场保留原始代码、不硬套前缀', f
   assert.equal(data.counts.duplicate, 1);
 });
 
+test('normalizeShareData 识别自选分享里的沪深 A 股与上海指数代码', function () {
+  const data = normalizeShareData(payload({
+    selfstock: [
+      { market: '17', code: '600585' },
+      { market: '17', code: '601728' },
+      { market: '33', code: '000541' },
+      { market: '33', code: '300033' },
+      { market: '16', code: '1A0001' },
+      { market: '16', code: '1B0300' }
+    ]
+  }), parseShareLink(LINK));
+  assert.deepEqual(data.items.map(function (it) { return it.symbol; }), [
+    'sh600585', 'sh601728', 'sz000541', 'sz300033', 'sh000001', 'sh000300'
+  ]);
+  assert.equal(data.counts.ready, 6);
+  assert.equal(data.counts.unmapped, 0);
+});
+
 test('normalizeShareData 过滤空代码，分组名缺失时给兜底名', function () {
   const data = normalizeShareData(payload({
     group_name: '   ',
@@ -139,7 +157,7 @@ test('createShareImporter 自选分享走 selfstock 接口', async function () {
   const http = {
     fetchJson: async function (url) {
       urls.push(url);
-      return payload({ group_name: '', share_name: '', selfstock: [{ market: '16', code: '600519' }] });
+      return payload({ group_name: '', share_name: '', selfstock: [{ market: '17', code: '600519' }] });
     }
   };
   const result = await createShareImporter({ http: http }).resolve('id=4ECEHFF5180TN7Z&st=1');
@@ -176,8 +194,10 @@ test('createShareImporter 网络异常和畸形返回都不会抛到渲染层', 
   assert.equal(bad.msg, '接口返回格式不对');
 });
 
-test('市场映射只包含已经验证过的四个市场号', function () {
-  assert.deepEqual(Object.keys(MARKET_PREFIX).sort(), ['16', '20', '32', '36']);
+test('市场映射只包含已经验证过的六个市场号', function () {
+  assert.deepEqual(Object.keys(MARKET_PREFIX).sort(), ['16', '17', '20', '32', '33', '36']);
+  assert.equal(MARKET_PREFIX['17'], 'sh');
   assert.equal(MARKET_PREFIX['20'], 'sh');
+  assert.equal(MARKET_PREFIX['33'], 'sz');
   assert.equal(MARKET_PREFIX['36'], 'sz');
 });

@@ -5,6 +5,7 @@ const assert = require('node:assert');
 
 const {
   parseTrends,
+  parseTencentTrendDays,
   mergeTrendDays,
   sameTimeAmount,
   projectFullDay,
@@ -183,4 +184,32 @@ test('buildMarketSnapshot 数据缺失时字段为 NaN，不伪造 0', function 
   assert.ok(isNaN(snap.amount));
   assert.ok(isNaN(snap.vsPct));
   assert.ok(isNaN(snap.projPct));
+});
+
+test('parseTencentTrendDays 把累计成交额差分回每分钟并统一日期格式', function () {
+  const rows = parseTencentTrendDays({
+    data: [
+      { date: '20261119', data: ['0930 3583.12 4832300 6537020338.70', '0931 3570.10 18453728 27853115866.30'] },
+      { date: '20261118', data: ['0930 3596.55 4916331 6300164807.80', '0931 3596.00 6600000 9000000000'] }
+    ]
+  });
+  assert.deepEqual(rows.map(function (r) { return [r.day, r.hm]; }), [
+    ['2026-11-18', '09:30'],
+    ['2026-11-18', '09:31'],
+    ['2026-11-19', '09:30'],
+    ['2026-11-19', '09:31']
+  ]);
+  // 累计额差分：第一分钟就是累计额，第二分钟减去第一分钟
+  assert.equal(rows[2].amount, 6537020338.7);
+  assert.equal(Math.round(rows[3].amount), Math.round(27853115866.3 - 6537020338.7));
+  assert.equal(rows[0].amount, 6300164807.8);
+});
+
+test('parseTencentTrendDays 遇到坏行和回退的累计值不产生负成交额', function () {
+  const rows = parseTencentTrendDays({
+    data: [
+      { date: '20261119', data: ['bad', '0930 1 1 100', '0931 1 1 50', '0932 1 1 80'] }
+    ]
+  });
+  assert.deepEqual(rows.map(function (r) { return r.amount; }), [100, 0, 30]);
 });

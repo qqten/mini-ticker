@@ -1,6 +1,6 @@
 'use strict';
 
-const { parseTrends, buildMarketSnapshot } = require('../core/market-stats.cjs');
+const { parseTrends, parseTencentTrendDays, buildMarketSnapshot } = require('../core/market-stats.cjs');
 const { HEADERS } = require('./market.cjs');
 
 // 概览（涨跌家数 / 成交额）变化快，3 秒刷新一次；昨日分时序列一天只变一次，
@@ -11,6 +11,8 @@ const TRENDS_TTL = 60000;
 const EM_UT = 'fa5fd1943c7b386f172d6893dbfba10b';
 // 上证指数 = 沪市，深证成指 = 深市。成交额 / 涨跌家数都是整个市场的口径。
 const MARKET_SECIDS = ['1.000001', '0.399001'];
+// 腾讯 5 日分时的代码：和上面两个 secid 一一对应，东财 trends2 连不上时按市场补
+const MARKET_QQ_CODES = ['sh000001', 'sz399001'];
 
 // 大盘概览取数：真实请求全部放在后台，get-quotes 只读 peek() 的缓存，
 // 这样行情轮询不会被东财接口拖慢。
@@ -24,6 +26,7 @@ function createMarketStats(options) {
   let trends = { at: 0, data: null };
   let snapshot = null;
   let running = null;
+  let qqFallbackLogged = false;
   const failed = { overview: false, trends: false };
 
   function noteFailure(key, error) {
@@ -74,10 +77,36 @@ function createMarketStats(options) {
       const url = 'https://push2his.eastmoney.com/api/qt/stock/trends2/get?secid=' + secid +
         '&fields1=f1,f2,f3,f4,f5,f6,f7,f8&fields2=f51,f52,f53,f54,f55,f56,f57,f58' +
         '&iscr=0&ndays=2&ut=' + EM_UT;
-      const j = await http.fetchJson(url, {
-        headers: HEADERS, timeout: 4000, retries: 1, tag: 'market-trends'
-      });
-      return parseTrends(j && j.data && j.data.trends);
+      try {
+        const j = await http.fetchJson(url, {
+          headers: HEADERS, timeout: 4000, retries: 1, tag: 'market-trends'
+        });
+        return parseTrends(j && j.data && j.data.trends);
+      } catch (error) {
+        // 单个市场失败先留空，下面用腾讯补
+        return [];
+      }
+    }));
+    // 东财 trends2 间歇性 ERR_EMPTY_RESPONSE：哪个市场没拉到就用腾讯 5 日分时兜底，
+    // 否则「较昨同期」会整块消失。
+    await Promise.all(results.map(async function (list, i) {
+      if (list.length) return;
+      try {
+        const url = 'https://web.ifzq.gtimg.cn/appstock/app/day/query?code=' + MARKET_QQ_CODES[i];
+        const j = await http.fetchJson(url, {
+          headers: HEADERS, timeout: 4000, retries: 1, tag: 'market-trends-qq'
+        });
+        const alt = parseTencentTrendDays(j && j.data && j.data[MARKET_QQ_CODES[i]]);
+        if (alt.length) {
+          results[i] = alt;
+          if (!qqFallbackLogged) {
+            qqFallbackLogged = true;
+            log('[market]', '东财分时序列不可用，较昨改用腾讯 5 日分时兜底');
+          }
+        }
+      } catch (error) {
+        // 腾讯也失败：保留空数组，快照里对应的字段显示 --
+      }
     }));
     if (!results.some(function (list) { return list.length > 0; })) {
       throw new Error('分时序列没有数据');

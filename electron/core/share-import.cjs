@@ -13,10 +13,14 @@ const GROUP_NAME_MAX = 24;
 const MAX_ITEMS = 1000;
 
 // 同花顺市场号 -> 交易所前缀。
-// 16 / 20 是上海（20 是基金 / ETF 子市场），32 / 36 是深圳（36 是基金子市场）。
+// 16 / 17 / 20 是上海（17 是 A 股，20 是基金 / ETF 子市场），
+// 32 / 33 / 36 是深圳（33 是 A 股，36 是基金子市场）。
 // 港股 / 美股 / 北交所 / 债券等市场还没有实测样本，先不猜：标记成「未识别」，
 // 在预览里让用户自己决定，避免把代码硬套成错误的交易所。
-const MARKET_PREFIX = { '16': 'sh', '20': 'sh', '32': 'sz', '36': 'sz' };
+const MARKET_PREFIX = {
+  '16': 'sh', '17': 'sh', '20': 'sh',
+  '32': 'sz', '33': 'sz', '36': 'sz'
+};
 
 // 页面里 status_code 的语义（bundle 里的分支 + 提示文案）。
 const SHARE_ERRORS = {
@@ -95,7 +99,13 @@ function parseShareLink(input) {
 
 // 只有 6 位数字的 A 股 / ETF 代码才补前缀。补不上就返回空串，交给预览标成未识别。
 function symbolOf(market, code) {
-  const prefix = MARKET_PREFIX[str(market)];
+  const m = str(market);
+  // 同花顺把上海指数写成 1A0001 / 1B0300 这类内部代码，
+  // 转成应用内部使用的 sh000001 / sh000300。
+  if (m === '16' && /^1[AB]\d{4}$/.test(code)) {
+    return 'sh' + code.slice(2).padStart(6, '0');
+  }
+  const prefix = MARKET_PREFIX[m];
   if (prefix && /^\d{6}$/.test(code)) return prefix + code;
   return '';
 }

@@ -10,7 +10,7 @@ const {
   unescapeUnicode,
   emIndexSecid
 } = require('../core/symbols.cjs');
-const { NAMES, EM_SECID, HF_EM_SECID, INDEX_EM_SECID, TYPE_LABEL } = require('../core/constants.cjs');
+const { NAMES, EM_SECID, HF_EM_SECID, INDEX_EM_SECID, SGE_SYMBOL, TYPE_LABEL } = require('../core/constants.cjs');
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36';
 
@@ -18,6 +18,7 @@ const HEADERS = { 'User-Agent': UA, 'Referer': 'https://gu.qq.com/' };
 const SINA_HEADERS = { 'User-Agent': UA, 'Referer': 'https://finance.sina.com.cn/' };
 const FUND_HEADERS = { 'User-Agent': UA, 'Referer': 'https://fund.eastmoney.com/' };
 const CSI_HEADERS = { 'User-Agent': UA, 'Referer': 'https://www.csindex.com.cn/' };
+const SGE_HEADERS = { 'User-Agent': UA, 'Referer': 'https://www.sge.com.cn/' };
 
 // 腾讯行情有两个等价入口：主域名被 WAF 拦就换备用域名，数据格式完全一致
 const QT_HOSTS = [
@@ -25,12 +26,17 @@ const QT_HOSTS = [
   'https://proxy.finance.qq.com/ifzqgtimg'
 ];
 
-// 新浪 K 线周期：5/15/30/60=分钟，240=日 1200=周 7200=月
-const SINA_SCALE = { m5: 5, m15: 15, m30: 30, m60: 60, day: 240, week: 1200, month: 7200 };
+// 新浪 K 线周期：1/5/15/30/60=分钟，240=日 1200=周 7200=月
+const SINA_SCALE = { m1: 1, m5: 5, m15: 15, m30: 30, m60: 60, day: 240, week: 1200, month: 7200 };
 
-// 分钟级 K 线周期 → 腾讯 fqkline 的 key 后缀（m5 / m15 / m30 / m60）与东财 klt（5 / 15 / 30 / 60）。
+// 新浪外汇日 K：东财 push2his 的 K 线接口对美元指数经常连不上（ERR_EMPTY_RESPONSE），
+// 这里用新浪 DINIW 日线兜底，接口原始字段是「日期,开,低,高,收」。
+const SINA_FX_SYMBOL = { usDXY: 'DINIW' };
+
+// 分钟级 K 线周期 → 腾讯 fqkline 的 key 后缀（m5 / m15 / m30 / m60）与东财 klt（1 / 5 / 15 / 30 / 60）。
 // 腾讯把分钟 K 放在块内的 qfqm5 这种字段里，东财用 klt 区分，两边对不上时按这两张表转。
-const MIN_INTERVAL = { m5: 5, m15: 15, m30: 30, m60: 60 };
+// 腾讯不支持 m1（返回 bad params），1 分钟只能走东财 klt=1 / 新浪 scale=1。
+const MIN_INTERVAL = { m1: 1, m5: 5, m15: 15, m30: 30, m60: 60 };
 
 function isMinInterval(interval) {
   return Object.prototype.hasOwnProperty.call(MIN_INTERVAL, interval);
@@ -71,9 +77,20 @@ function shiftDate(dateStr, delta) {
   return d.toISOString().slice(0, 10);
 }
 
-// 东财 5 分钟 K 线 -> 最近 5 个交易日的分时点。24 小时品种凌晨 0-5 点算前一日夜盘，
-// 否则一个交易日会被拆成两天，5 日图会多出一截。
-function buildFiveDayRows(rows) {
+// 下一个工作日：上金所周五夜盘算到下周一（周末休市）
+function nextWeekday(dateStr) {
+  const p = String(dateStr).split('-');
+  const d = new Date(Date.UTC(parseInt(p[0], 10), parseInt(p[1], 10) - 1, parseInt(p[2], 10)));
+  do {
+    d.setUTCDate(d.getUTCDate() + 1);
+  } while (d.getUTCDay() === 0 || d.getUTCDay() === 6);
+  return d.toISOString().slice(0, 10);
+}
+
+// 东财 5 分钟 K 线 -> 最近 5 个交易日的分时点。
+// 24 小时品种（外盘 / 美元指数）凌晨 0-5 点算前一日夜盘；
+// 上金所 T+D 相反：前一天 20:00 之后算下一个交易日（周五夜盘归下周一）。
+function buildFiveDayRows(rows, nightNext) {
   const list = (rows || []).slice().sort(function (a, b) {
     return String(emFields(a)[0] || '').localeCompare(String(emFields(b)[0] || ''));
   });
@@ -86,7 +103,12 @@ function buildFiveDayRows(rows) {
     const price = num(f[2]);
     if (!isFinite(price)) continue;
     let date = m[1];
-    if (parseInt(m[2].slice(0, 2), 10) < 6) date = shiftDate(date, -1);
+    const hour = parseInt(m[2].slice(0, 2), 10);
+    if (nightNext) {
+      if (hour >= 20) date = nextWeekday(date);
+    } else if (hour < 6) {
+      date = shiftDate(date, -1);
+    }
     if (!cur || cur.date !== date) {
       cur = { date: date, prec: NaN, points: [] };
       groups.push(cur);
@@ -286,6 +308,15 @@ function createMarket(options) {
           };
         }
       }
+      // 上金所 T+D：东财快照不可用时走新浪 SGE_AUTD
+      if (SGE_SYMBOL[code]) {
+        try {
+          const alt = await fetchSinaSgeSnapshot(code);
+          if (alt) out[code] = alt;
+        } catch (error) {
+          // 两个源都失败就交给上面的列表逻辑显示 --
+        }
+      }
     }
 
     if (!txCodes.length) return out;
@@ -478,23 +509,29 @@ function createMarket(options) {
 
     // 用户直接输入代码（如 hf_GC、sh518880）时，即使搜索接口没有也直接返回
     if (isValidCode(q) && !six) {
-      out.push({ code: q, name: NAMES[q] || q, market: q.slice(0, 2).toLowerCase(), type: '', typeLabel: '' });
+      out.push({
+        code: q,
+        name: NAMES[q] || q,
+        market: SGE_SYMBOL[q] ? 'sge' : q.slice(0, 2).toLowerCase(),
+        type: '',
+        typeLabel: SGE_SYMBOL[q] ? '黄金T+D' : ''
+      });
       seen[q] = true;
     }
 
-    // 外盘期货（hf_）和东财特殊品种（usDXY）搜索接口不覆盖，按名称本地匹配
+    // 外盘期货（hf_）、东财特殊品种（usDXY）和上金所 T+D 搜索接口不覆盖，按名称本地匹配
     const ql = q.toLowerCase();
     Object.keys(NAMES).forEach(function (code) {
-      if (!/^hf_/i.test(code) && !EM_SECID[code]) return;
+      if (!/^hf_/i.test(code) && !EM_SECID[code] && !SGE_SYMBOL[code]) return;
       const name = NAMES[code];
       if (seen[code]) return;
       if (name.toLowerCase().indexOf(ql) >= 0 || code.toLowerCase().indexOf(ql) >= 0) {
         out.push({
           code: code,
           name: name,
-          market: /^hf_/i.test(code) ? 'hf' : 'em',
+          market: SGE_SYMBOL[code] ? 'sge' : (/^hf_/i.test(code) ? 'hf' : 'em'),
           type: '',
-          typeLabel: '外盘期货'
+          typeLabel: SGE_SYMBOL[code] ? '黄金T+D' : '外盘期货'
         });
         seen[code] = true;
       }
@@ -602,11 +639,36 @@ function createMarket(options) {
     return trends.map(function (t) { return num(String(t).split(',')[2]); }).filter(isFinite);
   }
 
+  // 东财 trends2 的原始行：[时间, 开, 收, 高, 低, 量, 额, 均价]。
+  // ndays=5 时东财一次给 5 个交易日的 1 分钟分时，用来拼 5 日图。
+  async function fetchEmTrendsRows(secid, ndays) {
+    const url = 'https://push2.eastmoney.com/api/qt/stock/trends2/get?secid=' + encodeURIComponent(secid) +
+      '&fields1=f1,f2,f3,f4,f5,f6,f7,f8&fields2=f51,f52,f53,f54,f55,f56,f57,f58' +
+      '&iscr=0&ndays=' + (ndays > 0 ? ndays : 1);
+    const j = await http.fetchJson(url, { headers: HEADERS, timeout: 5000, retries: 1, tag: 'em-trends' });
+    const trends = (j && j.data && j.data.trends) || [];
+    return trends.map(function (row) {
+      const f = String(row).split(',');
+      return [f[0], num(f[1]), num(f[2]), num(f[3]), num(f[4]), num(f[5])];
+    });
+  }
+
   // 当日分时（一次只能查一个 code）
   async function fetchMinuteSeries(code) {
-    // 东财特殊品种（美元指数等）、外盘期货、em 专属指数：腾讯不支持分时，走东财 trends2
+    // 东财特殊品种（美元指数 / 黄金T+D 等）、外盘期货、em 专属指数：腾讯不支持分时，走东财 trends2
     const emSecid = EM_SECID[code] || HF_EM_SECID[code] || emIndexSecid(code);
-    if (emSecid) return fetchEmMinuteTrend(emSecid);
+    if (emSecid) {
+      // 有非东财兜底的品种（美元指数 / 外盘 / 上金所），东财挂了再换源
+      const hasAlt = !!SINA_FX_SYMBOL[code] || /^hf_/i.test(code) || !!SGE_SYMBOL[code];
+      try {
+        const pts = await fetchEmMinuteTrend(emSecid);
+        if (pts.length || !hasAlt) return pts;
+      } catch (error) {
+        if (!hasAlt) throw error;
+      }
+      const alt = await fetchForeignMinute(code);
+      return alt.points.map(function (p) { return p.price; }).filter(isFinite);
+    }
     if (process.env.TICKER_FORCE_SINA && sinaSupported(code)) {
       try {
         const alt = await fetchSinaMinute(code);
@@ -667,11 +729,271 @@ function createMarket(options) {
     });
   }
 
+  // 新浪外汇日 K（美元指数）：原始行是「日期,开,低,高,收」，这里换成
+  // [日期, 开, 收, 高, 低, 量]，与腾讯 / 东财的行顺序保持一致。
+  // 一次返回 1985 年至今约 1 万行，按 symbol 缓存 60 秒，避免日/周/月各拉一次。
+  const sinaFxCache = {};
+  async function fetchSinaFxDailyRows(symbol) {
+    const now = Date.now();
+    const hit = sinaFxCache[symbol];
+    if (hit && now - hit.at < 60 * 1000) return hit.rows;
+    const url = 'https://vip.stock.finance.sina.com.cn/forex/api/openapi.php/NewForexService.getDayKLine?symbol=' +
+      encodeURIComponent(symbol);
+    const j = await http.fetchJson(url, { headers: SINA_HEADERS, timeout: 8000, retries: 1, tag: 'sina-fx' });
+    const text = String((j && j.result && j.result.data) || '');
+    const rows = [];
+    const parts = text.split('|');
+    for (let i = 0; i < parts.length; i++) {
+      const f = parts[i].split(',');
+      const date = String(f[0] || '').trim();
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) continue;
+      const o = num(f[1]), l = num(f[2]), h = num(f[3]), c = num(f[4]);
+      if (!isFinite(o) || !isFinite(c) || !isFinite(h) || !isFinite(l)) continue;
+      rows.push([date, o, c, h, l, 0]);
+    }
+    if (rows.length) sinaFxCache[symbol] = { at: now, rows: rows };
+    return rows;
+  }
+
+  // 新浪外汇分钟 K：getOldMinKLine 是新浪手机端分时/K 线用的接口，
+  // 1 分钟给最近 24 小时（1440 根），5 分钟给最近 5 个交易日。
+  // 返回 [日期时间, 开, 收, 高, 低, 量]，和腾讯 / 东财的行顺序一致。
+  const sinaFxMinCache = {};
+  async function fetchSinaFxMinuteRows(symbol, scale, count) {
+    const key = symbol + '|' + scale + '|' + count;
+    const now = Date.now();
+    const hit = sinaFxMinCache[key];
+    if (hit && now - hit.at < 15 * 1000) return hit.rows;
+    const url = 'https://vip.stock.finance.sina.com.cn/forex/api/openapi.php/NewForexService.getOldMinKLine' +
+      '?symbol=' + encodeURIComponent(symbol) + '&scale=' + scale + '&datalen=' + count;
+    const j = await http.fetchJson(url, { headers: SINA_HEADERS, timeout: 8000, retries: 1, tag: 'sina-fx-min' });
+    const arr = (j && j.result && j.result.data) || [];
+    const rows = [];
+    if (Array.isArray(arr)) {
+      for (let i = 0; i < arr.length; i++) {
+        const r = arr[i] || {};
+        const date = String(r.d || '').trim();
+        if (!/^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}/.test(date)) continue;
+        const o = num(r.o), h = num(r.h), l = num(r.l), c = num(r.c);
+        if (!isFinite(o) || !isFinite(c) || !isFinite(h) || !isFinite(l)) continue;
+        rows.push([date, o, c, h, l, 0]);
+      }
+    }
+    if (rows.length) sinaFxMinCache[key] = { at: now, rows: rows };
+    return rows;
+  }
+
+  // 美元指数当日分时：东财 trends2 挂掉时用新浪 getOldMinKLine 的 1 分钟 K。
+  // 点的时间保留完整「YYYY-MM-DD HH:MM」，和东财 trends2 的口径一致。
+  async function fetchForeignMinute(code) {
+    const sge = SGE_SYMBOL[code];
+    if (sge) {
+      const m = await fetchSgeMinute(code);
+      return { date: m.date, points: m.points };
+    }
+    // 外盘期货（hf_XAU / hf_OIL 等）：新浪外盘分时，只给当天
+    if (/^hf_/i.test(code)) {
+      const rows = await fetchSinaFutMinuteRows(code);
+      return {
+        date: rows.length ? String(rows[rows.length - 1].t).slice(0, 10) : '',
+        points: rows
+      };
+    }
+    const sym = SINA_FX_SYMBOL[code];
+    if (!sym) return { date: '', points: [] };
+    const rows = await fetchSinaFxMinuteRows(sym, 1, 1440);
+    const points = rows.map(function (r) {
+      return { t: String(r[0]), price: num(r[2]), vol: 0 };
+    }).filter(function (p) { return p.t && isFinite(p.price); });
+    return {
+      date: rows.length ? String(rows[rows.length - 1][0]).slice(0, 10) : '',
+      points: points
+    };
+  }
+
+  // 新浪外盘期货分时（GlobalFuturesService.getGlobalFuturesMinLine）：
+  // 行是 [时间, 价, 量, 0, 均价, 'YYYY-MM-DD HH:MM:SS']，首行前面多几列，
+  // 统一取第 2 列价格、最后一列时间。只覆盖当天，缓存 15 秒。
+  const sinaFutMinCache = {};
+  async function fetchSinaFutMinuteRows(code) {
+    const sym = String(code).replace(/^hf_/i, '').toUpperCase();
+    const now = Date.now();
+    const hit = sinaFutMinCache[sym];
+    if (hit && now - hit.at < 15 * 1000) return hit.rows;
+    const url = 'https://stock2.finance.sina.com.cn/futures/api/openapi.php/GlobalFuturesService.getGlobalFuturesMinLine?symbol=' +
+      encodeURIComponent(sym);
+    const j = await http.fetchJson(url, { headers: SINA_HEADERS, timeout: 5000, retries: 1, tag: 'sina-fut-min' });
+    const arr = (j && j.result && j.result.data && j.result.data.minLine_1d) || [];
+    const rows = [];
+    for (let i = 0; i < arr.length; i++) {
+      const r = arr[i] || [];
+      const ts = String(r[r.length - 1] || '');
+      const price = num(r[1]);
+      if (!/^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}/.test(ts) || !isFinite(price)) continue;
+      const v = num(r[2]);
+      rows.push({ t: ts.slice(0, 16), price: price, vol: isFinite(v) ? v : 0 });
+    }
+    if (rows.length) sinaFutMinCache[sym] = { at: now, rows: rows };
+    return rows;
+  }
+
+  // 上金所日 K（官网 Dailyhq）：原始行是「日期, 开, 收, 低, 高」，
+  // 换成 [日期, 开, 收, 高, 低, 量]，和东财 / 腾讯的行顺序一致。
+  const sgeDailyCache = {};
+  async function fetchSgeDailyRows(code) {
+    const sge = SGE_SYMBOL[code];
+    if (!sge) return [];
+    const now = Date.now();
+    const hit = sgeDailyCache[code];
+    if (hit && now - hit.at < 60 * 1000) return hit.rows;
+    const j = await http.fetchJson('https://www.sge.com.cn/graph/Dailyhq', {
+      method: 'POST',
+      headers: Object.assign({}, SGE_HEADERS, {
+        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'
+      }),
+      body: 'instid=' + encodeURIComponent(sge.instid),
+      timeout: 8000, retries: 1, tag: 'sge-daily'
+    });
+    const arr = (j && j.time) || [];
+    const rows = [];
+    for (let i = 0; i < arr.length; i++) {
+      const r = arr[i] || [];
+      const date = String(r[0] || '').trim();
+      const o = num(r[1]), c = num(r[2]), l = num(r[3]), h = num(r[4]);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) continue;
+      if (!isFinite(o) || !isFinite(c) || !isFinite(h) || !isFinite(l)) continue;
+      rows.push([date, o, c, h, l, 0]);
+    }
+    if (rows.length) sgeDailyCache[code] = { at: now, rows: rows };
+    return rows;
+  }
+
+  // 上金所当日分时（新浪 SpotService）：行是 [时间, 价, 均价, 量]，
+  // 第一行还带昨收和交易日。20:00 起算，跨到第二天 15:30。
+  const sgeMinCache = {};
+  async function fetchSgeMinute(code) {
+    const sge = SGE_SYMBOL[code];
+    if (!sge) return { date: '', prevClose: NaN, points: [] };
+    const now = Date.now();
+    const hit = sgeMinCache[code];
+    if (hit && now - hit.at < 15 * 1000) return hit.data;
+    const url = 'https://stock2.finance.sina.com.cn/futures/api/openapi.php/SpotService.getMinLine?symbol=' +
+      encodeURIComponent(sge.sina);
+    const j = await http.fetchJson(url, { headers: SINA_HEADERS, timeout: 5000, retries: 1, tag: 'sge-min' });
+    const arr = (j && j.result && j.result.data) || [];
+    const points = [];
+    let date = '', prevClose = NaN;
+    if (Array.isArray(arr)) {
+      for (let i = 0; i < arr.length; i++) {
+        const r = arr[i] || [];
+        const t = String(r[0] || '');
+        const price = num(r[1]);
+        if (!/^\d{2}:\d{2}$/.test(t) || !isFinite(price)) continue;
+        const v = num(r[3]);
+        points.push({ t: t, price: price, vol: isFinite(v) ? v : 0 });
+        if (!date) {
+          const d = String(r[5] || '');
+          if (/^\d{4}-\d{2}-\d{2}$/.test(d)) date = d;
+          if (!isFinite(prevClose)) prevClose = num(r[4]);
+        }
+      }
+    }
+    const data = { date: date, prevClose: prevClose, points: points };
+    if (points.length) sgeMinCache[code] = { at: now, data: data };
+    return data;
+  }
+
+  // 上金所日 K + 今天这段实时分时拼成一根当天 K：
+  // 官网日 K 要等收盘才更新，不补的话最后一根永远停在昨天。
+  async function fetchSgeKlineRows(code) {
+    if (!SGE_SYMBOL[code]) return [];
+    const rows = (await fetchSgeDailyRows(code)).slice();
+    try {
+      const m = await fetchSgeMinute(code);
+      const last = rows.length ? rows[rows.length - 1][0] : '';
+      if (m.points.length > 1 && m.date && m.date > last) {
+        let hi = -Infinity, lo = Infinity;
+        for (let i = 0; i < m.points.length; i++) {
+          const p = m.points[i].price;
+          if (p > hi) hi = p;
+          if (p < lo) lo = p;
+        }
+        const open = m.points[0].price;
+        const close = m.points[m.points.length - 1].price;
+        rows.push([m.date, open, close, hi, lo, 0]);
+      }
+    } catch (error) {
+      // 分时拿不到就只画到昨天，不影响日 K
+    }
+    return rows;
+  }
+
+  // 上金所快照兜底（GBK）：AUTD,黄金延期,Au(T+D),最新,?,昨结,开,高,低,昨收,买,卖,买量,卖量,量,额,时间,涨跌幅
+  async function fetchSinaSgeSnapshot(code) {
+    const sge = SGE_SYMBOL[code];
+    if (!sge) return null;
+    const text = await http.fetchGbk('https://hq.sinajs.cn/list=SGE_' + sge.sina, SINA_HEADERS, {
+      timeout: 3500, retries: 1, tag: 'sina-sge'
+    });
+    const m = /hq_str_SGE_[A-Za-z0-9_]+="([^"]*)"/.exec(text);
+    if (!m || !m[1]) return null;
+    const a = m[1].split(',');
+    const price = num(a[3]);
+    if (!isFinite(price) || price <= 0) return null;
+    const prev = num(a[9]);
+    let pct = num(String(a[17] || '').replace('%', ''));
+    if (!isFinite(pct) && isFinite(prev) && prev) pct = ((price - prev) / prev) * 100;
+    return {
+      name: NAMES[code] || a[2] || code,
+      price: price,
+      prevClose: prev,
+      pct: pct,
+      change: isFinite(prev) ? price - prev : NaN,
+      time: String(a[16] || '')
+    };
+  }
+
   // 外盘 5 日分时 / em 专属指数：东财 5 分钟 K 线，按交易日夜盘归并后取最近 5 天
   async function fetchFiveDay(code) {
     const secid = EM_SECID[code] || HF_EM_SECID[code] || emIndexSecid(code);
     if (!secid) return [];
-    return buildFiveDayRows(await fetchEmKlines(secid, 5, 2000));
+    // 上金所 T+D 的夜盘属于下一个交易日（20:00 之后），和外盘相反
+    const nightNext = !!SGE_SYMBOL[code];
+    let rows = [];
+    try {
+      rows = await fetchEmKlines(secid, 5, 2000);
+    } catch (error) {
+      // 东财 K 线不可用：下面还有 trends2 / 新浪 / 上金所兜底
+    }
+    let days = buildFiveDayRows(rows, nightNext);
+    if (days.length) return days;
+    // push2his 的 K 线接口经常连不上，但 push2 的 trends2 还活着；
+    // ndays=5 直接给 5 个交易日的 1 分钟分时，够拼五日图。
+    try {
+      days = buildFiveDayRows(await fetchEmTrendsRows(secid, 5), nightNext);
+      if (days.length) return days;
+    } catch (error) {
+      // 继续走下面的非东财兜底
+    }
+    // 上金所 / 外盘 / 美元指数：非东财源只能给当天，至少不画空图
+    if (SGE_SYMBOL[code]) {
+      // 新浪分时的 date 已经是交易日（前晚 20:00 也归这一天），不能再按小时挪
+      const m = await fetchSgeMinute(code);
+      if (m.points.length <= 1) return [];
+      return [{ date: m.date, prec: NaN, points: m.points }];
+    }
+    if (/^hf_/i.test(code)) {
+      const rows2 = await fetchSinaFutMinuteRows(code);
+      return buildFiveDayRows(rows2.map(function (p) {
+        return [p.t, p.price, p.price, p.price, p.price, p.vol];
+      }));
+    }
+    const fxSym = SINA_FX_SYMBOL[code];
+    if (fxSym) {
+      // 美元指数：新浪 5 分钟 K，最近 5 个交易日
+      return buildFiveDayRows(await fetchSinaFxMinuteRows(fxSym, 5, 1440));
+    }
+    return [];
   }
 
   // K 线原始行：[日期, 开, 收, 高, 低, 量]
@@ -685,7 +1007,8 @@ function createMarket(options) {
       if (secid) {
         try {
           const rows = mapEmKlineRows(await fetchEmKlines(secid, MIN_INTERVAL[interval], count));
-          if (rows.length) return rows;
+          // 东财分钟 K 的 lmt 不一定严格生效（1 分钟尤其明显），这里再裁一次
+          if (rows.length) return rows.slice(-count);
         } catch (error) {
           // 东财不可用：落到下面的腾讯 / 新浪兜底。
         }
@@ -703,25 +1026,48 @@ function createMarket(options) {
     if (emSecid) {
       try {
         const rows = mapEmKlineRows(await fetchEmKlines(emSecid, emKltOf(interval), count));
-        if (rows.length) return rows;
+        if (rows.length) return isMinInterval(interval) ? rows.slice(-count) : rows;
       } catch (error) {
-        // 东财不可用时，外盘继续走新浪日 K 兜底。
+        // 东财不可用时，外盘继续走新浪日 K 兜底（分钟 K 除外）。
       }
       if (/^hf_/i.test(code)) {
         const rows = await fetchHfDailyRows(code);
         if (isMinInterval(interval) || interval === 'week') return aggregateRowsShape(rows, interval, count);
         return interval === 'month' ? aggregateMonthlyRows(rows).slice(-count) : rows.slice(-count);
       }
+      // 上金所 T+D：东财 K 线不可用时走官网日 K（今天的实时段自己拼），周 / 月由日 K 聚合
+      if (SGE_SYMBOL[code]) {
+        const rows = await fetchSgeKlineRows(code);
+        if (isMinInterval(interval) || interval === 'week') return aggregateRowsShape(rows, interval, count);
+        return interval === 'month' ? aggregateMonthlyRows(rows).slice(-count) : rows.slice(-count);
+      }
+      // 美元指数：东财 K 线不可用时走新浪 DINIW 日线，周/月由日线聚合。
+      // 分钟级别不在这里兜底，避免拿日线冒充分钟 K。
+      const fxSym = SINA_FX_SYMBOL[code];
+      if (fxSym && !isMinInterval(interval)) {
+        try {
+          const rows = await fetchSinaFxDailyRows(fxSym);
+          if (rows.length) {
+            if (interval === 'week') return aggregateWeeklyRows(rows).slice(-count);
+            if (interval === 'month') return aggregateMonthlyRows(rows).slice(-count);
+            return rows.slice(-count);
+          }
+        } catch (error) {
+          // 新浪也失败时保持空数据，让图表明确显示「暂无 K 线数据」。
+        }
+      }
       return [];
     }
-    // 未映射的外盘期货：腾讯无 K 线，走新浪外盘日K，周/月 K 由日 K 聚合
+    // 未映射的外盘期货：腾讯无 K 线，走新浪外盘日K，周 K 由日 K 聚合
     if (/^hf_/i.test(code)) {
       const rows = await fetchHfDailyRows(code);
       if (isMinInterval(interval) || interval === 'week') return aggregateRowsShape(rows, interval, count);
       return interval === 'month' ? aggregateMonthlyRows(rows).slice(-count) : rows.slice(-count);
     }
     try {
-      const rows = await fetchTencentKlineRows(code, interval, count);
+      // 腾讯没有 1 分钟 K：m1 要么返回 bad params，要么塞一根日线形状的数据。
+      // 1 分钟只认东财 klt=1 / 新浪 scale=1，宁可空着也不拿日线冒充。
+      const rows = interval === 'm1' ? [] : await fetchTencentKlineRows(code, interval, count);
       if (rows.length) return rows;
       if (!sinaSupported(code)) return [];
       // 周 K / 分钟 K 新浪都支持自己的 scale，日 K 兜底同样可用
@@ -742,8 +1088,9 @@ function createMarket(options) {
     }
   }
 
-  // 分钟 K 没有日 K 可聚合的兜底：直接返回空，让上层显示「暂无 K 线数据」
+  // 分钟 K 没有日 K 可聚合的兜底：东财没给就返回空，绝不能拿日 K 冒充分钟 K
   function aggregateRowsShape(rows, interval, count) {
+    if (isMinInterval(interval)) return [];
     if (interval === 'week') return aggregateWeeklyRows(rows).slice(-count);
     return rows.slice(-count);
   }
@@ -773,15 +1120,11 @@ function createMarket(options) {
   }
 
   async function fetchSeries(code, period) {
-    // 东财特殊品种（美元指数等）、em 专属指数：走东财分时
+    // 分时（列表小折线）：东财特殊品种 / 外盘期货 / em 指数统一走 fetchMinuteSeries，
+    // 里面已经包含东财 trends2 → 新浪 / 上金所的兜底。
     if (period === 'minute') {
-      const secid = EM_SECID[code] || emIndexSecid(code);
-      if (secid) return fetchEmMinuteTrend(secid);
-    }
-    // 外盘期货（hf_ 前缀）：分时走东财 trends2，日/月/年 K 统一走 fetchKlineRaw
-    if (/^hf_/i.test(code)) {
-      const secid = HF_EM_SECID[code];
-      if (secid && period === 'minute') return fetchEmMinuteTrend(secid);
+      const secid = EM_SECID[code] || HF_EM_SECID[code] || emIndexSecid(code);
+      if (secid) return fetchMinuteSeries(code);
     }
     if (period === 'day') return closeSeries(await fetchKlineRaw(code, 'day', 120));
     if (period === 'month') return closeSeries(await fetchKlineRaw(code, 'month', 120));
@@ -863,6 +1206,7 @@ function createMarket(options) {
     fetchTencentJson,
     searchSymbols,
     fetchMinuteSeries,
+    fetchForeignMinute,
     fetchKlineRaw,
     fetchFiveDay,
     fetchSeries,

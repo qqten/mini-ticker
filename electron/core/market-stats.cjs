@@ -53,6 +53,41 @@ function parseTrends(lines) {
   return out;
 }
 
+// 腾讯 day/query 的日期是 20261119，统一成和东财一致的 2026-11-19
+function tencentDateKey(v) {
+  const s = String(v == null ? '' : v).replace(/\D/g, '').slice(0, 8);
+  return s.length === 8 ? s.slice(0, 4) + '-' + s.slice(4, 6) + '-' + s.slice(6, 8) : '';
+}
+
+// 腾讯 5 日分时兜底：`data[code].data = [{date, data:[...]}]`，按「今天 → 前 4 天」倒序。
+// 每行 `HHMM 价格 累计量 累计额`，累计额要差分回每分钟，才能和 trends2 的成交额口径对齐。
+function parseTencentTrendDays(block) {
+  const arr = block && block.data;
+  if (!Array.isArray(arr)) return [];
+  const out = [];
+  arr.slice().sort(function (a, b) {
+    return String((a && a.date) || '').localeCompare(String((b && b.date) || ''));
+  }).forEach(function (d) {
+    const day = tencentDateKey(d && d.date);
+    if (!day) return;
+    let prev = 0;
+    (Array.isArray(d && d.data) ? d.data : []).forEach(function (line) {
+      const parts = String(line == null ? '' : line).trim().split(/\s+/);
+      if (parts.length < 4) return;
+      const t = parts[0];
+      if (!/^\d{3,4}$/.test(t)) return;
+      const hm = t.length === 3 ? '0' + t.charAt(0) + ':' + t.slice(1) : t.slice(0, 2) + ':' + t.slice(2);
+      const cum = toNumber(parts[3]);
+      if (!isFinite(cum)) return;
+      let amount = cum - prev;
+      if (!(amount >= 0)) amount = 0;
+      prev = cum;
+      out.push({ day: day, hm: hm, amount: amount });
+    });
+  });
+  return out;
+}
+
 // 沪市 + 深市两条 trends2 按「同一天同一分钟」相加，得到两市合计成交额。
 function mergeTrendDays(seriesList) {
   const days = {};
@@ -176,6 +211,7 @@ module.exports = {
   SESSION_POINTS,
   EARLY_POINTS,
   parseTrends,
+  parseTencentTrendDays,
   mergeTrendDays,
   sumAmount,
   sameTimeAmount,

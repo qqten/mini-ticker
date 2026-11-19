@@ -13,6 +13,8 @@ const {
   hkIndexSlotOf,
   parseCsindexIntraday,
   parseMinuteLines,
+  parseTencentFiveDays,
+  parseSinaIndexMinute,
   parseLeadTrends,
   applyLeadValues
 } = require('../electron/data/focus.cjs');
@@ -113,6 +115,7 @@ test('sessionMinutes 按市场返回分钟数', function () {
   assert.equal(sessionMinutes('usAAPL'), 392);
   assert.equal(sessionMinutes('hf_XAU'), 1440);
   assert.equal(sessionMinutes('usDXY'), 1440);
+  assert.equal(sessionMinutes('sge_AUTD'), 660);
 });
 
 test('sessionMinutes 能认出港股主题的东财指数', function () {
@@ -510,6 +513,70 @@ test('外盘分时没有成交量时 vol 为 0（伦敦金 / 美元指数）', a
   assert.ok(urls[0].indexOf('f56') >= 0);
 });
 
+test('美元指数东财分时失败时用新浪 1 分钟 K 兜底', async function () {
+  const { service } = makeService({
+    market: {
+      fetchSnapshots: async function () {
+        return { usDXY: { name: '美元指数', price: 103.94, prevClose: 103.86, pct: 0.08 } };
+      },
+      fetchForeignMinute: async function () {
+        return {
+          date: '2026-11-19',
+          points: [
+            { t: '2026-11-19 11:23:00', price: 103.93, vol: 0 },
+            { t: '2026-11-19 11:24:00', price: 103.94, vol: 0 }
+          ]
+        };
+      }
+    },
+    http: {
+      fetchJson: async function () { throw new Error('eastmoney down'); }
+    }
+  });
+  const data = await service.payload('usDXY', 'minute');
+  assert.equal(data.session, 1440);
+  assert.equal(data.hasData, true);
+  assert.equal(data.days[0].date, '2026-11-19');
+  assert.equal(data.days[0].points.length, 2);
+  assert.equal(data.price, 103.94);
+  assert.equal(data.prevClose, 103.86);
+});
+
+test('黄金T+D 分时：东财 trends2 挂了走新浪 SpotService 兜底', async function () {
+  const { service } = makeService({
+    market: {
+      fetchSnapshots: async function () {
+        return { sge_AUTD: { name: '黄金T+D', price: 796.6, prevClose: 810.1, pct: -1.67 } };
+      },
+      fetchForeignMinute: async function (code) {
+        assert.equal(code, 'sge_AUTD');
+        return {
+          date: '2026-11-19',
+          points: [
+            { t: '20:00', price: 809, vol: 16 },
+            { t: '09:00', price: 795, vol: 300 },
+            { t: '11:45', price: 796.6, vol: 174 }
+          ]
+        };
+      }
+    },
+    http: {
+      fetchJson: async function () { throw new Error('eastmoney down'); }
+    }
+  });
+  const data = await service.payload('sge_AUTD', 'minute');
+  assert.equal(data.session, 660);
+  assert.equal(data.market, 'sge');
+  assert.equal(data.hasData, true);
+  assert.equal(data.name, '黄金T+D');
+  assert.equal(data.days[0].date, '2026-11-19');
+  assert.equal(data.days[0].points.length, 3);
+  assert.equal(data.price, 796.6);
+  assert.equal(data.prevClose, 810.1);
+  // 东财 trends2 没有昨收列：单日分时要把快照昨收带给图表，虚线才画得出来
+  assert.equal(data.days[0].prec, 810.1);
+});
+
 test('parseLeadTrends 取东财第 8 列，并同时提供带日期和 HHMM 的 key', function () {
   const map = parseLeadTrends([
     '2026-11-12 09:30,3650,3650,3651,3649,100,0,3648.50',
@@ -661,4 +728,100 @@ test('FOCUS_TABS 与 TTL 覆盖所有周期，分时级别单独一个 tab', fun
   assert.deepEqual(FOCUS_TTL, {
     minute: 15000, five: 60000, day: 60000, week: 60000, month: 60000, min: 30000
   });
+});
+
+test('parseSinaIndexMinute 丢掉 09:25 集合竞价，黄线取领先指数 lx', function () {
+  const pts = parseSinaIndexMinute([
+    { m: '09:25:00', p: '3583.12', avg_p: '3583.12', lx: '3587.83', v: '483230000' },
+    { m: '09:30:00', p: '3570.10', avg_p: '3575.29', lx: '3581.36', v: '1362142800' },
+    { m: '09:31:00', p: '3566.78', avg_p: '3573.24', lx: '3561.76', v: '784705900' },
+    // 新浪有时把最新一分钟的领先指数给成 0，不能把纵轴拉到底
+    { m: '09:32:00', p: '3568.00', avg_p: '3573.00', lx: '0', v: '600000000' }
+  ], true);
+  assert.deepEqual(pts.map(function (p) { return p.t; }), ['09:30', '09:31', '09:32']);
+  assert.equal(pts[0].price, 3570.1);
+  assert.equal(pts[0].avg, 3581.36);
+  assert.equal(pts[0].vol, 1362142800);
+  assert.equal(pts[2].avg, 3561.76);
+});
+
+test('parseSinaIndexMinute 非领先指数时黄线退回均价 avg_p', function () {
+  const pts = parseSinaIndexMinute([
+    { m: '09:30:00', p: '3570.10', avg_p: '3575.29', lx: '3581.36', v: '1362142800' }
+  ], false);
+  assert.equal(pts[0].avg, 3575.29);
+});
+
+test('parseTencentFiveDays 把倒序 5 日分时转正序并丢掉空日', function () {
+  const days = parseTencentFiveDays({
+    data: [
+      { date: '20261112', data: ['0930 3660 100 366000', '0931 3662 200 732400'] },
+      { date: 'bad', data: ['0930 3650 100 365000'] },
+      { date: '20261111', data: ['0930 3650 100 365000', '0931 3652 200 730400'] }
+    ]
+  });
+  assert.deepEqual(days.map(function (d) { return d.date; }), ['20261111', '20261112']);
+  assert.deepEqual(days[0].points.map(function (p) { return p.vol; }), [100, 100]);
+});
+
+test('东财分时不可用时上证指数走新浪兜底，白线黄线都还在', async function () {
+  const { service } = makeService({
+    market: {
+      fetchSnapshots: async function () {
+        return { sh000001: { name: '上证指数', price: 3566.78, prevClose: 3587.83 } };
+      },
+      fetchKlineRaw: async function () { throw new Error('不应走K线'); }
+    },
+    http: {
+      fetchJson: async function () { throw new Error('东财不可用'); },
+      fetchText: async function (url) {
+        assert.ok(url.indexOf('CN_MinlineService') >= 0);
+        return JSON.stringify({
+          result: {
+            data: [
+              { m: '09:25:00', p: '3583.12', avg_p: '3583.12', lx: '3587.83', v: '483230000' },
+              { m: '09:30:00', p: '3570.10', avg_p: '3575.29', lx: '3581.36', v: '1362142800' },
+              { m: '09:31:00', p: '3566.78', avg_p: '3573.24', lx: '3561.76', v: '784705900' }
+            ]
+          }
+        });
+      }
+    }
+  });
+  const data = await service.payload('sh000001', 'minute');
+  assert.equal(data.days[0].points.length, 2);
+  assert.equal(data.lead, true);
+  assert.equal(data.days[0].points[1].avg, 3561.76);
+  // 单日分时用快照昨收补足，昨收虚线才画得出
+  assert.equal(data.days[0].prec, 3587.83);
+});
+
+test('腾讯 5 日分时不可用时用新浪当天分时兜底，只画今天', async function () {
+  const { service } = makeService({
+    market: {
+      fetchSnapshots: async function () { return { sh000001: { name: '上证指数', price: 3566.78, prevClose: 3587.83 } }; },
+      fetchTencentJson: async function () { throw new Error('腾讯不可用'); },
+      fetchKlineRaw: async function () { throw new Error('不应走K线'); }
+    },
+    http: {
+      fetchJson: async function () { throw new Error('东财不可用'); },
+      fetchText: async function (url) {
+        assert.ok(url.indexOf('CN_MinlineService') >= 0);
+        return JSON.stringify({
+          result: {
+            data: [
+              { m: '09:30:00', p: '3570.10', avg_p: '3575.29', lx: '3581.36', v: '1362142800' },
+              { m: '09:31:00', p: '3566.78', avg_p: '3573.24', lx: '3561.76', v: '784705900' }
+            ]
+          }
+        });
+      }
+    }
+  });
+  const data = await service.payload('sh000001', 'five');
+  assert.equal(data.days.length, 1);
+  assert.equal(data.days[0].points.length, 2);
+  assert.equal(data.days[0].points[1].price, 3566.78);
+  // 新浪只给当天，昨收由快照补，虚线不会落在开盘价上
+  assert.equal(data.prevClose, 3587.83);
 });

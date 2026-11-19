@@ -27,12 +27,21 @@ const NAMES = {
   hf_OIL: '布伦特原油',
   hf_HG: 'COMEX铜',
   hf_NG: '美国天然气',
-  usDXY: '美元指数'
+  usDXY: '美元指数',
+  sge_AUTD: '黄金T+D'
 };
 
 // 东财特殊品种（非 hf_ 前缀）：美元指数等
 const EM_SECID = {
-  usDXY: '100.UDI'
+  usDXY: '100.UDI',
+  // 上海黄金交易所延期合约走东财 118 市场，分时 / 5 分钟 K 都能取
+  sge_AUTD: '118.AUTD'
+};
+
+// 上海黄金交易所 T+D：内部代码 sge_ + 合约名。
+// 新浪分时 / 快照认 AUTD，上金所官网日 K 认 Au(T+D)。
+const SGE_SYMBOL = {
+  sge_AUTD: { sina: 'AUTD', instid: 'Au(T+D)' }
 };
 
 // 外盘期货（hf_）→ 东方财富 secid 映射（腾讯不提供外盘分时/K线）
@@ -187,6 +196,7 @@ const TYPE_LABEL = {
 module.exports = {
   NAMES,
   EM_SECID,
+  SGE_SYMBOL,
   HF_EM_SECID,
   INDEX_EM_SECID,
   DEFAULT_WATCHLIST,

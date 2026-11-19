@@ -134,6 +134,15 @@ test('searchSymbols 解析 smartbox，并保留本地外盘期货匹配', async 
   const local = await market2.searchSymbols('原油');
   assert.deepEqual(local.map(function (x) { return x.code; }).sort(), ['hf_CL', 'hf_OIL']);
   assert.equal(local[0].typeLabel, '外盘期货');
+
+  // 黄金T+D：中文名和 autd 都能搜到，带上自己的类型标签
+  const autd = await market2.searchSymbols('黄金T+D');
+  const gold = autd.find(function (x) { return x.code === 'sge_AUTD'; });
+  assert.ok(gold);
+  assert.equal(gold.typeLabel, '黄金T+D');
+  assert.equal(gold.market, 'sge');
+  const byCode = await market2.searchSymbols('autd');
+  assert.ok(byCode.some(function (x) { return x.code === 'sge_AUTD'; }));
 });
 
 test('fetchFundEstimates / fetchFundNav 解析并缓存净值', async function () {
@@ -265,8 +274,230 @@ test('东财不可用时外盘日 K 兜底并聚合出月 K', async function () 
   ])[0][3], 14);
 });
 
-test('外盘 5 日按交易日夜盘归并，只取最近 5 天', function () {
+test('美元指数东财 K 线不可用时用新浪 DINIW 日线兜底', async function () {
+  const http = makeHttp({
+    json: function (url) {
+      if (url.indexOf('eastmoney.com') >= 0) throw new Error('down');
+      assert.ok(url.indexOf('NewForexService.getDayKLine') >= 0);
+      return {
+        result: {
+          // 新浪字段顺序：日期,开,低,高,收
+          data: '2026-09-30,10,9,12,11,|2026-10-31,11,10,14,13,|2026-11-03,13,11,15,12,'
+        }
+      };
+    }
+  });
+  const market = createMarket({ http: http });
+
+  assert.deepEqual(await market.fetchKlineRaw('usDXY', 'day', 1200), [
+    ['2026-09-30', 10, 11, 12, 9, 0],
+    ['2026-10-31', 11, 13, 14, 10, 0],
+    ['2026-11-03', 13, 12, 15, 11, 0]
+  ]);
+
+  const month = await market.fetchKlineRaw('usDXY', 'month', 120);
+  assert.deepEqual(month[1], ['2026-10-31', 11, 13, 14, 10, 0]);
+  assert.equal(month.length, 3);
+
+  const week = await market.fetchKlineRaw('usDXY', 'week', 520);
+  assert.equal(week.length, 3);
+
+  // 分钟级别不能拿日线兜底
+  assert.deepEqual(await market.fetchKlineRaw('usDXY', 'm1', 320), []);
+});
+
+test('美元指数分时和五日：东财不可用时用新浪 getOldMinKLine 兜底', async function () {
+  const fxRows = [];
+  const dates = ['2026-11-13', '2026-11-16', '2026-11-17', '2026-11-18', '2026-11-19'];
+  dates.forEach(function (d) {
+    fxRows.push({ d: d + ' 09:00:00', o: '10', h: '12', l: '9', c: '11' });
+    fxRows.push({ d: d + ' 09:05:00', o: '11', h: '13', l: '10', c: '12' });
+  });
+  const http = makeHttp({
+    json: function (url) {
+      if (url.indexOf('eastmoney.com') >= 0) throw new Error('down');
+      if (url.indexOf('getOldMinKLine') >= 0) {
+        assert.ok(url.indexOf('datalen=1440') >= 0);
+        return { result: { data: fxRows } };
+      }
+      throw new Error('unexpected ' + url);
+    }
+  });
+  const market = createMarket({ http: http });
+
+  // 1 分钟 K 的价格序列（列表折线）
+  const pts = await market.fetchMinuteSeries('usDXY');
+  assert.equal(pts.length, 10);
+  assert.equal(pts[pts.length - 1], 12);
+
+  // 五日：按交易日归并，每天两个 5 分钟点
+  const days = await market.fetchFiveDay('usDXY');
+  assert.equal(days.length, 5);
+  assert.equal(days[0].date, '2026-11-13');
+  assert.equal(days[4].date, '2026-11-19');
+  assert.deepEqual(days[4].points.map(function (p) { return p.price; }), [11, 12]);
+});
+
+test('外盘分时兜底：hf_XAU / hf_OIL 走新浪外盘分时', async function () {
+  const http = makeHttp({
+    json: function (url) {
+      assert.ok(url.indexOf('getGlobalFuturesMinLine') >= 0, url);
+      assert.ok(/symbol=(XAU|OIL)/.test(url), url);
+      return {
+        result: {
+          data: {
+            minLine_1d: [
+              ['2026-11-19', '3724.67', 'LIFFE', '', '07:00', '3730', '0', '0', '3729.815', '2026-11-19 07:00:00'],
+              ['07:01', '3732.66', '7', '0', '3730.678', '2026-11-19 07:01:00'],
+              ['bad', '1', '0', '0', '0', 'not-a-time']
+            ]
+          }
+        }
+      };
+    }
+  });
+  const market = createMarket({ http: http });
+
+  const xau = await market.fetchForeignMinute('hf_XAU');
+  assert.equal(xau.date, '2026-11-19');
+  assert.equal(xau.points.length, 2);
+  assert.equal(xau.points[1].t, '2026-11-19 07:01');
+  assert.equal(xau.points[1].price, 3732.66);
+  assert.equal(xau.points[1].vol, 7);
+
+  // 列表小折线复用同一条兜底链
+  const pts = await market.fetchMinuteSeries('hf_XAU');
+  assert.deepEqual(pts, [3724.67, 3732.66]);
+
+  const oil = await market.fetchForeignMinute('hf_OIL');
+  assert.equal(oil.points.length, 2);
+});
+
+test('hf_OIL 五日：东财 K 线 / trends2 都不可用时用新浪当天分时兜底', async function () {
+  const http = makeHttp({
+    json: function (url) {
+      if (url.indexOf('eastmoney.com') >= 0) throw new Error('down');
+      if (url.indexOf('getGlobalFuturesMinLine') >= 0) {
+        return {
+          result: {
+            data: {
+              minLine_1d: [
+                ['09:00', '91.30', '0', '0', '91.27', '2026-11-19 09:00:00'],
+                ['09:01', '91.32', '5', '0', '91.27', '2026-11-19 09:01:00'],
+                ['09:02', '91.28', '3', '0', '91.27', '2026-11-19 09:02:00']
+              ]
+            }
+          }
+        };
+      }
+      throw new Error('unexpected ' + url);
+    }
+  });
+  const market = createMarket({ http: http });
+  const days = await market.fetchFiveDay('hf_OIL');
+  assert.equal(days.length, 1);
+  assert.equal(days[0].date, '2026-11-19');
+  assert.equal(days[0].points.length, 3);
+  assert.equal(days[0].points[2].price, 91.28);
+});
+
+test('上金所 Au(T+D)：日 K 用官网日线，并把今天这段实时分时拼成最后一根', async function () {
+  const http = makeHttp({
+    json: function (url) {
+      if (url.indexOf('eastmoney.com') >= 0) throw new Error('down');
+      if (url.indexOf('sge.com.cn/graph/Dailyhq') >= 0) {
+        return {
+          time: [
+            ['2026-11-17', '831.79', '832.33', '825.5', '835.12'],
+            ['2026-11-18', '831.19', '810.17', '809.35', '835.6']
+          ]
+        };
+      }
+      if (url.indexOf('SpotService.getMinLine') >= 0) {
+        assert.ok(url.indexOf('symbol=AUTD') >= 0, url);
+        return {
+          result: {
+            data: [
+              ['20:00', '809.000', '809.000', '16', '810.100', '2026-11-19'],
+              ['20:01', '809.200', '809.100', '20'],
+              ['09:00', '795.000', '804.900', '300'],
+              ['11:45', '796.600', '804.954', '174']
+            ]
+          }
+        };
+      }
+      throw new Error('unexpected ' + url);
+    }
+  });
+  const market = createMarket({ http: http });
+
+  const rows = await market.fetchKlineRaw('sge_AUTD', 'day', 1200);
+  assert.equal(rows.length, 3);
+  assert.deepEqual(rows[2].slice(0, 5), ['2026-11-19', 809, 796.6, 809.2, 795]);
+
+  // 周 K 由日 K 聚合，不能拿别的周期冒充
+  const week = await market.fetchKlineRaw('sge_AUTD', 'week', 10);
+  assert.equal(week.length, 1);
+  assert.deepEqual(week[0].slice(0, 5), ['2026-11-19', 831.79, 796.6, 835.6, 795]);
+});
+
+test('上金所快照：东财不可用时用新浪 SGE_AUTD 兜底', async function () {
+  const http = makeHttp({
+    json: function () { throw new Error('down'); },
+    gbk: function (url) {
+      assert.ok(url.indexOf('list=SGE_AUTD') >= 0, url);
+      return 'var hq_str_SGE_AUTD="AUTD,黄金延期,Au(T+D),797.50,0,0,798.00,' +
+        '799.00,795.00,810.10,797.40,797.50,1,2,1234,5678,2026-11-19 15:29:59,-1.56";';
+    }
+  });
+  const market = createMarket({ http: http });
+  const snap = await market.fetchSnapshots(['sge_AUTD']);
+  assert.equal(snap.sge_AUTD.name, '黄金T+D');
+  assert.equal(snap.sge_AUTD.price, 797.5);
+  assert.equal(snap.sge_AUTD.prevClose, 810.1);
+  assert.equal(snap.sge_AUTD.pct, -1.56);
+  assert.ok(Math.abs(snap.sge_AUTD.change + 12.6) < 1e-6);
+});
+
+test('上金所 Au(T+D) 五日：新浪分时的 date 已是交易日，不再按 20:00 挪一天', async function () {
+  const http = makeHttp({
+    json: function (url) {
+      if (url.indexOf('eastmoney.com') >= 0) throw new Error('down');
+      if (url.indexOf('SpotService.getMinLine') >= 0) {
+        return {
+          result: {
+            data: [
+              ['20:00', '809.000', '809.000', '16', '810.100', '2026-11-19'],
+              ['20:01', '809.500', '809.300', '20'],
+              ['09:00', '795.000', '804.900', '300'],
+              ['09:01', '795.500', '804.900', '120']
+            ]
+          }
+        };
+      }
+      throw new Error('unexpected ' + url);
+    }
+  });
+  const market = createMarket({ http: http });
+  const days = await market.fetchFiveDay('sge_AUTD');
+  assert.equal(days.length, 1);
+  assert.equal(days[0].date, '2026-11-19');
+  assert.deepEqual(days[0].points.map(function (p) { return p.t; }), ['20:00', '20:01', '09:00', '09:01']);
+});
+
+test('上金所夜盘归并：周五 20:00 算下周一', function () {
   const rows = [
+    ['2026-11-20 20:30', 10, 10, 10, 10, 0],
+    ['2026-11-23 09:30', 11, 11, 11, 11, 0],
+    ['2026-11-23 10:00', 12, 12, 12, 12, 0]
+  ];
+  const days = buildFiveDayRows(rows, true);
+  assert.equal(days.length, 1);
+  assert.equal(days[0].date, '2026-11-23');
+  assert.equal(days[0].points.length, 3);
+});
+
+test('外盘 5 日按交易日夜盘归并，只取最近 5 天', function () {  const rows = [
     '2026-10-28 07:00,10,10,10,10,0',
     '2026-10-28 23:00,11,11,11,11,0',
     '2026-10-29 07:00,12,12,12,12,0',
@@ -388,7 +619,8 @@ test('外盘周K 用东财 klt=102，分钟 K 用对应 klt；没有分钟数据
 });
 
 test('MIN_INTERVAL / SINA_SCALE 覆盖分时级别与周线', function () {
-  assert.deepEqual(MIN_INTERVAL, { m5: 5, m15: 15, m30: 30, m60: 60 });
+  assert.deepEqual(MIN_INTERVAL, { m1: 1, m5: 5, m15: 15, m30: 30, m60: 60 });
+  assert.equal(SINA_SCALE.m1, 1);
   assert.equal(SINA_SCALE.m5, 5);
   assert.equal(SINA_SCALE.m15, 15);
   assert.equal(SINA_SCALE.m30, 30);
@@ -414,7 +646,8 @@ test('分钟 K 优先走东财：A 股 / 港股 / 美股指数都能拿到多天
     ['hkHSTECH', 'm5', '124.HSTECH', 5],
     ['usDJI', 'm60', '100.DJIA', 60],
     ['hf_XAU', 'm5', '122.XAU', 5],
-    ['em931787', 'm5', '2.931787', 5]
+    ['em931787', 'm5', '2.931787', 5],
+    ['sh600519', 'm1', '1.600519', 1]
   ];
   for (let i = 0; i < cases.length; i++) {
     const c = cases[i];
@@ -436,6 +669,35 @@ test('新浪外盘：东财给不出分钟 K 时返回空，不拿日 K 冒充',
   });
   const market = createMarket({ http: http });
   assert.deepEqual(await market.fetchKlineRaw('hf_GC', 'm15', 320), []);
+  // 1 分钟同样不能拿日 K 冒充
+  assert.deepEqual(await market.fetchKlineRaw('hf_GC', 'm1', 320), []);
+});
+
+test('1 分钟 K 走东财 klt=1；东财没数据时新浪用 scale=1，不落回日 K', async function () {
+  const urls = [];
+  const http = makeHttp({
+    json: function (url) {
+      urls.push(url);
+      if (url.indexOf('eastmoney.com') >= 0) return { data: { klines: [] } };
+      if (url.indexOf('/appstock/app/fqkline/get') >= 0) {
+        return { data: { sh600519: { m1: [['2026-11-19', '1', '2', '3', '0.5', '10']] } } };
+      }
+      return { data: {} };
+    },
+    text: function (url) {
+      urls.push(url);
+      return 'x=([{"day":"2026-11-19 10:09:00","open":"1","close":"2","high":"3","low":"0.5","volume":"10"}]);';
+    }
+  });
+  const market = createMarket({ http: http });
+  const rows = await market.fetchKlineRaw('sh600519', 'm1', 320);
+  assert.deepEqual(rows, [['2026-11-19 10:09:00', '1', '2', '3', '0.5', '10']]);
+  assert.ok(urls.some(function (u) {
+    return u.indexOf('eastmoney.com') >= 0 && u.indexOf('klt=1') >= 0;
+  }), '1 分钟应先请求东财 klt=1');
+  // 腾讯 m1 返回的是日线形状的数据，不能走这条路
+  assert.ok(!urls.some(function (u) { return u.indexOf(',m1,') >= 0; }), '不应请求腾讯 m1');
+  assert.ok(urls.some(function (u) { return u.indexOf('scale=1') >= 0; }), '新浪兜底应使用 scale=1');
 });
 
 test('em 前缀的东财专属指数：快照 / 分时都走 2.xxxxxx', async function () {

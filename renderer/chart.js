@@ -132,10 +132,13 @@
     return m ? m[1].slice(2) + '-' + m[2] : shortDate(d);
   }
 
-  // 分钟时间归一：A 股 "0930" -> "09:30"，外盘 "2026-10-26 05:00" -> "05:00"
+  // 分钟时间归一：A 股 "0930" -> "09:30"，
+  // 外盘 "2026-10-26 05:00" / "2026-11-19 11:27:00" -> "11:27"
   function fmtTime(t) {
     var s = String(t || '');
-    var m = s.match(/(\d{2}):?(\d{2})$/);
+    var m = s.match(/(\d{1,2}):(\d{2})(?::\d{2})?$/);
+    if (m) return (m[1].length < 2 ? '0' + m[1] : m[1]) + ':' + m[2];
+    m = s.match(/(\d{2})(\d{2})$/);
     return m ? m[1] + ':' + m[2] : s;
   }
 
@@ -158,11 +161,19 @@
   document.body.appendChild(tip);
 
   // 十字线骨架：render 时预置进 SVG（默认隐藏），mousemove 只改坐标
-  function crosshairSvg(g) {
+  function crosshairSvg(g, T) {
+    var c = (T && T.sub) || '#8b94a3';
     return '<g id="f-cross" opacity="0" pointer-events="none">' +
-      '<line class="cx" x1="0" y1="0" x2="0" y2="0" stroke="#8b94a3" stroke-width="1" stroke-dasharray="3 3"/>' +
-      '<line class="cy" x1="0" y1="0" x2="0" y2="0" stroke="#8b94a3" stroke-width="1" stroke-dasharray="3 3"/>' +
+      '<line class="cx" x1="0" y1="0" x2="0" y2="0" stroke="' + c + '" stroke-width="1" stroke-dasharray="3 3"/>' +
+      '<line class="cy" x1="0" y1="0" x2="0" y2="0" stroke="' + c + '" stroke-width="1" stroke-dasharray="3 3"/>' +
+      '<text class="cyv" x="0" y="0" fill="' + c + '" font-size="9" text-anchor="start" opacity="0"></text>' +
       '</g>';
+  }
+
+  // 十字横线对应的价格：Y 的反向映射（分时和 K 线都用同一套线性比例）
+  function priceAtY(c, y) {
+    if (!c || !isNum(c.lo) || !isNum(c.hi) || !(c.hi > c.lo)) return NaN;
+    return c.lo + ((c.g.priceBot - y) / c.g.priceH) * (c.hi - c.lo);
   }
 
   function setMaLegend(v) {
@@ -192,11 +203,29 @@
       lx.setAttribute('x1', info.x.toFixed(1));
       lx.setAttribute('x2', info.x.toFixed(1));
       lx.setAttribute('y1', c.g.priceTop.toFixed(1));
-      lx.setAttribute('y2', c.g.volBot.toFixed(1));
+      // 竖线一直贯到 MACD 底，横线在哪个区间都能和竖线交叉
+      lx.setAttribute('y2', (isNum(c.g.macdBot) ? c.g.macdBot : c.g.volBot).toFixed(1));
       ly.setAttribute('x1', c.g.padL.toFixed(1));
       ly.setAttribute('x2', (c.g.padL + c.g.plotW).toFixed(1));
       ly.setAttribute('y1', info.y.toFixed(1));
       ly.setAttribute('y2', info.y.toFixed(1));
+      // 横线数值：只在价格区内显示（成交量 / MACD 区没有对应的价格刻度）
+      var lv = cross.querySelector('.cyv');
+      if (lv) {
+        var pv = (info.y >= c.g.priceTop - 0.5 && info.y <= c.g.priceBot + 0.5)
+          ? priceAtY(c, info.y)
+          : NaN;
+        if (isNum(pv)) {
+          var ty = info.y - 4;
+          if (ty - 7 < c.g.priceTop) ty = info.y + 11;
+          lv.textContent = fx(pv);
+          lv.setAttribute('x', (c.g.padL + 2).toFixed(1));
+          lv.setAttribute('y', ty.toFixed(1));
+          lv.setAttribute('opacity', '1');
+        } else {
+          lv.setAttribute('opacity', '0');
+        }
+      }
     }
     tip.innerHTML = info.lines.join('<br/>');
     tip.style.display = 'block';
@@ -230,7 +259,8 @@
     return {
       lines: lines,
       x: c.X(best.x),
-      y: c.Y(best.p)
+      // 横线跟鼠标自由上下（价格 / 成交量区都能对比高度），竖线仍吸附到最近的分钟点
+      y: Math.max(c.g.priceTop, Math.min(c.g.volBot, sy))
     };
   }
 
@@ -258,11 +288,14 @@
       '涨跌 ' + fChg(r.c - r.o) + '  ' + fPct(chg)
     ];
     if (c.showVol) lines.push('量 ' + fVol(r.v));
+    // 横线在整张图里自由上下（价格 / 成交量 / MACD 都能到位，方便对比高度），
+    // 只夹在绘图区上下边缘，避免压到横轴日期上
+    var bottom = isNum(c.g.macdBot) ? c.g.macdBot : c.g.volBot;
     return {
       lines: lines,
-      // 虚线贴着鼠标走，不再吸附到柱子中心，移动时不会「粘住」或冻在右端
-      x: sx,
-      y: c.Y(r.h)
+      // 竖线固定在当前蜡烛的正中间（合并后的柱子也按桶中心）
+      x: c.Xc(i),
+      y: Math.max(c.g.priceTop, Math.min(bottom, sy))
     };
   }
 
@@ -412,9 +445,37 @@
     else openLevelMenu();
   }
 
+  // 24 小时品种（外盘 / 美元指数 / 上金所T+D）：数据按数组下标排，
+  // 夜盘和午休的空档被压掉了，所以刻度只能标在每个点自己的真实时间上。
+  // 优先取整点（4 小时 → 2 小时 → 1 小时），取不够就均匀挑几个。
+  function intradayTicks(p) {
+    var arr = (p && p.days && p.days[0] && p.days[0].points) || [];
+    if (arr.length < 2) return [];
+    var steps = [240, 120, 60];
+    for (var s = 0; s < steps.length; s++) {
+      var out = [];
+      var last = -1e9;
+      for (var i = 0; i < arr.length; i++) {
+        var m = String(arr[i].t || '').match(/(\d{1,2}):(\d{2})/);
+        if (!m) continue;
+        var hh = parseInt(m[1], 10) % 24;
+        var mm = hh * 60 + parseInt(m[2], 10);
+        if (mm % steps[s] !== 0) continue;
+        if (i - last < 30) continue;   // 夜盘跨 0 点时别把同一个整点标两遍
+        last = i;
+        out.push([i, (hh < 10 ? '0' + hh : String(hh)) + ':' + m[2]]);
+      }
+      if (out.length >= 3) return out;
+    }
+    // 跨度太短（只有几个小时）：首 / 中 / 尾，标真实时间
+    var idx = [0, Math.floor((arr.length - 1) / 2), arr.length - 1];
+    return idx.map(function (k) { return [k, fmtTime(arr[k].t)]; });
+  }
+
   function sessionTicks(p, session) {
     var market = (p && p.market) || '';
     var code = (p && p.code) || '';
+    if (session >= 600 || market === 'hf' || market === 'sge') return intradayTicks(p);
     if (market === 'hk-index') {
       // 中证口径的港股指数：09:30-11:30 + 13:00-16:00，午休压缩，共 302 个槽位
       return [[0, '09:30'], [90, '11:00'], [121, '13:00'], [241, '15:00'], [session - 1, '16:00']];
@@ -669,10 +730,10 @@
       }
     }
 
-    s.push(crosshairSvg(g));
+    s.push(crosshairSvg(g, T));
     s.push('</svg>');
     chartEl.innerHTML = s.join('');
-    tipCtx = { type: 'minute', g: g, X: X, Y: Y, pts: pts, days: days, session: session, total: total, prec: p.prevClose, xs: xs, xe: xe, showVol: hasVol, lead: isLead, dataEnd: pts[pts.length - 1].x / (total - 1) };
+    tipCtx = { type: 'minute', g: g, X: X, Y: Y, lo: lo, hi: hi, pts: pts, days: days, session: session, total: total, prec: p.prevClose, xs: xs, xe: xe, showVol: hasVol, lead: isLead, dataEnd: pts[pts.length - 1].x / (total - 1) };
   }
 
   /* ---------------- K 线（日 / 周 / 月 / 分时级别） ---------------- */
@@ -926,12 +987,12 @@
       s.push(axisLabel(Xc(idx), g.axisY, lbl, g.W, T.sub));
     }
 
-    s.push(crosshairSvg(g));
+    s.push(crosshairSvg(g, T));
     s.push('</svg>');
     chartEl.innerHTML = s.join('');
     // 光标按实际柱子网格定位：合并只是画的时候省事，提示不能跟着偏一根
-    tipCtx = { type: 'day', g: g, Y: Y, rows: rows, step: stepRaw, barStep: step,
-      barI0: i0, barAgg: agg, barCount: bars.length,
+    tipCtx = { type: 'day', g: g, Y: Y, lo: lo, hi: hi, rows: rows, step: stepRaw, barStep: step,
+      barI0: i0, barAgg: agg, barCount: bars.length, Xc: Xc,
       n: n, xs: xs, xe: xe, i0: i0, i1: i1, showVol: hasVol,
       maDefault: {
         ma5: legendVals ? legendVals.ma5 : NaN,
