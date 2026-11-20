@@ -568,7 +568,8 @@
   }
 
   function isCodeLike(s) {
-    return /^(sh|sz|bj|hk|us|em)[a-z0-9.]{1,12}$/i.test(s) || /^\d{6}$/.test(s);
+    // sh/sz/bj/hk/us/em 常规代码 + hf 外盘期货 / sge 上金所 / cf 国内期货
+    return /^(sh|sz|bj|hk|us|em|hf|sge|cf)[a-z0-9._]{1,12}$/i.test(s) || /^\d{6}$/.test(s);
   }
 
   function addByCode(code, hintName) {

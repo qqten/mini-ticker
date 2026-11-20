@@ -116,6 +116,10 @@ test('sessionMinutes 按市场返回分钟数', function () {
   assert.equal(sessionMinutes('hf_XAU'), 1440);
   assert.equal(sessionMinutes('usDXY'), 1440);
   assert.equal(sessionMinutes('sge_AUTD'), 660);
+  // 上金所现货：黄金9999 / 白银9999 和 T+D 同一个交易时段
+  assert.equal(sessionMinutes('sge_AU9999'), 660);
+  // 国债期货收盘比 A 股晚 15 分钟（15:15），多 15 个槽位
+  assert.equal(sessionMinutes('cf_TM'), 257);
 });
 
 test('sessionMinutes 能认出港股主题的东财指数', function () {

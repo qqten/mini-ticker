@@ -28,20 +28,64 @@ const NAMES = {
   hf_HG: 'COMEX铜',
   hf_NG: '美国天然气',
   usDXY: '美元指数',
-  sge_AUTD: '黄金T+D'
+  // 上海黄金交易所现货 / 延期
+  sge_AUTD: '黄金T+D',
+  sge_AU9999: '黄金9999',
+  sge_AU9995: '黄金9995',
+  sge_iAu999: '国际版黄金9999',
+  sge_AG9999: '白银9999',
+  sge_AGTD: '白银T+D',
+  sge_PT9995: '铂金9995',
+  // 中金所国债期货主连
+  cf_TSM: '二债主连',
+  cf_TFM: '五债主连',
+  cf_TM: '十债主连',
+  cf_TLM: '三十债主连',
+  // 交易所债券指数（腾讯 / 新浪都有行情，只是搜索接口查不到）
+  sh000012: '国债指数',
+  sh000013: '企债指数'
 };
 
-// 东财特殊品种（非 hf_ 前缀）：美元指数等
-const EM_SECID = {
-  usDXY: '100.UDI',
-  // 上海黄金交易所延期合约走东财 118 市场，分时 / 5 分钟 K 都能取
-  sge_AUTD: '118.AUTD'
-};
-
-// 上海黄金交易所 T+D：内部代码 sge_ + 合约名。
-// 新浪分时 / 快照认 AUTD，上金所官网日 K 认 Au(T+D)。
+// 上海黄金交易所现货 / 延期：内部代码 sge_ + 合约名。
+// 东财 118 市场的 secid 后缀和合约名基本一致（AUTD / AU9999）；
+// 新浪分时 / 快照认新浪代码，上金所官网日 K 认 instid。
+// 官网日 K 没有 international 版，instid 留空表示只能走东财。
 const SGE_SYMBOL = {
-  sge_AUTD: { sina: 'AUTD', instid: 'Au(T+D)' }
+  sge_AUTD: { name: '黄金T+D', em: '118.AUTD', sina: 'AUTD', instid: 'Au(T+D)' },
+  sge_AU9999: { name: '黄金9999', em: '118.AU9999', sina: 'AU9999', instid: 'Au99.99' },
+  sge_AU9995: { name: '黄金9995', em: '118.AU9995', sina: 'AU9995', instid: 'Au99.95' },
+  sge_iAu999: { name: '国际版黄金9999', em: '118.iAu999', sina: '', instid: '' },
+  sge_AG9999: { name: '白银9999', em: '118.AG9999', sina: 'AG9999', instid: 'Ag99.99' },
+  sge_AGTD: { name: '白银T+D', em: '118.AGTD', sina: 'AGTD', instid: 'Ag(T+D)' },
+  sge_PT9995: { name: '铂金9995', em: '118.PT9995', sina: 'PT9995', instid: 'Pt99.95' }
+};
+
+// 中金所国债期货：东财 220 市场。主连（TM/TFM/TSM/TLM）跟着主力合约换月，
+// 盯盘看主连就够，具体月份合约（220.T2612 这种）不列。
+const CF_EM_SECID = {
+  cf_TSM: '220.TSM',
+  cf_TFM: '220.TFM',
+  cf_TM: '220.TM',
+  cf_TLM: '220.TLM'
+};
+
+// 东财特殊品种（非 hf_ 前缀）：美元指数、上金所现货、国债期货。
+// 腾讯 / 新浪都没有这些行情的完整分时与 K 线，统一走东财。
+const EM_SECID = {
+  usDXY: '100.UDI'
+};
+Object.keys(SGE_SYMBOL).forEach(function (code) {
+  if (SGE_SYMBOL[code].em) EM_SECID[code] = SGE_SYMBOL[code].em;
+});
+Object.keys(CF_EM_SECID).forEach(function (code) {
+  EM_SECID[code] = CF_EM_SECID[code];
+});
+
+// 搜索接口覆盖不到、只能按名称本地匹配的品种（腾讯 smartbox 搜「国债指数」
+// 只给场外基金，搜「黄金9999」直接返回空）。值同时作为候选列表的类型标签。
+const LOCAL_SEARCH_LABEL = {
+  sh000012: '债券指数',
+  sh000013: '债券指数'
 };
 
 // 外盘期货（hf_）→ 东方财富 secid 映射（腾讯不提供外盘分时/K线）
@@ -197,6 +241,8 @@ module.exports = {
   NAMES,
   EM_SECID,
   SGE_SYMBOL,
+  CF_EM_SECID,
+  LOCAL_SEARCH_LABEL,
   HF_EM_SECID,
   INDEX_EM_SECID,
   DEFAULT_WATCHLIST,

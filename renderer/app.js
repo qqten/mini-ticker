@@ -455,11 +455,14 @@
     // 共约 1380 个分钟点。都按交易时间占比映射，开盘初期数据少就只占左边一段。
     var TOTAL_MINUTES_A = 240;
     var TOTAL_MINUTES_HF = 1380;
-    // 上金所 T+D：20:00-02:30 + 09:00-11:30 + 13:30-15:30，约 660 分钟
+    // 上金所现货 / T+D：20:00-02:30 + 09:00-11:30 + 13:30-15:30，约 660 分钟
     var TOTAL_MINUTES_SGE = 660;
+    // 国债期货：09:30-11:30 + 13:00-15:15，257 个分钟点
+    var TOTAL_MINUTES_CF = 257;
     var code = item.code || '';
     var total = /^sge_/i.test(code) ? TOTAL_MINUTES_SGE
-      : (/^hf_/i.test(code) || /^usDXY$/i.test(code) ? TOTAL_MINUTES_HF : TOTAL_MINUTES_A);
+      : (/^cf_/i.test(code) ? TOTAL_MINUTES_CF
+        : (/^hf_/i.test(code) || /^usDXY$/i.test(code) ? TOTAL_MINUTES_HF : TOTAL_MINUTES_A));
     var xScale = (currentPeriod === 'minute')
       ? (VW / total)
       : (VW / Math.max(1, pts.length - 1));

@@ -127,6 +127,41 @@ const SCENARIOS = [
     config: baseConfig({ symbols: ['em931787'], watchlist: ['em931787'] })
   },
   {
+    // 上金所现货 / 国债期货 / 债券指数：本地品种表能识别，东财 118 / 220 市场快照按 f59 还原价格
+    name: 'spot-bond-list',
+    shot: 'main',
+    screenshot: 'self.png',
+    env: {
+      TICKER_SHOT_EVAL: "(function(){var rows=document.querySelectorAll('#app .row');var out=[];" +
+        "for(var i=0;i<rows.length;i++){out.push(rows[i].dataset.code+'|'+" +
+        "rows[i].querySelector('.name').textContent);}" +
+        "return JSON.stringify(out);})()"
+    },
+    expect: [/sge_AU9999\|黄金9999/, /cf_TM\|十债主连/, /sh000012\|国债指数/],
+    config: baseConfig({
+      symbols: ['sge_AU9999', 'cf_TM', 'sh000012'],
+      watchlist: ['sge_AU9999', 'cf_TM', 'sh000012']
+    })
+  },
+  {
+    // 黄金9999 聚焦图表：分时走上金所 660 槽位口径
+    name: 'spot-focus',
+    shot: 'focus',
+    screenshot: 'focus.png',
+    env: { TICKER_SHOT_FOCUS_TAB: 'minute' },
+    expect: [/\[focus\] 展开图表 sge_AU9999/],
+    config: baseConfig({ symbols: ['sge_AU9999'], watchlist: ['sge_AU9999'] })
+  },
+  {
+    // 十债主连 聚焦图表：日 K 走东财 220 市场
+    name: 'bond-focus',
+    shot: 'focus',
+    screenshot: 'focus.png',
+    env: { TICKER_SHOT_FOCUS_TAB: 'day' },
+    expect: [/\[focus\] 展开图表 cf_TM/],
+    config: baseConfig({ symbols: ['cf_TM'], watchlist: ['cf_TM'] })
+  },
+  {
     name: 'settings',
     shot: 'settings',
     screenshot: 'settings.png',

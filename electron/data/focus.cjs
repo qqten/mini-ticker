@@ -19,8 +19,10 @@ const FOCUS_SESSION_HK = 332;  // 港股：09:30-12:00 + 13:00-16:00
 const FOCUS_SESSION_HK_INDEX = 302;
 const FOCUS_SESSION_US = 392;  // 美股：09:30-16:00（东部时间）
 const FOCUS_SESSION_HF = 1440; // 外盘期货/美元指数：近乎 24 小时连续交易（实际约 1380 分钟），留足余量
-// 上金所 T+D：20:00-02:30 + 09:00-11:30 + 13:30-15:30，共 660 个分钟槽位
+// 上金所 T+D / 现货：20:00-02:30 + 09:00-11:30 + 13:30-15:30，共 660 个分钟槽位
 const FOCUS_SESSION_SGE = 660;
+// 中金所国债期货：09:30-11:30 + 13:00-15:15，比 A 股多到最后 15:15，共 257 个槽位
+const FOCUS_SESSION_CF = 257;
 const FOCUS_TTL = { minute: 15000, five: 60000, day: 60000, week: 60000, month: 60000, min: 30000 };
 
 // 日K 往后翻要靠历史：腾讯 fqkline 实测最多给到 1200 根（约 5 年，最早 2021-11），
@@ -46,6 +48,7 @@ function sessionMinutes(code, name) {
   // 外盘期货 / 美元指数：近乎 24 小时连续交易，按 1440 个分钟槽位画
   if (/^hf_/i.test(code) || /^usDXY$/i.test(code)) return FOCUS_SESSION_HF;
   if (/^sge_/i.test(code)) return FOCUS_SESSION_SGE;
+  if (/^cf_/i.test(code)) return FOCUS_SESSION_CF;
   if (isHkSymbol(code, name)) return FOCUS_SESSION_HK;
   if (/^us/i.test(code)) return FOCUS_SESSION_US;
   return FOCUS_SESSION_A;
@@ -326,8 +329,9 @@ function createFocusService(options) {
     let session = sessionMinutes(code, name);
     // 市场只用来选分时横轴口径：美元指数不是美股，和 hf_ / 上金所一样按真实时钟标刻度
     let marketTag = hk ? 'hk' : (/^sge_/i.test(code) ? 'sge'
-      : (/^hf_/i.test(code) || /^usDXY$/i.test(code) ? 'hf'
-        : (/^us/i.test(code) ? 'us' : 'a')));
+      : (/^cf_/i.test(code) ? 'cf'
+        : (/^hf_/i.test(code) || /^usDXY$/i.test(code) ? 'hf'
+          : (/^us/i.test(code) ? 'us' : 'a'))));
     if (hkIndex) {
       session = FOCUS_SESSION_HK_INDEX;
       marketTag = 'hk-index';

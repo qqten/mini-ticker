@@ -10,7 +10,7 @@ const {
   unescapeUnicode,
   emIndexSecid
 } = require('../core/symbols.cjs');
-const { NAMES, EM_SECID, HF_EM_SECID, INDEX_EM_SECID, SGE_SYMBOL, TYPE_LABEL } = require('../core/constants.cjs');
+const { NAMES, EM_SECID, HF_EM_SECID, INDEX_EM_SECID, SGE_SYMBOL, LOCAL_SEARCH_LABEL, TYPE_LABEL } = require('../core/constants.cjs');
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36';
 
@@ -40,6 +40,33 @@ const MIN_INTERVAL = { m1: 1, m5: 5, m15: 15, m30: 30, m60: 60 };
 
 function isMinInterval(interval) {
   return Object.prototype.hasOwnProperty.call(MIN_INTERVAL, interval);
+}
+
+// 搜索接口覆盖不到的品种：腾讯 smartbox 查不到上金所现货 / 国债期货 / 债券指数
+// （搜「黄金9999」直接返回空，搜「国债指数」只给场外基金），只能按名称在本地表里匹配。
+function isLocalSearchCode(code) {
+  return /^(hf|sge|cf)_/i.test(code) ||
+    Object.prototype.hasOwnProperty.call(EM_SECID, code) ||
+    Object.prototype.hasOwnProperty.call(LOCAL_SEARCH_LABEL, code);
+}
+
+// 本地匹配出来的候选，市场标签和类型标签都按前缀 / 名称表给
+function localMarketOf(code) {
+  if (/^sge_/i.test(code)) return 'sge';
+  if (/^cf_/i.test(code)) return 'cf';
+  if (/^hf_/i.test(code)) return 'hf';
+  if (/^usDXY$/i.test(code)) return 'em';
+  const m = /^(sh|sz|bj|hk|us)/i.exec(code);
+  return m ? m[1].toLowerCase() : 'em';
+}
+
+function localTypeLabelOf(code) {
+  if (/^sge_/i.test(code)) return '上金所';
+  if (/^cf_/i.test(code)) return '国债期货';
+  const label = LOCAL_SEARCH_LABEL[code];
+  if (label) return label;
+  if (/^hf_/i.test(code)) return '外盘期货';
+  return '';
 }
 
 // 分钟 K 的东财 secid：外盘期货用 HF_EM_SECID，指数/个股用 INDEX_EM_SECID，
@@ -266,7 +293,7 @@ function createMarket(options) {
       let d = null;
       try {
         const j = await http.fetchJson('https://push2.eastmoney.com/api/qt/stock/get?secid=' + secid +
-          '&fields=f43,f44,f45,f46,f57,f58,f60,f170', {
+          '&fields=f43,f44,f45,f46,f57,f58,f59,f60,f170', {
           headers: HEADERS, timeout: 4000, retries: 1, tag: 'em-snapshot'
         });
         d = j && j.data;
@@ -274,9 +301,12 @@ function createMarket(options) {
         // 单个特殊品种失败不影响其它标的。
       }
       if (d) {
-        // 东财价格放大了 100 倍（美元指数两位小数）
-        const price = (d.f43 || 0) / 100;
-        const prev = (d.f60 || 0) / 100;
+        // 东财价格是整数，按 f59 给的小数位数还原：美元指数 / 上金所现货 2 位，
+        // 国债期货 3 位（110110 是 110.110）。缺省按 2 位。
+        const decimals = isFinite(num(d.f59)) ? Math.max(0, Math.min(4, num(d.f59))) : 2;
+        const scale = Math.pow(10, decimals);
+        const price = (d.f43 || 0) / scale;
+        const prev = (d.f60 || 0) / scale;
         out[code] = {
           name: NAMES[code] || d.f58 || code,
           price: price,
@@ -507,31 +537,32 @@ function createMarket(options) {
     // 6 位数字可能是股票、场外基金，也可能是东财专属指数，先交给搜索判断
     const six = /^\d{6}$/.test(q) ? q : '';
 
-    // 用户直接输入代码（如 hf_GC、sh518880）时，即使搜索接口没有也直接返回
+    // 用户直接输入代码（如 hf_GC、sge_AU9999、cf_TM、sh518880）时，即使搜索接口没有也直接返回
     if (isValidCode(q) && !six) {
       out.push({
         code: q,
         name: NAMES[q] || q,
-        market: SGE_SYMBOL[q] ? 'sge' : q.slice(0, 2).toLowerCase(),
+        market: localMarketOf(q),
         type: '',
-        typeLabel: SGE_SYMBOL[q] ? '黄金T+D' : ''
+        typeLabel: localTypeLabelOf(q)
       });
       seen[q] = true;
     }
 
-    // 外盘期货（hf_）、东财特殊品种（usDXY）和上金所 T+D 搜索接口不覆盖，按名称本地匹配
+    // 外盘期货（hf_）、东财特殊品种（usDXY / 上金所现货 / 国债期货）和债券指数
+    // 搜索接口都不覆盖，按名称本地匹配
     const ql = q.toLowerCase();
     Object.keys(NAMES).forEach(function (code) {
-      if (!/^hf_/i.test(code) && !EM_SECID[code] && !SGE_SYMBOL[code]) return;
+      if (!isLocalSearchCode(code)) return;
       const name = NAMES[code];
       if (seen[code]) return;
       if (name.toLowerCase().indexOf(ql) >= 0 || code.toLowerCase().indexOf(ql) >= 0) {
         out.push({
           code: code,
           name: name,
-          market: SGE_SYMBOL[code] ? 'sge' : (/^hf_/i.test(code) ? 'hf' : 'em'),
+          market: localMarketOf(code),
           type: '',
-          typeLabel: SGE_SYMBOL[code] ? '黄金T+D' : '外盘期货'
+          typeLabel: localTypeLabelOf(code)
         });
         seen[code] = true;
       }
@@ -842,7 +873,7 @@ function createMarket(options) {
   const sgeDailyCache = {};
   async function fetchSgeDailyRows(code) {
     const sge = SGE_SYMBOL[code];
-    if (!sge) return [];
+    if (!sge || !sge.instid) return [];
     const now = Date.now();
     const hit = sgeDailyCache[code];
     if (hit && now - hit.at < 60 * 1000) return hit.rows;
@@ -873,7 +904,7 @@ function createMarket(options) {
   const sgeMinCache = {};
   async function fetchSgeMinute(code) {
     const sge = SGE_SYMBOL[code];
-    if (!sge) return { date: '', prevClose: NaN, points: [] };
+    if (!sge || !sge.sina) return { date: '', prevClose: NaN, points: [] };
     const now = Date.now();
     const hit = sgeMinCache[code];
     if (hit && now - hit.at < 15 * 1000) return hit.data;
@@ -931,7 +962,7 @@ function createMarket(options) {
   // 上金所快照兜底（GBK）：AUTD,黄金延期,Au(T+D),最新,?,昨结,开,高,低,昨收,买,卖,买量,卖量,量,额,时间,涨跌幅
   async function fetchSinaSgeSnapshot(code) {
     const sge = SGE_SYMBOL[code];
-    if (!sge) return null;
+    if (!sge || !sge.sina) return null;
     const text = await http.fetchGbk('https://hq.sinajs.cn/list=SGE_' + sge.sina, SINA_HEADERS, {
       timeout: 3500, retries: 1, tag: 'sina-sge'
     });

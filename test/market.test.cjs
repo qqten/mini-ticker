@@ -135,14 +135,32 @@ test('searchSymbols 解析 smartbox，并保留本地外盘期货匹配', async 
   assert.deepEqual(local.map(function (x) { return x.code; }).sort(), ['hf_CL', 'hf_OIL']);
   assert.equal(local[0].typeLabel, '外盘期货');
 
-  // 黄金T+D：中文名和 autd 都能搜到，带上自己的类型标签
+  // 上海黄金交易所：中文名和 autd 都能搜到，类型标签统一是「上金所」
   const autd = await market2.searchSymbols('黄金T+D');
   const gold = autd.find(function (x) { return x.code === 'sge_AUTD'; });
   assert.ok(gold);
-  assert.equal(gold.typeLabel, '黄金T+D');
+  assert.equal(gold.typeLabel, '上金所');
   assert.equal(gold.market, 'sge');
   const byCode = await market2.searchSymbols('autd');
   assert.ok(byCode.some(function (x) { return x.code === 'sge_AUTD'; }));
+
+  // 现货黄金9999 / 白银：腾讯搜索全空，靠本地名称表兜底
+  const spot = await market2.searchSymbols('黄金9999');
+  assert.ok(spot.some(function (x) { return x.code === 'sge_AU9999'; }));
+  assert.equal(spot[0].name, '黄金9999');
+  const silver = await market2.searchSymbols('白银9999');
+  assert.ok(silver.some(function (x) { return x.code === 'sge_AG9999'; }));
+
+  // 国债期货主连 + 债券指数：同样只能本地匹配
+  const bondFuture = await market2.searchSymbols('十债');
+  const tenYear = bondFuture.find(function (x) { return x.code === 'cf_TM'; });
+  assert.ok(tenYear);
+  assert.equal(tenYear.typeLabel, '国债期货');
+  assert.equal(tenYear.market, 'cf');
+  const bondIndex = await market2.searchSymbols('国债指数');
+  const shBond = bondIndex.find(function (x) { return x.code === 'sh000012'; });
+  assert.ok(shBond);
+  assert.equal(shBond.typeLabel, '债券指数');
 });
 
 test('fetchFundEstimates / fetchFundNav 解析并缓存净值', async function () {
@@ -439,6 +457,67 @@ test('上金所 Au(T+D)：日 K 用官网日线，并把今天这段实时分时
   const week = await market.fetchKlineRaw('sge_AUTD', 'week', 10);
   assert.equal(week.length, 1);
   assert.deepEqual(week[0].slice(0, 5), ['2026-11-19', 831.79, 796.6, 835.6, 795]);
+});
+
+test('上金所现货快照：东财 118 市场按 f59 小数位缩放，各品种用自己的 secid', async function () {
+  const seen = [];
+  const http = makeHttp({
+    json: function (url) {
+      seen.push(url);
+      if (url.indexOf('secid=118.AU9999') >= 0) {
+        return { data: { f43: 75850, f57: 'AU9999', f58: 'AU9999', f59: 2, f60: 80193, f170: -541 } };
+      }
+      if (url.indexOf('secid=118.AG9999') >= 0) {
+        return { data: { f43: 1010000, f57: 'AG9999', f58: 'AG9999', f59: 2, f60: 1087800, f170: -715 } };
+      }
+      throw new Error('unexpected ' + url);
+    }
+  });
+  const market = createMarket({ http: http });
+  const snap = await market.fetchSnapshots(['sge_AU9999', 'sge_AG9999']);
+  assert.equal(snap.sge_AU9999.name, '黄金9999');
+  assert.equal(snap.sge_AU9999.price, 758.5);
+  assert.equal(snap.sge_AU9999.prevClose, 801.93);
+  assert.equal(snap.sge_AU9999.pct, -5.41);
+  assert.equal(snap.sge_AG9999.name, '白银9999');
+  assert.equal(snap.sge_AG9999.price, 10100);
+  assert.equal(seen.length, 2);
+});
+
+test('国债期货快照：三位小数不能按两位还原（110110 是 110.110）', async function () {
+  const http = makeHttp({
+    json: function (url) {
+      assert.ok(url.indexOf('secid=220.TM') >= 0, url);
+      return { data: { f43: 110110, f57: 'TM', f58: '十债主连', f59: 3, f60: 110145, f170: -2 } };
+    }
+  });
+  const market = createMarket({ http: http });
+  const snap = await market.fetchSnapshots(['cf_TM']);
+  assert.equal(snap.cf_TM.name, '十债主连');
+  assert.equal(snap.cf_TM.price, 110.11);
+  assert.equal(snap.cf_TM.prevClose, 110.145);
+  assert.ok(Math.abs(snap.cf_TM.change + 0.035) < 1e-9);
+});
+
+test('国债期货主连：K 线走东财 220 市场，价格不再缩放', async function () {
+  const http = makeHttp({
+    json: function (url) {
+      assert.ok(url.indexOf('secid=220.TM') >= 0, url);
+      assert.ok(url.indexOf('klt=101') >= 0, url);
+      return {
+        data: {
+          klines: [
+            '2026-11-19,110.080,110.145,110.160,110.060,134446',
+            '2026-11-20,110.160,110.110,110.180,110.095,71142'
+          ]
+        }
+      };
+    }
+  });
+  const market = createMarket({ http: http });
+  const rows = await market.fetchKlineRaw('cf_TM', 'day', 10);
+  assert.equal(rows.length, 2);
+  assert.deepEqual(rows[1].slice(0, 5), ['2026-11-20', 110.16, 110.11, 110.18, 110.095]);
 });
 
 test('上金所快照：东财不可用时用新浪 SGE_AUTD 兜底', async function () {

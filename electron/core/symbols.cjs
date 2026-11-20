@@ -49,7 +49,8 @@ function isHkSymbol(code, name) {
 
 function isValidCode(c) {
   if (typeof c !== 'string') return false;
-  return /^(sh|sz|bj|hk|us|hf|sge)[a-z0-9._]{1,12}$/i.test(c) ||
+  // sh/sz/bj 沪深北 · hk 港股 · us 美股 · hf 外盘期货 · sge 上金所 · cf 国内期货
+  return /^(sh|sz|bj|hk|us|hf|sge|cf)[a-z0-9._]{1,12}$/i.test(c) ||
     /^\d{6}$/.test(c) || /^em\d{6}$/i.test(c);
 }
 
